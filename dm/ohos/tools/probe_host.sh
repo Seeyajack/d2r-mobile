@@ -47,6 +47,7 @@ CF=(
     -I "$DM_ROOT/gfx"
     -D__OHOS__=1
     -DDM_LOG_TO_HILOG=1
+    -D_GNU_SOURCE=1
     -include shim_prefix.h
 )
 

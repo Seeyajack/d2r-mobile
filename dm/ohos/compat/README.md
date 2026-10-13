@@ -42,6 +42,7 @@
 | `sys/clonefile.h` | APFS 写时复制克隆 | 递归拷贝（功能等价、代价更高） | 功能等价 |
 | `sys/xattr.h` | 扩展属性（**6 参数**版） | 映射到 Linux 的 4/5 参数接口 | 真实现 |
 | `malloc/malloc.h` | malloc zone 统计 | 填 0 + 明确说明 | 诚实降级 |
+| `mach-o/dyld.h` | `_NSGetExecutablePath` | 返回 `$DM_ROOT/D2R`，让上游拼出的 `/dm/derived.tsv` 落到 `$DM_ROOT/dm/` | 换落点 |
 | `shim_prefix.h` | 一批散用符号 | `strlcpy`/`strlcat`/`arc4random*`/`renamex_np`/`st_mtimespec`/`CLOCK_UPTIME_RAW` | 真实现 |
 
 实现代码在 `src/`，分四个文件：`dm_compat_str.c`、`dm_compat_hash.c`、`dm_compat_mach.c`、`dm_compat_fs.c`。
@@ -81,22 +82,37 @@ Linux/鸿蒙没有"非特权读另一个线程寄存器"的接口，`ptrace` 要
 ## 四、实测现状（`tools/probe_host.sh` 可复现）
 
 ```
-共 71 个 .c，通过 62  未通过 9
+共 71 个 .c，通过 66   未通过 5
 ```
 
-**未通过的 9 个，分成三类，性质完全不同：**
+**未通过的 5 个，分成两类，性质完全不同：**
 
 | 文件 | 卡在哪 | 性质 |
 |---|---|---|
 | `diag.c` / `dm_bright.c` / `dm_vault_ui.c` | 缺 `dm_hud_exp.h` / `dm_bright_levels.inc` / `dm_vault_tab.h` | **不是移植问题**：这三张表要用**你自己的游戏文件**生成（阶段 2） |
-| `hle.c` | `mach-o/getsect.h` | 已知项：改用 `__start_/__stop_` 定位自定义 ELF 段（`loader.c` 已有同样分叉可照抄） |
-| `hle_audio.c` | `AudioToolbox` | **音频后端要重写**（CoreAudio → 鸿蒙音频服务），独立一块 |
-| `hle_lifecycle.c` | `dispatch/dispatch.h` | GCD + **block 字面量**，需要一并解决 block 运行时 |
-| `crash.c` | `mcontext_t` 在两边的定义不同 | 信号上下文结构差异，要按字段改 |
-| `hle_fdstat.c` | `F_GETPATH` | 苹果的 fcntl 扩展；等价做法是 `readlink("/proc/self/fd/N")` |
-| `dm_textbox_core.c` | 整数赋给指针 | 疑似苹果编址假设，要单独看 |
+| `hle_audio.c` | `AudioToolbox` | **不是"垫"的事**：CoreAudio AudioUnit → 鸿蒙音频服务，是换一个后端 |
+| `hle_lifecycle.c` | `dispatch/dispatch.h` | GCD + **block 字面量**，要一并解决 block 运行时 |
 
-**这 6 个（去掉 3 个等游戏文件的）就是"把宿主编进 `libdmohos.so`"剩下要攻的全部。**
+**也就是说：剩下要动脑的只有 2 块**（音频后端、dispatch+block），另外 3 个等游戏文件。
+
+### 另外两件在编译探针之外、但已经验证掉的事
+
+1. **登记表段机制（链路级验证通过）**。`hle.h` 的 `HLE` / `HLE_FORCE` 宏原本写的是苹果段名
+   `__DATA,swhle` / `__DATA,swforce`；而 ELF 上段名必须是**合法的 C 标识符**，链接器才会生成
+   `__start_<名>` / `__stop_<名>` 符号。鸿蒙侧改成 `dmswhle` / `dmswforce` 后实测：
+
+   ```
+   ✅ 链接成功
+   dmswhle    32 字节 = 2 条目 × 16 字节    __start_dmswhle   0x3cb8  __stop_dmswhle   0x3cd8
+   dmswforce  24 字节 = 1 条目 × 24 字节    __start_dmswforce 0x3cd8  __stop_dmswforce 0x3cf0
+   ```
+
+   > **顺手修掉一个真 bug**：`dm/ohos/map_image_ohos.c` 里的 `dm_ohos_force_table()` 一直在找
+   > `__start_dmswforce`，但宏写的却是 `__DATA,swforce`——**两边的名字从来没对上过**，
+   > 强制接管表在鸿蒙侧永远是空的。空表的后果不是"少接管几个函数"，而是
+   > `nn::fs::Commit` 这类服务会解析到 SDK 自己的实现、去找鸿蒙上根本不存在的 fsp-srv 服务。
+   > 现在对上了。
+
 
 ---
 
@@ -108,6 +124,12 @@ Linux/鸿蒙没有"非特权读另一个线程寄存器"的接口，`ptrace` 要
 | `AudioToolbox` | 不是"垫"的事，是**换一个音频后端**（CoreAudio AudioUnit → 鸿蒙音频服务） |
 | `CoreFoundation` | `dm_i18n.c` 里已被 `#if TARGET_OS_IPHONE` 守卫排除（垫片的 `TargetConditionals.h` 让它自动落到鸿蒙侧），无需处理 |
 | 上游直接写的 `fprintf(stderr, ...)` | `dm.h` 的 `LOG()` 已接 hilog，但少数地方直接写 stderr；真机上 stderr 不一定可见，另案处理 |
+
+> 关于 `is_write`（`crash.c`）的一个说明，值得单独记一笔：
+> 苹果能从不变量寄存器 ESR 的 WnR 位读出"这次缺页是读还是写"，Linux/aarch64 的 `sigcontext` 里没有 ESR。
+> 但这里真正要的只有一件事——**这页是不是被我们改成只读了**（图形层 `nvn_dirty` 的缺页钩子靠它判断）。
+> 只读页上的"读"根本不会缺页，所以凡是在这种页上缺页，**一定是写**：这是按语义推出来的，不是猜的。
+> 而且偏"写"正好是安全侧——偏了只是白解一次页保护；偏成"读"会让钩子返回 0，游戏在写只读页时直接崩。
 
 ---
 
@@ -123,3 +145,28 @@ Linux/鸿蒙没有"非特权读另一个线程寄存器"的接口，`ptrace` 要
 4. **`clonefile` 递归拷贝**在存档目录上的耗时（量级几 MB，预期可接受）。
 5. **`renamex_np`**：本机内核支不支持 `renameat2(RENAME_EXCHANGE)`；不支持时会退到非原子三步改名（日志有提示）。
 6. **上游的 `LOG()` 长行**（有些接近 1 KiB）在 hilog 里是否被截断。
+7. **`crash.c` 里那个 `is_write` 的取值**：鸿蒙侧我固定取 1（理由见下一节），
+   要在真机上人为造一次"写只读页"的缺页，确认图形层的缺页钩子能正常解开保护、而不是崩掉。
+8. **`hle_fdstat.c` 的 `/proc/self/fd/<n>` 读取**：被 seccomp 拦的话，DM_FD_LOG 的诊断行里
+   路径会全空（归类成"其它"），不影响游戏，但会失去这条诊断的价值。
+
+---
+
+## 七、这次改到的上游文件（就这几个，逐条列明）
+
+垫片层本身是**零改动**的。但下面几处靠垫片解决不了（要么是段名这种编译期属性，
+要么是两边结构不同必须按字段改），所以动了上游文件——**每一处都是用
+`#if defined(__OHOS__)` 分叉，苹果那边的展开结果与改动前逐字符相同**：
+
+| 上游文件 | 改了什么 | 为什么垫片解决不了 |
+|---|---|---|
+| `dm/host/hle.h` | 段名改成由宏 `DM_HLE_SECTION` / `DM_FORCE_SECTION` 提供，鸿蒙侧为 `dmswhle` / `dmswforce` | 段名是编译期属性，无法在运行时替换；且 ELF 要求段名是合法 C 标识符 |
+| `dm/host/hle.c` | `mach-o/*` 的两个 include 加守卫；登记表改为经 `__start_dmswhle`/`__stop_dmswhle` 取 | 同 loader.c 已有的写法 |
+| `dm/host/crash.c` | 新增 `DM_UC_PC/LR/FP/SP/X` 五个取寄存器宏；缺页的读/写判断加鸿蒙分支 | 两边 `ucontext_t` 一个是**指针**、一个是**值**，字段名全不同 |
+| `dm/host/hle_fdstat.c` | 新增 `DM_FD_PATH` 宏（鸿蒙走 `/proc/self/fd/<n>`） | 苹果的 `F_GETPATH` 是 fcntl 扩展，Linux 没有；`fcntl` 是可变参数，垫不了 |
+| `dm/host/dm.h` | 日志宏加 `DM_LOG_TO_HILOG` 守卫 | 宏定义只能在一处收口 |
+
+另外一处**没动源码**：`dm_textbox_core.c` 用了 `memmem`，在苹果上由 `<string.h>` 顺带声明，
+musl 要 `_GNU_SOURCE` 才声明——所以只是在构建里加了这个宏定义。
+
+`dm/host/dm_derived_rt.h` **一个字没改**，靠 `compat/mach-o/dyld.h` 垫片解决。

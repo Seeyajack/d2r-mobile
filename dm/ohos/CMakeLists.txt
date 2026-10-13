@@ -72,6 +72,9 @@ target_include_directories(dmohos BEFORE PRIVATE
 target_compile_definitions(dmohos PRIVATE
     __OHOS__=1              # 显式声明平台，不只依赖编译器三元组
     DM_LOG_TO_HILOG=1       # dm.h 的 LOG 宏改走 hilog（见 dm/ohos/dm_log.h）
+    _GNU_SOURCE=1           # musl 靠它放出一批 BSD/GNU 扩展（如 memmem、dladdr）——
+                            # 苹果的 <string.h> 里这些是默认就有的，所以上游直接用了
+                            # memmem 却没包含任何额外头；鸿蒙不定义这个宏就会"隐式声明"
 )
 
 # shim_prefix.h：强制包含进每个编译单元。这里用相对名而不是绝对路径——

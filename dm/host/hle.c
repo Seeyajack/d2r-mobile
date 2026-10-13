@@ -1,8 +1,10 @@
 // 导入解析（已实现接宿主、其余接记名桩）与宿主门分派。
 // Import resolution (implemented ones go to the host, the rest go to named stubs) and host gate dispatch.
 #include "dm.h"
-#include <mach-o/getsect.h>
+#if !defined(__OHOS__)
+#include <mach-o/getsect.h>   // getsectiondata / _mh_execute_header：苹果从 Mach-O 节里取登记表
 #include <mach-o/ldsyms.h>
+#endif
 #include <dlfcn.h>
 #include <time.h>
 
@@ -26,9 +28,28 @@ uint64_t unimpl_c(unsigned idx, uint64_t *regs) {
 // Per module, one cache of symbol number → resolved address
 static uint64_t g_cache[MAX_MOD][8192];
 
+// 登记表（HLE 宏写进 DM_HLE_SECTION，见 hle.h）：苹果从 Mach-O 的 __DATA,swhle 节取；
+// 鸿蒙从自定义 ELF 段取，靠链接器 __start_/__stop_ 符号定位——与 loader.c 取强制接管表是同一个手法。
+// The registry table (written by the HLE macro into DM_HLE_SECTION, see hle.h): Apple reads the
+// __DATA,swhle Mach-O section; HarmonyOS reads a custom ELF section located through the linker
+// __start_/__stop_ symbols -- the same trick loader.c uses for the forced-takeover table.
+#if defined(__OHOS__)
+extern const hle_ent __start_dmswhle[] __attribute__((weak));
+extern const hle_ent __stop_dmswhle[] __attribute__((weak));
+#endif
+
 uint64_t resolve_import(module_t *m, const char *name) {
     static const hle_ent *sec; static unsigned long secsz;
-    if (!sec) sec = (const hle_ent *)getsectiondata(&_mh_execute_header, "__DATA", "swhle", &secsz);
+    if (!sec) {
+#if defined(__OHOS__)
+        if (__start_dmswhle && __stop_dmswhle) {      // 弱符号：段不存在时两个符号都是 0
+            sec = __start_dmswhle;
+            secsz = (unsigned long)((const char *)__stop_dmswhle - (const char *)__start_dmswhle);
+        }
+#else
+        sec = (const hle_ent *)getsectiondata(&_mh_execute_header, "__DATA", "swhle", &secsz);
+#endif
+    }
     for (unsigned i = 0; i < secsz / sizeof(hle_ent); i++)
         if (!strcmp(sec[i].name, name)) {
             if (g_flag.imports) { Dl_info di; dladdr(sec[i].fn, &di); LOG("import %s -> %s", name, di.dli_sname); }

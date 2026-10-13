@@ -129,19 +129,55 @@ void crash_set_wait_dump(void (*fn)(void)) { g_wait_dump = fn; }
 // 按需导出现场（不退出）：iOS 包没有无进展看门狗，冒烟判红时经 DM_LOG_PORT 发 dump 触发——各客体线程在等什么 + 图形侧等待点，和看门狗打的是同一份
 // Dump the current state on demand (without exiting): the iOS app has no no-progress watchdog, so when the smoke test fails it sends dump through DM_LOG_PORT to trigger this -- what each guest thread is waiting on + the graphics-side wait points, the same thing the watchdog prints
 void crash_dump_now(const char *why) { fprintf(stderr, "[dm] 现场导出（%s）：拍 %u / 阶段 %s\n", why, atomic_load(&g_watch_tick), g_watch_stage[atomic_load(&g_watch_stage_idx)]); if (g_dump_hook) g_dump_hook(); if (g_wait_dump) g_wait_dump(); }
+// 从信号上下文里取寄存器：两边的结构完全不同、字段名也不同，所以在这里收口一次。
+//   苹果 ucontext_t.uc_mcontext 是**指针**（__darwin_mcontext64），寄存器在 __ss / __es 之下；
+//   鸿蒙(Linux) ucontext_t.uc_mcontext 是**值**（struct sigcontext），字段就是 regs[31] / sp / pc。
+// 寄存器名的对应：pc↔pc、lr↔x30、fp↔x29、sp↔sp、xN↔regs[N]。
+// Reading registers out of the signal context: the two sides use entirely different structures and field
+// names, so they are funnelled through one place. On Apple, uc_mcontext is a pointer (__darwin_mcontext64)
+// with the registers under __ss / __es; on HarmonyOS (Linux) it is a value (struct sigcontext) holding
+// regs[31] / sp / pc directly. Mapping: pc<->pc, lr<->x30, fp<->x29, sp<->sp, xN<->regs[N].
+#if defined(__OHOS__)
+#define DM_UC_PC(uc)    ((uc)->uc_mcontext.pc)
+#define DM_UC_LR(uc)    ((uc)->uc_mcontext.regs[30])
+#define DM_UC_FP(uc)    ((uc)->uc_mcontext.regs[29])
+#define DM_UC_SP(uc)    ((uc)->uc_mcontext.sp)
+#define DM_UC_X(uc, i)  ((uc)->uc_mcontext.regs[i])
+#else
+#define DM_UC_PC(uc)    ((uc)->uc_mcontext->__ss.__pc)
+#define DM_UC_LR(uc)    ((uc)->uc_mcontext->__ss.__lr)
+#define DM_UC_FP(uc)    ((uc)->uc_mcontext->__ss.__fp)
+#define DM_UC_SP(uc)    ((uc)->uc_mcontext->__ss.__sp)
+#define DM_UC_X(uc, i)  ((uc)->uc_mcontext->__ss.__x[i])
+#endif
+
 static void on_crash(int sig, siginfo_t *si, void *uc_) {
     ucontext_t *uc = uc_;
     if (sig == SIGTRAP && g_trap_hook && g_trap_hook(uc)) return;
     if (sig == SIGSEGV || sig == SIGBUS) {
+#if defined(__OHOS__)
+        // 苹果能从 ESR 的 WnR 位读出"这次缺页是读还是写"；Linux/aarch64 的 sigcontext 里没有 ESR。
+        // 但这里真正要的只有一件事：**这页是不是被我们改成只读了**（nvn_dirty 的缺页钩子靠它判断）。
+        // 只读页上的"读"根本不会缺页，所以凡是在这种页上缺页，一定是写——这是按语义推出来的，不是猜的。
+        // 而且偏"写"正好是安全侧：偏了只是白解一次页保护；偏成"读"会让钩子返回 0，
+        // 游戏在写只读页时直接崩掉。
+        // Apple can read read-vs-write out of the ESR WnR bit; Linux/aarch64's sigcontext has no ESR. But the
+        // only thing actually wanted here is "was this page made read-only by us" (nvn_dirty's fault hook).
+        // A read on a read-only page never faults, so any fault there is a write -- derived, not guessed.
+        // Erring toward "write" is also the safe side: a wrong "write" merely unprotects once, whereas a wrong
+        // "read" makes the hook return 0 and the game crashes on the very write.
+        int is_write = 1;
+#else
         int is_write = (int)((uc->uc_mcontext->__es.__esr >> 6) & 1);   // ESR 的 WnR 位 | The WnR bit of ESR
+#endif
         for (int i = 0; i < g_nfault_hook; i++) if (g_fault_hook[i](si->si_addr, is_write, uc)) return;
     }
     fprintf(stderr, "[dm] CRASH sig=%d", sig);
-    off("addr", (uint64_t)si->si_addr); off("pc", uc->uc_mcontext->__ss.__pc); off("lr", uc->uc_mcontext->__ss.__lr);
-    fprintf(stderr, " sp=%#llx\n", uc->uc_mcontext->__ss.__sp);
-    for (int i = 0; i < 29; i++) fprintf(stderr, "x%d=%#llx%s", i, uc->uc_mcontext->__ss.__x[i], i % 6 == 5 ? "\n" : " ");
+    off("addr", (uint64_t)si->si_addr); off("pc", (uint64_t)DM_UC_PC(uc)); off("lr", (uint64_t)DM_UC_LR(uc));
+    fprintf(stderr, " sp=%#llx\n", (unsigned long long)DM_UC_SP(uc));
+    for (int i = 0; i < 29; i++) fprintf(stderr, "x%d=%#llx%s", i, (unsigned long long)DM_UC_X(uc, i), i % 6 == 5 ? "\n" : " ");
     fprintf(stderr, "\n");
-    dm_backtrace(uc->uc_mcontext->__ss.__fp);
+    dm_backtrace((uint64_t)DM_UC_FP(uc));
     if (g_dump_hook) g_dump_hook();
     _exit(128 + sig);
 }
