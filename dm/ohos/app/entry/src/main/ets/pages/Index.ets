@@ -41,6 +41,8 @@ const HOSTTEST_HINT: string = '上游宿主单测（dm/host/tests）：这批测
 @Component
 struct Index {
   @State result: string = HINT;
+  // 单测筛选：留空 = 续跑；填 * = 清日志重头跑；填单测名（如 t_i18n）= 只跑那一个。查问题时用。
+  @State testFilter: string = '';
 
   build() {
     Column({ space: 12 }) {
@@ -76,12 +78,27 @@ struct Index {
         .width('100%')
         .padding(6)
 
-      Button('运行上游宿主单测（26 个）')
+      TextInput({ text: this.testFilter, placeholder: '单测筛选：留空=续跑，*=重头跑，或填单测名' })
+        .width('100%')
+        .onChange((v: string) => { this.testFilter = v; })
+
+      Button('运行上游宿主单测（续跑）')
         .width('100%')
         .onClick(() => {
           try {
             const ctx = getContext(this) as common.UIAbilityContext;
-            this.result = dmprobe.runHostTests(ctx.filesDir);
+            this.result = dmprobe.runHostTests(ctx.filesDir, this.testFilter);
+          } catch (err) {
+            this.result = '调用原生模块失败：' + JSON.stringify(err);
+          }
+        })
+
+      Button('清日志、重头跑一遍')
+        .width('100%')
+        .onClick(() => {
+          try {
+            const ctx = getContext(this) as common.UIAbilityContext;
+            this.result = dmprobe.runHostTests(ctx.filesDir, '*');
           } catch (err) {
             this.result = '调用原生模块失败：' + JSON.stringify(err);
           }

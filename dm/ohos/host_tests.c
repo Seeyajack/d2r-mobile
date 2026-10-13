@@ -36,12 +36,20 @@
 
 // 每个单测最多给多久。测试本身是"秒级"的，10 秒还没完就当挂住了——**宁可漏报一个，也不能挂住整个 App**。
 #define DM_TEST_TIMEOUT_MS 10000
-#define DM_FAIL_LINES 6
+// 失败时附上它自己打印的输出。**屏幕报告只放前几行**（报告要塞进定长缓冲），
+// 但**日志文件放全文**——查问题时读的是日志文件，截断会把答案藏起来（t_hid_script 就是这么被藏过）。
+#define DM_FAIL_LINES 8
 #define DM_LINE_MAX 400
 
-typedef int (*dm_test_fn)(void);
+// 单测的 main 是**带参数**的：上游用 `$(B)/t_i18n en`、`TMPDIR=... $(B)/t_fs_case` 这类方式跑它们。
+// 不看这些直接调用 main()，轻则失败重则空指针崩溃——真机上就是这么撞出来的。
+// The tests' mains take arguments: upstream runs them as `$(B)/t_i18n en` or with TMPDIR set. Calling
+// main() without them fails or crashes -- which is exactly what happened on the device.
+typedef int (*dm_test_fn)(int, char **);
 typedef struct {
     dm_test_fn fn;
+    const char *name;
+    const char *arg;
     int rc;
     pthread_mutex_t m;
     pthread_cond_t c;
@@ -50,7 +58,12 @@ typedef struct {
 
 static void *job_tramp(void *p) {
     job_t *j = (job_t *)p;
-    j->rc = j->fn();
+    static char a0[64], a1[64];      // argv 要活到这个调用结束；测试是串行跑的，静态够用
+    snprintf(a0, sizeof a0, "%s", j->name);
+    snprintf(a1, sizeof a1, "%s", j->arg);
+    char *argv[3] = { a0, a1, NULL };
+    int argc = (j->arg && *j->arg) ? 2 : 1;
+    j->rc = j->fn(argc, argv);
     pthread_mutex_lock(&j->m);
     j->done = 1;
     pthread_cond_signal(&j->c);
@@ -77,6 +90,11 @@ static void emit(sink_t *s, const char *fmt, ...) {
     }
     if (s->log) { fputs(line, s->log); fputc('\n', s->log); fflush(s->log); }
     dm_log_printf("%s", line);
+}
+
+// 只写日志文件、不进屏幕报告（失败诊断的完整内容走这里）
+static void emit_log_only(sink_t *s, const char *line) {
+    if (s->log) { fputs("        ", s->log); fputs(line, s->log); fputc('\n', s->log); fflush(s->log); }
 }
 
 // ---- 崩了怎么办：只做异步信号安全的事（open/write/close），写一行谁崩的，然后退出 ----
@@ -174,6 +192,34 @@ static uint64_t now_ms(void) {
     return (uint64_t)ts.tv_sec * 1000ull + (uint64_t)ts.tv_nsec / 1000000ull;
 }
 
+// 按上游 recipe 给的环境跑：形如 "TMPDIR=@;DM_ROMFS=/x"，值写成 @ 表示"日志文件所在目录"。
+// 上游 recipe 里这些指向构建目录；真机上换成应用自己的数据目录。
+// Applies the environment from upstream's recipe; a value of @ means "the log file's directory".
+static void apply_env(const char *env, const char *logdir) {
+    if (!env || !*env) return;
+    char buf[1024];
+    snprintf(buf, sizeof buf, "%s", env);
+    for (char *p = buf; p && *p; ) {
+        char *semi = strchr(p, ';');
+        if (semi) *semi = 0;
+        char *eq = strchr(p, '=');
+        if (eq) {
+            *eq = 0;
+            const char *val = eq + 1;
+            if (!strcmp(val, "@")) val = logdir;
+            setenv(p, val, 1);
+        }
+        p = semi ? semi + 1 : NULL;
+    }
+}
+
+// 取一个路径的目录部分（在本文件里就一处用到，不引入 libgen）
+static void dir_of(const char *path, char *out, size_t cap) {
+    snprintf(out, cap, "%s", path ? path : ".");
+    char *slash = strrchr(out, '/');
+    if (slash) *slash = 0;
+}
+
 static void *open_test(const char *dir, const char *lib, char *tried, size_t tcap) {
     char path[1024];
     if (dir && *dir) {
@@ -190,26 +236,34 @@ static void *open_test(const char *dir, const char *lib, char *tried, size_t tca
     return h;
 }
 
-int dm_host_tests_run(const char *logpath, char *out, size_t cap) {
+int dm_host_tests_run(const char *logpath, const char *filter, char *out, size_t cap) {
     if (!out || cap < 128) return -1;
     out[0] = 0;
     sink_t s = { out, out + cap - 2, NULL };
 
+    if (!filter) filter = "";
+    int only_named = (*filter && strcmp(filter, "*") != 0);   // 只跑指定那一个
+    int fresh = (strcmp(filter, "*") == 0);                   // 清空日志重头跑
+
     snprintf(g_logpath, sizeof g_logpath, "%s", (logpath && *logpath) ? logpath : "/data/local/tmp/dmtest");
+    if (fresh) unlink(g_logpath);
 
     // 续跑：先看日志里已经有哪些结果。**打开是追加模式**，这样之前的结果不会被这次覆盖掉。
     char *started = (char *)calloc((size_t)dm_host_tests_count, 1);
     char *finished = (char *)calloc((size_t)dm_host_tests_count, 1);
-    if (started && finished) load_done(g_logpath, started, finished, dm_host_tests_count);
+    if (!only_named && started && finished) load_done(g_logpath, started, finished, dm_host_tests_count);
     s.log = fopen(g_logpath, "a");
 
     arm_fatal_handlers();
 
     char dir[1024] = { 0 };
     int have_dir = (self_dir(dir, sizeof dir) == 0);
+    char logdir[1024] = { 0 };
+    dir_of(g_logpath, logdir, sizeof logdir);
 
     emit(&s, "=== 宿主单测（上游 dm/host/tests，在鸿蒙上跑）===");
-    emit(&s, "共 %d 个；自身目录：%s", dm_host_tests_count, have_dir && *dir ? dir : "（取不到）");
+    emit(&s, "共 %d 条；自身目录：%s；筛选：%s；数据目录：%s", dm_host_tests_count,
+         have_dir && *dir ? dir : "（取不到）", *filter ? filter : "（续跑）", logdir);
 
     char cappath[512];
     snprintf(cappath, sizeof cappath, "%s.out", g_logpath);
@@ -220,6 +274,9 @@ int dm_host_tests_run(const char *logpath, char *out, size_t cap) {
         int was_finished = finished ? finished[i] : 0;
         int was_started = started ? started[i] : 0;
         g_cur_name = t->name;
+
+        // 只跑指定的那一个：其余一概跳过
+        if (only_named && strcmp(t->name, filter) != 0) continue;
 
         if (was_finished) {
             emit(&s, "[%2d/%2d] 跳过 %-20s （日志里已有结果）", i + 1, dm_host_tests_count, t->name);
@@ -254,9 +311,15 @@ int dm_host_tests_run(const char *logpath, char *out, size_t cap) {
 
         job_t j;
         memset(&j, 0, sizeof j);
-        j.fn = fn; j.rc = -999;
+        j.fn = fn;
+        j.name = t->name;
+        j.arg = t->arg ? t->arg : "";
+        j.rc = -999;
         pthread_mutex_init(&j.m, NULL);
         pthread_cond_init(&j.c, NULL);
+
+        // 按上游 recipe 给的环境跑（TMPDIR / DM_ROMFS 之类）
+        apply_env(t->env, logdir);
 
         pthread_t th;
         uint64_t t0 = now_ms();
@@ -297,14 +360,16 @@ int dm_host_tests_run(const char *logpath, char *out, size_t cap) {
             FILE *f = fopen(cappath, "r");
             if (f) {
                 char line[DM_LINE_MAX];
-                int shown = 0;
-                while (shown < DM_FAIL_LINES && fgets(line, sizeof line, f)) {
+                int shown = 0, total = 0;
+                while (fgets(line, sizeof line, f)) {
                     size_t l = strlen(line);
                     while (l && (line[l - 1] == '\n' || line[l - 1] == '\r')) line[--l] = 0;
                     if (!l) continue;
-                    emit(&s, "        %s", line);
-                    shown++;
+                    total++;
+                    if (shown < DM_FAIL_LINES) { emit(&s, "        %s", line); shown++; }
+                    else emit_log_only(&s, line);   // 屏幕放不下，日志里放全
                 }
+                if (total > shown) emit(&s, "        （共 %d 行诊断，其余写在日志文件里）", total);
                 fclose(f);
             }
             if (timed_out) emit(&s, "        （超过 %d ms 未结束，已放弃等待）", DM_TEST_TIMEOUT_MS);

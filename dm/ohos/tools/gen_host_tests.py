@@ -23,6 +23,7 @@
 #
 # 用法：python3 dm/ohos/tools/gen_host_tests.py
 import os
+import re
 import shlex
 import sys
 
@@ -75,6 +76,67 @@ def parse_makefile():
     return out
 
 
+def parse_run_recipe():
+    """从 Makefile 的 run: 配方里读"每个单测怎么被调用"——环境变量与命令行参数。
+    返回 {测试名: [(显示名, arg, env)]}，一个测试可能有多次调用（如 t_i18n 对 7 种语言各跑一次）。
+
+    为什么要读它：上游是用带参数/带环境的方式跑这些单测的（t_i18n 要吃语言参数、
+    t_fs_case 要 TMPDIR、t_romfs_validate 要 DM_ROMFS）。不管这些直接调 main()，
+    轻则失败重则空指针崩溃——**真机上就是这么撞出来的**。所以"怎么调用"也是上游定义的一部分，
+    一并读过来，而不是我们自己猜。
+    """
+    out = {}
+    lines = open(MAKEFILE, encoding='utf-8').read().split('\n')
+    in_run = False
+    for raw in lines:
+        if raw.startswith('run:'):
+            in_run = True
+            continue
+        if in_run and not raw.startswith('\t'):
+            break
+        if not in_run or not raw.strip():
+            continue
+        line = raw.strip()
+        # for m in ...; do <cmd> done  —— 同一个单测带不同参数跑多次
+        m = re.search(r'for\s+(\w+)\s+in\s+([^;]+);\s*do\s+(.*?)\s*(?:\|\|\s*exit \d+)?\s*;?\s*done', line)
+        if m:
+            var, items, cmd = m.group(1), m.group(2).split(), m.group(3)
+            t = re.search(r'\$\(B\)/(t_\w+)', cmd)
+            if not t:
+                continue
+            envs, argtpl = _split_env_and_cmd(cmd)
+            calls = []
+            for it in items:
+                # 注意顺序：先换 Makefile 转义的 $$m，再换 $m；反了的话 $$m 会先被当成 $m 命中
+                arg = argtpl.replace('$$' + var, it).replace('$' + var, it).strip()
+                calls.append(('%s[%s]' % (t.group(1), it), arg, envs))
+            out[t.group(1)] = calls
+            continue
+        t = re.search(r'\$\(B\)/(t_\w+)\b(.*)$', line)
+        if not t:
+            continue
+        envs, rest = _split_env_and_cmd(line)
+        args = [a for a in rest.split() if not a.startswith('2>') and a != '$(B)/' + t.group(1)]
+        name = t.group(1)
+        out.setdefault(name, []).append((name, ' '.join(args).strip(), envs))
+    return out
+
+
+def _split_env_and_cmd(line):
+    """把 `TMPDIR="x" DM_ROMFS="y" $(B)/t_x arg 2>/dev/null` 拆成 (环境串, 去掉环境与前缀后的命令)。
+    环境值里的 $(abspath $(B)) 这类写成 @（由跑测框架在真机上换成应用数据目录）。"""
+    envs, rest = [], line
+    for m in re.finditer(r'([A-Z_][A-Z0-9_]*)="([^"]*)"\s*', line):
+        val = m.group(2)
+        # 上游指向构建目录的临时目录；真机上换成应用自己的数据目录
+        if 'B)' in val or 'abspath' in val:
+            val = '@'
+        envs.append('%s=%s' % (m.group(1), val))
+        rest = rest.replace(m.group(0), '', 1)
+    rest = re.sub(r'^\s*\$\(B\)/t_\w+\s*', '', rest.strip())
+    return ';'.join(envs), rest
+
+
 def main():
     rules = parse_makefile()
     if not rules:
@@ -86,7 +148,15 @@ def main():
                     for f in os.listdir(os.path.join(DM_OHOS, 'compat', 'src'))
                     if f.endswith('.c'))
 
-    # ---- 1) 清单 C 文件（跑测框架靠它知道该 dlopen 哪些 .so）----
+    # 每个单测"怎么被调用"（环境 + 参数）——从 Makefile 的 run: 配方里读，不自己猜
+    runinfo = parse_run_recipe()
+    entries = []          # (显示名, .so 名, argv[1], 环境串)
+    for n in names:
+        calls = runinfo.get(n) or [(n, '', '')]
+        for disp, arg, env in calls:
+            entries.append((disp, 'dmt_' + n, arg, env))
+
+    # ---- 1) 清单 C 文件（跑测框架靠它知道该 dlopen 哪些 .so、以及怎么调）----
     gen_c = os.path.join(DM_OHOS, 'host_tests_gen.c')
     with open(gen_c, 'w', encoding='utf-8', newline='\n') as f:
         f.write('// 【生成文件，不要手改】由 dm/ohos/tools/gen_host_tests.py 从\n')
@@ -94,10 +164,12 @@ def main():
         f.write('// GENERATED -- do not edit by hand. Produced by dm/ohos/tools/gen_host_tests.py from\n')
         f.write('// dm/host/tests/Makefile; edit the Makefile and re-run the generator instead.\n')
         f.write('#include "host_tests.h"\n\n')
-        f.write('// lib 是不带前缀与后缀的 .so 名（与 cmake 里 OUTPUT_NAME 一致），dlopen 时拼上目录与 .so\n')
+        f.write('// 字段：显示名 / .so 名（不带 lib 前缀与 .so 后缀）/ argv[1] / 环境串\n')
+        f.write('// 环境串里 @ 表示"日志文件所在目录"（真机上是应用数据目录）——上游 recipe 里写的是构建目录。\n')
+        f.write('// 一个单测可以有多条（如 t_i18n 对 7 种语言各跑一次）。\n')
         f.write('const dm_test_ent dm_host_tests[] = {\n')
-        for n in names:
-            f.write('    { "%s", "dmt_%s" },\n' % (n, n))
+        for disp, lib, arg, env in entries:
+            f.write('    { "%s", "%s", "%s", "%s" },\n' % (disp, lib, arg, env))
         f.write('};\n')
         f.write('const int dm_host_tests_count = (int)(sizeof dm_host_tests / sizeof dm_host_tests[0]);\n')
 
