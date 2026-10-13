@@ -5,17 +5,20 @@
 #include <string.h>
 
 #include "dm_probe.h"
+#include "host_tests.h"
 #include "vk_probe.h"
 
 #define PROBE_BUF    16384
 #define VKPROBE_BUF  32768   // Vulkan 报告比实验报告长（要列扩展/格式/上限/特性），给大一点
+#define TEST_BUF     65536   // 27 个单测的报告 + 失败时的诊断行，给足
 
-// 共用一个"跑一个探针，把报告字符串返回"的骨架，两种探针只差调哪个函数、缓冲区多大。
-// Shared skeleton: run a probe and return its report as a string; the two probes differ only in which
+// 共用一个"跑一个探针，把报告字符串返回"的骨架，几种探针只差调哪个函数、缓冲区多大。
+// Shared skeleton: run a probe and return its report as a string; the probes differ only in which
 // function is called and how big the buffer is.
-static napi_value RunOne(napi_env env, const char *files_dir, int use_vk) {
+// mode: 0 = 装载实验，1 = Vulkan 能力，2 = 宿主单测（单测要多一个日志路径参数）
+static napi_value RunOne(napi_env env, const char *files_dir, int mode) {
     napi_value ret = NULL;
-    size_t cap = use_vk ? VKPROBE_BUF : PROBE_BUF;
+    size_t cap = mode == 1 ? VKPROBE_BUF : (mode == 2 ? TEST_BUF : PROBE_BUF);
     char *buf = (char *)malloc(cap);
     if (!buf) {
         napi_create_string_utf8(env, "内存不足，探针未运行", NAPI_AUTO_LENGTH, &ret);
@@ -23,7 +26,18 @@ static napi_value RunOne(napi_env env, const char *files_dir, int use_vk) {
     }
     buf[0] = 0;
 
-    int rc = use_vk ? dm_vk_probe_run(buf, cap) : dm_probe_run(files_dir, buf, cap);
+    int rc;
+    if (mode == 1) {
+        rc = dm_vk_probe_run(buf, cap);
+    } else if (mode == 2) {
+        // 结果同时落到应用数据目录下的一个文件里：即使某个单测把进程搞崩，前面的结果也在盘上。
+        // The report is also written to a file under the app data dir, so a later crash cannot lose it.
+        char logpath[1200];
+        snprintf(logpath, sizeof logpath, "%s/host_tests.log", (files_dir && *files_dir) ? files_dir : ".");
+        rc = dm_host_tests_run(logpath, buf, cap);
+    } else {
+        rc = dm_probe_run(files_dir, buf, cap);
+    }
     if (rc != 0 && buf[0] == 0) {
         napi_create_string_utf8(env, "探针入口参数异常", NAPI_AUTO_LENGTH, &ret);
         free(buf);
@@ -61,10 +75,18 @@ static napi_value RunVkProbe(napi_env env, napi_callback_info info) {
     return RunOne(env, files_dir, 1);
 }
 
+static napi_value RunHostTests(napi_env env, napi_callback_info info) {
+    // 宿主单测：报告同时落一份到 filesDir/host_tests.log，崩了也不丢前面的结果。
+    char files_dir[1024];
+    Arg0String(env, info, files_dir, sizeof files_dir);
+    return RunOne(env, files_dir, 2);
+}
+
 static napi_value Init(napi_env env, napi_value exports) {
     napi_property_descriptor desc[] = {
-        { "runProbes",  NULL, RunProbes,  NULL, NULL, NULL, napi_default, NULL },
-        { "runVkProbe", NULL, RunVkProbe, NULL, NULL, NULL, napi_default, NULL },
+        { "runProbes",     NULL, RunProbes,     NULL, NULL, NULL, napi_default, NULL },
+        { "runVkProbe",    NULL, RunVkProbe,    NULL, NULL, NULL, napi_default, NULL },
+        { "runHostTests",  NULL, RunHostTests,  NULL, NULL, NULL, napi_default, NULL },
     };
     napi_define_properties(env, exports, sizeof desc / sizeof desc[0], desc);
     return exports;

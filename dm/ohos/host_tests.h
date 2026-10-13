@@ -5,18 +5,22 @@
 // 它们正好补上"只验证到编译+链接、没验证跑起来"那个空白——垫片的哈希算得对不对、时间对不对、
 // 内存读得对不对，都在这批测试的射程之内。
 // Why it is worth doing: these tests are real code written by the upstream author and they test
-// *behaviour*, not whether things compile. They fill exactly the gap left by "verified to compile and
-// link, never verified to run" -- digest correctness, clock behaviour and memory reads are all in range.
+// *behaviour*, not whether things compile.
 //
-// 表（哪些单测、各自的入口）由 gen_host_tests.py 从 Makefile 生成，本文件不认识具体哪些单测。
-// The roster is generated from the Makefile by gen_host_tests.py; this file knows no specific test.
+// 为什么是 dlopen 而不是直接链进来：**照上游的结构走**——上游每个单测是一个独立可执行文件。
+// 在鸿蒙侧对应"每个单测一个 .so"，脚本按名字 dlopen、取它的 main 来调。
+// 试过把 27 个合成一个 .so：会得到 170 个未解析符号（上游在 macOS 靠 -dead_strip 丢掉没用的引用，
+// ELF 的 -shared 丢不掉）。详见 dm/ohos/宿主单测搬鸿蒙-方案与现状.md。
+// Why dlopen instead of linking them in: follow upstream's structure. Upstream builds one executable per
+// test; on HarmonyOS that becomes one .so per test, dlopened by name. Merging all 27 into one .so was
+// tried and yields 170 unresolved symbols.
 #pragma once
 
 #include <stddef.h>
 
 typedef struct {
-    const char *name;
-    int (*fn)(void);      // 各单测的 main 已被改名成这个入口
+    const char *name;   // 显示用（如 t_namegen）
+    const char *lib;    // 不带前缀与后缀的 .so 名（如 dmt_t_namegen），由生成器产出
 } dm_test_ent;
 
 extern const dm_test_ent dm_host_tests[];

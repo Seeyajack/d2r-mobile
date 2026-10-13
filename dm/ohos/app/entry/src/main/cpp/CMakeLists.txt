@@ -19,6 +19,10 @@ add_library(dmprobe SHARED
     dm_probe.c
     vk_probe.c
     napi_init.c
+    # 宿主单测跑测框架 + 统一日志（框架靠 dlopen 去载入各单测 .so，所以它自己很薄）
+    ${DM_DIR}/ohos/host_tests.c
+    ${DM_DIR}/ohos/host_tests_gen.c   # 生成：单测清单（哪些 .so、叫什么名字）
+    ${DM_DIR}/ohos/dm_log.c
     # 被测对象：鸿蒙版 map_image（与宿主 loader.c 用的是同一份）
     ${DM_DIR}/ohos/map_image_ohos.c
     # 测试映像：由 dm/ohos/tools/gen_embed_ohos.py --embed-bytes 生成，
@@ -28,9 +32,14 @@ add_library(dmprobe SHARED
 
 target_include_directories(dmprobe PRIVATE
     ${DM_DIR}/host     # dm.h（module_t）
-    ${DM_DIR}/ohos     # map_image_ohos.h
+    ${DM_DIR}/ohos     # map_image_ohos.h、host_tests.h、dm_log.h
 )
 
 # 官方要求：用 NAPI 要链 libace_napi.z.so；打 hilog 要链 libhilog_ndk.z.so；
 # 图形层能力探测要链 libvulkan.so（NDK sysroot 里就有）。
 target_link_libraries(dmprobe PUBLIC libace_napi.z.so libhilog_ndk.z.so libvulkan.so)
+
+# ---- 宿主单测：每个单测一个 .so（由 tools/gen_host_tests.py 从上游 Makefile 生成）----
+# 结构照上游"每个单测一个可执行文件"。跑测框架按名字 dlopen 它们、取各自的 main 来调。
+# 这一段是生成文件，改单测清单请改 dm/host/tests/Makefile 再重跑生成器。
+include(${DM_DIR}/ohos/host_tests_gen.cmake)

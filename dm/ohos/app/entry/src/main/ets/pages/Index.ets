@@ -31,6 +31,12 @@ const HINT: string = '两个探针，点按钮就跑。\n\n' +
 const VK_HINT: string = '图形层能力探测：只枚举能力，不创建窗口。\n' +
   '重点看三处：压缩贴图（BC/ASTC）、内存模型（统一内存）、时间线信号量与缓冲设备地址。';
 
+const HOSTTEST_HINT: string = '上游宿主单测（dm/host/tests）：这批测试测的是**行为**，' +
+  '能验掉垫片的哈希/时钟/内存读取对不对。每个单测是一个独立 .so，框架按名字载入后调用。\n' +
+  '⚠️ 有的单测会让进程直接死掉（它们用 assert，assert 触发就是 abort，App 里没法隔到子进程）。' +
+  '所以这个是**可续跑**的：崩了再点一次，它会跳过已出结果的、继续往后跑。\n' +
+  '报告同时写一份到 filesDir/host_tests.log。';
+
 @Entry
 @Component
 struct Index {
@@ -65,6 +71,23 @@ struct Index {
         })
 
       Text(VK_HINT)
+        .fontSize(11)
+        .textAlign(TextAlign.Start)
+        .width('100%')
+        .padding(6)
+
+      Button('运行上游宿主单测（26 个）')
+        .width('100%')
+        .onClick(() => {
+          try {
+            const ctx = getContext(this) as common.UIAbilityContext;
+            this.result = dmprobe.runHostTests(ctx.filesDir);
+          } catch (err) {
+            this.result = '调用原生模块失败：' + JSON.stringify(err);
+          }
+        })
+
+      Text(HOSTTEST_HINT)
         .fontSize(11)
         .textAlign(TextAlign.Start)
         .width('100%')

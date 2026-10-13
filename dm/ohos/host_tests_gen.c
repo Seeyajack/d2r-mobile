@@ -4,61 +4,33 @@
 // dm/host/tests/Makefile; edit the Makefile and re-run the generator instead.
 #include "host_tests.h"
 
-int dm_test_altstack_main(void);
-int dm_test_audio_main(void);
-int dm_test_audio_spsc_main(void);
-int dm_test_cloudsync_main(void);
-int dm_test_condvar_main(void);
-int dm_test_doorspot_main(void);
-int dm_test_fs_main(void);
-int dm_test_fs_case_main(void);
-int dm_test_hid_receipt_main(void);
-int dm_test_hid_script_main(void);
-int dm_test_hud_dead_main(void);
-int dm_test_i18n_main(void);
-int dm_test_modetx_main(void);
-int dm_test_movie_main(void);
-int dm_test_namegen_main(void);
-int dm_test_oe_main(void);
-int dm_test_padmap_main(void);
-int dm_test_rift_clock_main(void);
-int dm_test_romfs_validate_main(void);
-int dm_test_swkbd_main(void);
-int dm_test_target_rank_main(void);
-int dm_test_textbox_main(void);
-int dm_test_thread_leak_main(void);
-int dm_test_touch_main(void);
-int dm_test_touch_mac_main(void);
-int dm_test_unit_level_main(void);
-int dm_test_widget_main(void);
-
+// lib 是不带前缀与后缀的 .so 名（与 cmake 里 OUTPUT_NAME 一致），dlopen 时拼上目录与 .so
 const dm_test_ent dm_host_tests[] = {
-    { "t_altstack", dm_test_altstack_main },
-    { "t_audio", dm_test_audio_main },
-    { "t_audio_spsc", dm_test_audio_spsc_main },
-    { "t_cloudsync", dm_test_cloudsync_main },
-    { "t_condvar", dm_test_condvar_main },
-    { "t_doorspot", dm_test_doorspot_main },
-    { "t_fs", dm_test_fs_main },
-    { "t_fs_case", dm_test_fs_case_main },
-    { "t_hid_receipt", dm_test_hid_receipt_main },
-    { "t_hid_script", dm_test_hid_script_main },
-    { "t_hud_dead", dm_test_hud_dead_main },
-    { "t_i18n", dm_test_i18n_main },
-    { "t_modetx", dm_test_modetx_main },
-    { "t_movie", dm_test_movie_main },
-    { "t_namegen", dm_test_namegen_main },
-    { "t_oe", dm_test_oe_main },
-    { "t_padmap", dm_test_padmap_main },
-    { "t_rift_clock", dm_test_rift_clock_main },
-    { "t_romfs_validate", dm_test_romfs_validate_main },
-    { "t_swkbd", dm_test_swkbd_main },
-    { "t_target_rank", dm_test_target_rank_main },
-    { "t_textbox", dm_test_textbox_main },
-    { "t_thread_leak", dm_test_thread_leak_main },
-    { "t_touch", dm_test_touch_main },
-    { "t_touch_mac", dm_test_touch_mac_main },
-    { "t_unit_level", dm_test_unit_level_main },
-    { "t_widget", dm_test_widget_main },
+    { "t_altstack", "dmt_t_altstack" },
+    { "t_audio", "dmt_t_audio" },
+    { "t_audio_spsc", "dmt_t_audio_spsc" },
+    { "t_cloudsync", "dmt_t_cloudsync" },
+    { "t_condvar", "dmt_t_condvar" },
+    { "t_doorspot", "dmt_t_doorspot" },
+    { "t_fs", "dmt_t_fs" },
+    { "t_fs_case", "dmt_t_fs_case" },
+    { "t_hid_receipt", "dmt_t_hid_receipt" },
+    { "t_hid_script", "dmt_t_hid_script" },
+    { "t_hud_dead", "dmt_t_hud_dead" },
+    { "t_i18n", "dmt_t_i18n" },
+    { "t_modetx", "dmt_t_modetx" },
+    { "t_movie", "dmt_t_movie" },
+    { "t_namegen", "dmt_t_namegen" },
+    { "t_oe", "dmt_t_oe" },
+    { "t_padmap", "dmt_t_padmap" },
+    { "t_romfs_validate", "dmt_t_romfs_validate" },
+    { "t_swkbd", "dmt_t_swkbd" },
+    { "t_target_rank", "dmt_t_target_rank" },
+    { "t_textbox", "dmt_t_textbox" },
+    { "t_thread_leak", "dmt_t_thread_leak" },
+    { "t_touch", "dmt_t_touch" },
+    { "t_touch_mac", "dmt_t_touch_mac" },
+    { "t_unit_level", "dmt_t_unit_level" },
+    { "t_widget", "dmt_t_widget" },
 };
 const int dm_host_tests_count = (int)(sizeof dm_host_tests / sizeof dm_host_tests[0]);
