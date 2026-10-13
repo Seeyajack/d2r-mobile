@@ -14,5 +14,5 @@ add_library(dmprobe SHARED
     napi_init.c
 )
 
-# 官方要求：用 NAPI 就要链 libace_napi.z.so
-target_link_libraries(dmprobe PUBLIC libace_napi.z.so)
+# 官方要求：用 NAPI 就要链 libace_napi.z.so；打 hilog 要链 libhilog_ndk.z.so
+target_link_libraries(dmprobe PUBLIC libace_napi.z.so libhilog_ndk.z.so)

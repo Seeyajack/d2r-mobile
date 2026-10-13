@@ -16,11 +16,13 @@
 // 第 1 站：跑三个真机实验并把报告显示出来。
 // 实验代码在 entry/src/main/cpp/dm_probe.c，说明见 dm/ohos/装载方案-镜像嵌入与定位.md 第四节。
 import dmprobe from 'libdmprobe.so';
+import common from '@ohos.app.ability.common';
 
 const HINT: string = '点下面的按钮，在真机上跑三个实验。\n\n' +
-  'A  匿名内存能否拿到可执行权限（预期：失败）\n' +
+  'C  自定义 ELF 段能否生成 __start_/__stop_ 符号（预期：能）\n' +
   'B  mmap 自己的 .so 能否可执行（预期：成功，整个方案的基石）\n' +
-  'C  自定义 ELF 段能否生成 __start_/__stop_ 符号（预期：能）\n\n' +
+  '   B-3 换应用数据目录的文件再试，分辨禁令范围\n' +
+  'A  匿名内存能否拿到可执行权限（预期：失败）\n\n' +
   '跑完把报告发回来，就能定下装载方案。';
 
 @Entry
@@ -38,7 +40,8 @@ struct Index {
         .width('100%')
         .onClick(() => {
           try {
-            this.result = dmprobe.runProbes();
+            const ctx = getContext(this) as common.UIAbilityContext;
+            this.result = dmprobe.runProbes(ctx.filesDir);
           } catch (err) {
             this.result = '调用原生模块失败：' + JSON.stringify(err);
           }

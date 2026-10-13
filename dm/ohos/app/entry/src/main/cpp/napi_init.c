@@ -8,7 +8,16 @@
 #define PROBE_BUF 16384
 
 static napi_value RunProbes(napi_env env, napi_callback_info info) {
-    (void)info;
+    // 参数：应用数据目录（ArkTS 传 context.filesDir）。实验 B-3 要在里面造文件试 mmap。
+    size_t argc = 1;
+    napi_value argv[1] = { NULL };
+    napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
+    char files_dir[1024] = { 0 };
+    if (argc > 0 && argv[0]) {
+        size_t len = 0;
+        napi_get_value_string_utf8(env, argv[0], files_dir, sizeof files_dir, &len);
+    }
+
     napi_value ret = NULL;
 
     char *buf = (char *)malloc(PROBE_BUF);
@@ -18,7 +27,7 @@ static napi_value RunProbes(napi_env env, napi_callback_info info) {
     }
     buf[0] = 0;
 
-    int rc = dm_probe_run(buf, PROBE_BUF);
+    int rc = dm_probe_run(files_dir, buf, PROBE_BUF);
     if (rc != 0 && buf[0] == 0) {
         napi_create_string_utf8(env, "实验入口参数异常", NAPI_AUTO_LENGTH, &ret);
         free(buf);

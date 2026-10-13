@@ -6,16 +6,25 @@
 #include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <hilog/log.h>
+#include <setjmp.h>
+#include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/mman.h>
-#include <sys/wait.h>
 #include <unistd.h>
 
 // ───────────────────────── 输出小工具 ─────────────────────────
 
+// 每写一行，同时打进 hilog —— 万一界面没显示出来（或进程中途挂了），
+// 也能从设备日志里看到跑到哪一步了。
+static void logline(const char *s) {
+    OH_LOG_Print(LOG_APP, LOG_INFO, 0xD001, "dmprobe", "%{public}s", s);
+}
+
 static void app(char *out, size_t cap, size_t *used, const char *s) {
+    logline(s);
     size_t n = strlen(s);
     if (*used + n + 1 > cap) n = (cap > *used + 1) ? cap - *used - 1 : 0;
     memcpy(out + *used, s, n);
@@ -47,6 +56,19 @@ static void probe_self_symbol(void) {}
 
 // ─────────────────────── 实验 A ───────────────────────
 
+// 执行测试用的信号兜底：页不可执行时 CPU 抛 SIGSEGV/SIGBUS，
+// 处理器跳回来，进程不至于挂掉。
+static sigjmp_buf g_probe_jmp;
+static volatile sig_atomic_t g_probe_jmp_armed;
+
+static void probe_segv_handler(int sig) {
+    if (g_probe_jmp_armed) {
+        g_probe_jmp_armed = 0;
+        siglongjmp(g_probe_jmp, 1);
+    }
+    _exit(128 + sig);   // 没武装：交回默认处理
+}
+
 static void exp_a(char *out, size_t cap, size_t *used) {
     size_t pg = (size_t)sysconf(_SC_PAGESIZE);
 
@@ -62,6 +84,10 @@ static void exp_a(char *out, size_t cap, size_t *used) {
     }
     appf(out, cap, used, "  ✓ mmap 匿名 RW：成功，地址 %p\n", p);
 
+    // 顺序要紧：先把指令写进去，再 mprotect 成 R+X。
+    // 反过来（先 mprotect 再写）会往只读页写 → 当场 SIGSEGV（第一次跑就死在这儿）。
+    memcpy(p, "\xc0\x03\x5f\xd6", 4);   // ARM64: ret
+
     if (mprotect(p, pg, PROT_READ | PROT_EXEC) != 0) {
         appf(out, cap, used, "  ✓ mprotect 成 R+X：失败（%s）\n", strerror(errno));
         app(out, cap, used, "  结论：符合预期。匿名可执行内存被禁 → 桌面版 map_image() 的写法"
@@ -71,35 +97,39 @@ static void exp_a(char *out, size_t cap, size_t *used) {
     }
 
     // mprotect 说成功 —— 但那不一定代表页真的可执行（有些系统在缺页时才拦）。
-    // 真执行一次才算数。放到子进程里跑，万一崩了父进程还能继续。
+    // 真执行一次才算数。
+    //
+    // 隔离方式：不用 fork()（实测在鸿蒙 App 里 fork 会把整个进程带崩），
+    // 改用信号处理器 + siglongjmp：真崩了就跳回来，进程继续活。
     app(out, cap, used, "  ⚠ mprotect 成 R+X：成功  ← 与预期不符！再验一下是否真能执行\n");
-    memcpy(p, "\xc0\x03\x5f\xd6", 4);   // ARM64: ret
 
-    pid_t pid = fork();
-    if (pid == 0) {
-        ((void (*)(void))p)();          // 真跳进去执行
-        _exit(0);                       // 没崩
-    }
-    if (pid < 0) {
-        appf(out, cap, used, "  fork 失败（%s），无法验证真执行\n", strerror(errno));
+    struct sigaction sa, old_segv, old_bus;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = probe_segv_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_NODEFER;
+    sigaction(SIGSEGV, &sa, &old_segv);
+    sigaction(SIGBUS, &sa, &old_bus);
+
+    if (sigsetjmp(g_probe_jmp, 1) == 0) {
+        g_probe_jmp_armed = 1;
+        ((void (*)(void))p)();
+        g_probe_jmp_armed = 0;
+        app(out, cap, used, "  ⚠⚠ 匿名内存真的可执行！桌面版写法可用，方案可以简化\n");
     } else {
-        int st = 0;
-        waitpid(pid, &st, 0);
-        if (WIFEXITED(st) && WEXITSTATUS(st) == 0)
-            app(out, cap, used, "  ⚠⚠ 匿名内存真的可执行！桌面版写法可用，方案可以简化\n");
-        else if (WIFSIGNALED(st))
-            appf(out, cap, used, "  ✓ 执行时崩了（信号 %d）→ 页其实不可执行，"
-                                 "mprotect 只是没当场拦\n", WTERMSIG(st));
-        else
-            appf(out, cap, used, "  执行结果异常：status=%d\n", st);
+        app(out, cap, used, "  ✓ 执行时崩了（SIGSEGV/SIGBUS）→ 页其实不可执行，"
+                            "mprotect 只是没当场拦\n");
     }
+    sigaction(SIGSEGV, &old_segv, NULL);
+    sigaction(SIGBUS, &old_bus, NULL);
+
     app(out, cap, used, "\n");
     munmap(p, pg);
 }
 
 // ─────────────────────── 实验 B ───────────────────────
 
-static void exp_b(char *out, size_t cap, size_t *used) {
+static void exp_b(const char *files_dir, char *out, size_t cap, size_t *used) {
     size_t pg = (size_t)sysconf(_SC_PAGESIZE);
 
     app(out, cap, used, "【实验 B】mmap 自己的 .so 文件能否拿到可执行权限\n");
@@ -120,12 +150,11 @@ static void exp_b(char *out, size_t cap, size_t *used) {
 
     // B-1：最简单的形式 —— 文件页直接映射成 R+X
     void *q = mmap(NULL, pg, PROT_READ | PROT_EXEC, MAP_PRIVATE, fd, 0);
-    if (q == MAP_FAILED) {
-        appf(out, cap, used, "  ✗ B-1 mmap 文件 R+X：失败（%s）\n", strerror(errno));
-        app(out, cap, used, "  结论：方案基石不成立！要改用"
-                            "「链接脚本强制布局、不搬位置」的退路。\n");
+    int b1_ok = (q != MAP_FAILED);
+    if (!b1_ok) {
+        appf(out, cap, used, "  ✗ B-1 mmap bundle 里的 .so 成 R+X：失败（%s）\n", strerror(errno));
     } else {
-        appf(out, cap, used, "  ✓ B-1 mmap 文件 R+X：成功，地址 %p\n", q);
+        appf(out, cap, used, "  ✓ B-1 mmap bundle 里的 .so 成 R+X：成功，地址 %p\n", q);
         munmap(q, pg);
 
         // B-2：完整机制演练 —— 先预留连续地址，再把文件页 MAP_FIXED 进去
@@ -146,9 +175,54 @@ static void exp_b(char *out, size_t cap, size_t *used) {
                                     "「按原相对位置摆回去」的机制可用\n");
             munmap(res, total);
         }
-        app(out, cap, used, "  结论：文件映射路线成立，装载方案可以按设计推进。\n");
     }
     close(fd);
+
+    // B-3：换一个「应用数据目录」里的文件再试一次。
+    // 用来分辨：禁令是针对 bundle 目录（.so 所在处），还是所有应用文件都不许可执行映射。
+    // 这决定了方案是"换个地方放镜像"就行，还是要整个换路线。
+    int b3_ok = 0, b3_tried = 0;
+    if (files_dir && *files_dir) {
+        b3_tried = 1;
+        char tpath[1024];
+        snprintf(tpath, sizeof tpath, "%s/probe_b3.bin", files_dir);
+        int tf = open(tpath, O_RDWR | O_CREAT | O_TRUNC, 0600);
+        if (tf < 0) {
+            appf(out, cap, used, "  ✗ B-3 数据目录建文件失败（%s）：%s\n", tpath, strerror(errno));
+        } else {
+            char buf[4096];
+            memset(buf, 0, sizeof buf);
+            memcpy(buf, "\xc0\x03\x5f\xd6", 4);   // ARM64: ret
+            if (write(tf, buf, sizeof buf) != (ssize_t)sizeof buf) {
+                appf(out, cap, used, "  ✗ B-3 写测试文件失败：%s\n", strerror(errno));
+            } else {
+                void *r = mmap(NULL, pg, PROT_READ | PROT_EXEC, MAP_PRIVATE, tf, 0);
+                if (r == MAP_FAILED) {
+                    appf(out, cap, used, "  ✗ B-3 mmap 数据目录文件成 R+X：失败（%s）\n",
+                         strerror(errno));
+                } else {
+                    b3_ok = 1;
+                    appf(out, cap, used, "  ✓ B-3 mmap 数据目录文件成 R+X：成功，地址 %p\n", r);
+                    munmap(r, pg);
+                }
+            }
+            close(tf);
+        }
+    }
+
+    // 汇总
+    if (b1_ok) {
+        app(out, cap, used, "  结论：文件映射路线成立，装载方案按原设计推进。\n");
+    } else if (b3_ok) {
+        app(out, cap, used, "  结论：bundle 目录不许可执行映射，但数据目录可以 →\n"
+                            "        把镜像放到应用数据目录再映射即可，方案仍然成立。\n");
+    } else if (b3_tried) {
+        app(out, cap, used, "  结论：bundle 与数据目录都不许 → 文件映射路线整体不可用，\n"
+                            "        必须换方案（候选：镜像放进 .so 自己的可执行段，\n"
+                            "        用链接脚本强制三块在文件里相邻，不搬位置）。\n");
+    } else {
+        app(out, cap, used, "  结论：B-3 未跑（没拿到数据目录路径），无法判断禁令范围。\n");
+    }
     app(out, cap, used, "\n");
 }
 
@@ -179,19 +253,27 @@ static void exp_c(char *out, size_t cap, size_t *used) {
 
 // ─────────────────────── 入口 ───────────────────────
 
-int dm_probe_run(char *out, size_t cap) {
+int dm_probe_run(const char *files_dir, char *out, size_t cap) {
     if (!out || cap < 64) return -1;
     size_t used = 0;
     out[0] = 0;
 
     app(out, cap, &used, "D2R Mobile · 鸿蒙移植 · 第 1 站实验\n");
     app(out, cap, &used, "==================================================\n\n");
+    if (files_dir && *files_dir) {
+        appf(out, cap, &used, "应用数据目录：%s\n\n", files_dir);
+    }
 
-    exp_a(out, cap, &used);
-    exp_b(out, cap, &used);
-    exp_c(out, cap, &used);
+    // 这几条只进 hilog、不进报告：万一某一步把进程搞挂了，
+    // 从日志里就能看出死在哪一步（有"进入"没"返回"）。
+    // 顺序有讲究：A 的最后一步要真执行一段可能不可执行的内存，
+    // 万一信号兜底没兜住、进程挂了，B/C 也已经跑完并写进日志了。
+    logline(">>> 实验 C 开始"); exp_c(out, cap, &used); logline(">>> 实验 C 返回");
+    logline(">>> 实验 B 开始"); exp_b(files_dir, out, cap, &used); logline(">>> 实验 B 返回");
+    logline(">>> 实验 A 开始"); exp_a(out, cap, &used); logline(">>> 实验 A 返回");
 
     app(out, cap, &used, "==================================================\n");
     app(out, cap, &used, "把这份报告发回来，就能定下装载方案。\n");
+    logline(">>> 三个实验全部跑完");
     return 0;
 }

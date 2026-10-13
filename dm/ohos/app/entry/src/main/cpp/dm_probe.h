@@ -12,4 +12,8 @@
 
 // 依次跑 A/B/C，把可读报告写进 out（含结尾 0）。
 // 返回 0 表示三个实验都执行完了（不代表都通过——通过与否看报告文字）。
-int dm_probe_run(char *out, size_t cap);
+//
+// files_dir：应用的数据目录（ArkTS 侧传 context.filesDir 进来）。
+//            实验 B-3 要在里面造个文件试 mmap，用来判断
+//            「禁止可执行映射」是针对 bundle 目录还是所有应用文件。
+int dm_probe_run(const char *files_dir, char *out, size_t cap);
