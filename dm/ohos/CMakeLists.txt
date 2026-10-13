@@ -34,6 +34,7 @@ set(DM_COMPAT_SOURCES
     ${DM_COMPAT}/src/dm_compat_hash.c    # MD5 / SHA-1 / SHA-256（CommonCrypto）
     ${DM_COMPAT}/src/dm_compat_mach.c    # 时钟 / 读内存 / 内存统计 + 线程状态的诚实降级
     ${DM_COMPAT}/src/dm_compat_fs.c      # sysctl / clonefile / xattr / malloc 统计
+    ${DM_COMPAT}/src/dm_compat_dispatch.c # GCD 信号量（无 block；block 那块刻意不做，见该头文件说明）
 )
 
 set(DM_SOURCES

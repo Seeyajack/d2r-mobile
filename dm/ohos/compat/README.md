@@ -43,6 +43,7 @@
 | `sys/xattr.h` | 扩展属性（**6 参数**版） | 映射到 Linux 的 4/5 参数接口 | 真实现 |
 | `malloc/malloc.h` | malloc zone 统计 | 填 0 + 明确说明 | 诚实降级 |
 | `mach-o/dyld.h` | `_NSGetExecutablePath` | 返回 `$DM_ROOT/D2R`，让上游拼出的 `/dm/derived.tsv` 落到 `$DM_ROOT/dm/` | 换落点 |
+| `dispatch/dispatch.h` | GCD —— **只做信号量**（`dispatch_semaphore_*` / `dispatch_time` / `dispatch_release`），pthread 实现 | 见第六节：block 那块**刻意不做** | 真实现（局部） |
 | `shim_prefix.h` | 一批散用符号 | `strlcpy`/`strlcat`/`arc4random*`/`renamex_np`/`st_mtimespec`/`CLOCK_UPTIME_RAW` | 真实现 |
 
 实现代码在 `src/`，分四个文件：`dm_compat_str.c`、`dm_compat_hash.c`、`dm_compat_mach.c`、`dm_compat_fs.c`。
@@ -82,18 +83,17 @@ Linux/鸿蒙没有"非特权读另一个线程寄存器"的接口，`ptrace` 要
 ## 四、实测现状（`tools/probe_host.sh` 可复现）
 
 ```
-共 71 个 .c，通过 66   未通过 5
+共 71 个 .c，通过 67   未通过 4
 ```
 
-**未通过的 5 个，分成两类，性质完全不同：**
+**未通过的 4 个，分成两类：**
 
 | 文件 | 卡在哪 | 性质 |
 |---|---|---|
 | `diag.c` / `dm_bright.c` / `dm_vault_ui.c` | 缺 `dm_hud_exp.h` / `dm_bright_levels.inc` / `dm_vault_tab.h` | **不是移植问题**：这三张表要用**你自己的游戏文件**生成（阶段 2） |
 | `hle_audio.c` | `AudioToolbox` | **不是"垫"的事**：CoreAudio AudioUnit → 鸿蒙音频服务，是换一个后端 |
-| `hle_lifecycle.c` | `dispatch/dispatch.h` | GCD + **block 字面量**，要一并解决 block 运行时 |
 
-**也就是说：剩下要动脑的只有 2 块**（音频后端、dispatch+block），另外 3 个等游戏文件。
+**也就是说：宿主侧只剩 1 块要动脑的活（音频后端），另外 3 个等游戏文件。**
 
 ### 另外两件在编译探针之外、但已经验证掉的事
 
@@ -120,10 +120,14 @@ Linux/鸿蒙没有"非特权读另一个线程寄存器"的接口，`ptrace` 要
 
 | 缺的东西 | 为什么不做在这儿 |
 |---|---|
-| `dispatch/dispatch.h` | 涉及 GCD 语义 + block 运行时（`-fblocks` + `Block_copy`），是独立一块工作，草率垫上去会静默出错 |
+| **GCD 里收 block 的那几个**（`dispatch_after` / `dispatch_source_set_event_handler` / `dispatch_async`…） | 收的是 block 字面量。block 要"存下来稍后再调"就必须复制到堆上，也就是需要一套 **block 运行时**（`_Block_copy` / `_Block_object_assign` / `_NSConcreteStackBlock`）。鸿蒙 sysroot 里既没有 `Block.h` 也没有这个运行时库。自己手搓，是**在没有真机验证的情况下赌**——赌错的后果是"回调跳进一块已经失效的栈内存"，属于最难查的那类崩溃。所以不赌：宿主里唯一用到它的 `hle_lifecycle.c` 在鸿蒙侧改用 pthread 直写那两处（一个延时退出线程 + 一个 `sigwait` 线程），语义反而更直白 |
 | `AudioToolbox` | 不是"垫"的事，是**换一个音频后端**（CoreAudio AudioUnit → 鸿蒙音频服务） |
 | `CoreFoundation` | `dm_i18n.c` 里已被 `#if TARGET_OS_IPHONE` 守卫排除（垫片的 `TargetConditionals.h` 让它自动落到鸿蒙侧），无需处理 |
 | 上游直接写的 `fprintf(stderr, ...)` | `dm.h` 的 `LOG()` 已接 hilog，但少数地方直接写 stderr；真机上 stderr 不一定可见，另案处理 |
+
+> GCD 这块可以再说清一点：**信号量部分是"真实现"，block 部分不是"没做"而是"刻意不做"**。
+> 这两者的区别很重要——前者能验证（`dispatch_semaphore_wait` 成功返回 0、超时返回非 0，
+> 与 GCD 一致）；后者在鸿蒙上无法验证，而无法验证的东西宁可换成能看懂的写法。
 
 > 关于 `is_write`（`crash.c`）的一个说明，值得单独记一笔：
 > 苹果能从不变量寄存器 ESR 的 WnR 位读出"这次缺页是读还是写"，Linux/aarch64 的 `sigcontext` 里没有 ESR。
@@ -164,6 +168,7 @@ Linux/鸿蒙没有"非特权读另一个线程寄存器"的接口，`ptrace` 要
 | `dm/host/hle.c` | `mach-o/*` 的两个 include 加守卫；登记表改为经 `__start_dmswhle`/`__stop_dmswhle` 取 | 同 loader.c 已有的写法 |
 | `dm/host/crash.c` | 新增 `DM_UC_PC/LR/FP/SP/X` 五个取寄存器宏；缺页的读/写判断加鸿蒙分支 | 两边 `ucontext_t` 一个是**指针**、一个是**值**，字段名全不同 |
 | `dm/host/hle_fdstat.c` | 新增 `DM_FD_PATH` 宏（鸿蒙走 `/proc/self/fd/<n>`） | 苹果的 `F_GETPATH` 是 fcntl 扩展，Linux 没有；`fcntl` 是可变参数，垫不了 |
+| `dm/host/hle_lifecycle.c` | 两处 dispatch（`dispatch_after` + `dispatch_source_*`）在鸿蒙侧改用 pthread 直写 | 它们收的是 block，见第五节——块运行时无法验证，所以换成能看懂的写法 |
 | `dm/host/dm.h` | 日志宏加 `DM_LOG_TO_HILOG` 守卫 | 宏定义只能在一处收口 |
 
 另外一处**没动源码**：`dm_textbox_core.c` 用了 `memmem`，在苹果上由 `<string.h>` 顺带声明，
