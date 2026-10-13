@@ -390,6 +390,78 @@ static void exp_e(char *out, size_t cap, size_t *used) {
     app(out, cap, used, "\n");
 }
 
+// ───── 实验 E2：找 musl 的 tsd 指针在 pthread 结构里的偏移 ─────
+// 实验 E 已说明：槽值不在 tpidr_el0 + 键号×8 处，也不是 tpidr_el0 附近的数组。
+// musl 的做法是在 struct pthread 里放一个 void **tsd，指向单独分配的槽数组：
+//     槽地址 = *(void**)(tpidr_el0 + tsd_off) + 键号 × 8
+// 这里扫 pthread 结构，找那个 tsd_off。
+static int safe_read64(uint64_t addr, uint64_t *out) {
+    if (sigsetjmp(g_probe_jmp, 1) == 0) {
+        g_probe_jmp_armed = 1;
+        *out = *(const uint64_t *)(uintptr_t)addr;
+        g_probe_jmp_armed = 0;
+        return 1;
+    }
+    return 0;   // 越界被信号兜底接住了
+}
+
+static void exp_e2(char *out, size_t cap, size_t *used) {
+    app(out, cap, used, "【实验 E2】找 musl 的 tsd 指针偏移\n");
+
+    uint64_t tp = 0;
+    __asm__ volatile("mrs %0, tpidr_el0" : "=r"(tp));
+    appf(out, cap, used, "  tpidr_el0 = 0x%llx\n", (unsigned long long)tp);
+
+    pthread_key_t k1, k2;
+    if (pthread_key_create(&k1, NULL) || pthread_key_create(&k2, NULL)) {
+        app(out, cap, used, "  ✗ 建键失败\n\n");
+        return;
+    }
+    const uint64_t m1 = 0x5a5cafe123456789ull;
+    const uint64_t m2 = 0x0f1e2d3c4b5a6978ull;
+    pthread_setspecific(k1, (void *)(uintptr_t)m1);
+    pthread_setspecific(k2, (void *)(uintptr_t)m2);
+    appf(out, cap, used, "  键号 %lu → 0x%llx，%lu → 0x%llx\n",
+         (unsigned long)k1, (unsigned long long)m1,
+         (unsigned long)k2, (unsigned long long)m2);
+
+    // 扫 pthread 结构：找偏移 o，使 *(pthread+o) 是个指针 p，且 p[k1]==m1、p[k2]==m2
+    // 扫描会碰到未映射地址，必须先装信号兜底（safe_read64 靠 siglongjmp 回来）
+    struct sigaction sa, old_segv, old_bus;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = probe_segv_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_NODEFER;
+    sigaction(SIGSEGV, &sa, &old_segv);
+    sigaction(SIGBUS, &sa, &old_bus);
+
+    long found_off = 0;
+    for (long o = -0x400; o < 0x2000; o += 8) {
+        uint64_t p = 0;
+        if (!safe_read64(tp + (uint64_t)o, &p)) continue;
+        if (p < 0x10000 || p > 0x8000000000000000ull) continue;    // 不像用户态指针
+        uint64_t v1 = 0, v2 = 0;
+        if (!safe_read64(p + (uint64_t)k1 * 8, &v1)) continue;
+        if (v1 != m1) continue;
+        if (!safe_read64(p + (uint64_t)k2 * 8, &v2)) continue;
+        if (v2 != m2) continue;
+        found_off = o;
+        break;
+    }
+    sigaction(SIGSEGV, &old_segv, NULL);
+    sigaction(SIGBUS, &old_bus, NULL);
+
+    if (!found_off) {
+        app(out, cap, used, "  ✗ 没找到（可能是两级以上间接，或 tsd 数组另存）\n\n");
+        return;
+    }
+    appf(out, cap, used, "  ✓ 找到了：pthread + %ld 是指针 p，且 p[%lu]==marker1、p[%lu]==marker2\n",
+         found_off, (unsigned long)k1, (unsigned long)k2);
+    appf(out, cap, used, "  → 完整公式：槽地址 = *(void**)(tpidr_el0 + %ld) + 键号 × 8\n", found_off);
+    app(out, cap, used, "  → 改写器改用 tpidr_el0 作基址，插入一次「取 tsd 指针」的 ldr；\n"
+                        "    键页仍写 键号×8，不动。\n\n");
+}
+
 // ─────────────────────── 入口 ───────────────────────
 
 int dm_probe_run(const char *files_dir, char *out, size_t cap) {
@@ -409,6 +481,7 @@ int dm_probe_run(const char *files_dir, char *out, size_t cap) {
     // 万一信号兜底没兜住、进程挂了，B/C 也已经跑完并写进日志了。
     logline(">>> 实验 D 开始"); exp_d(out, cap, &used); logline(">>> 实验 D 返回");
     logline(">>> 实验 E 开始"); exp_e(out, cap, &used); logline(">>> 实验 E 返回");
+    logline(">>> 实验 E2 开始"); exp_e2(out, cap, &used); logline(">>> 实验 E2 返回");
     logline(">>> 实验 C 开始"); exp_c(out, cap, &used); logline(">>> 实验 C 返回");
     logline(">>> 实验 B 开始"); exp_b(files_dir, out, cap, &used); logline(">>> 实验 B 返回");
     logline(">>> 实验 A 开始"); exp_a(out, cap, &used); logline(">>> 实验 A 返回");
