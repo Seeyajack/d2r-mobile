@@ -7,11 +7,37 @@
 //       iOS defaults to real audio output (the product must have sound), tests that want silence set DM_AUDIO=0 explicitly; Mac defaults to the silent sink (replay / gate checks are silent), DM_AUDIO=1 for real audio output.
 // The contents of AudioOut / AudioOutBuffer / AudioOutParameter are read and written only through the interfaces below; the host defines its own internal layout and only writes the front part of the structs.
 #include "hle.h"
-#include <AudioToolbox/AudioToolbox.h>
+#if !defined(__OHOS__)
+#include <AudioToolbox/AudioToolbox.h>   // 苹果的 CoreAudio；鸿蒙侧换成 OHAudio，见下面的收口块
+#endif
 #include <TargetConditionals.h>
 #include <dispatch/dispatch.h>
 #include <stdatomic.h>
 #include <unistd.h>
+
+// ---------- 音频后端收口 ----------
+// 苹果是 CoreAudio AudioUnit，鸿蒙是 OHAudio（实现在 dm/ohos/audio_ohos.c）。
+// 本文件**只有下面这组名字与后端有关**：调用点不认识 AudioUnit，也不认识 OHAudio，
+// 两边的差异全在这里吸收。方案与已核实的官方接口见 `dm/ohos/音频后端方案-从CoreAudio到OHAudio.md`。
+// Audio backend funnel: Apple is CoreAudio AudioUnit, HarmonyOS is OHAudio (implemented in
+// dm/ohos/audio_ohos.c). Only the names below are backend-aware; call sites know neither AudioUnit
+// nor OHAudio, and the differences are absorbed right here.
+#if defined(__OHOS__)
+#include "audio_ohos.h"
+typedef void *dm_au_t;              // 流句柄；空 = 没有真出声后端，调用点会自然走静音接收端
+typedef int   dm_au_status_t;       // 0 = 成功
+#define DM_AO_OPEN(a)   ((a)->au = dm_ao_open((a)->ch, RATE))
+#define DM_AO_START(a)  dm_ao_start((a)->au)
+#define DM_AO_STOP(a)   dm_ao_stop((a)->au)
+#define DM_AO_CLOSE(a)  dm_ao_close((a)->au)
+#else
+typedef AudioUnit dm_au_t;
+typedef OSStatus  dm_au_status_t;
+#define DM_AO_OPEN(a)   au_open(a)
+#define DM_AO_START(a)  AudioOutputUnitStart((a)->au)
+#define DM_AO_STOP(a)   AudioOutputUnitStop((a)->au)
+#define DM_AO_CLOSE(a)  do { AudioUnitUninitialize((a)->au); AudioComponentInstanceDispose((a)->au); } while (0)
+#endif
 
 enum { FMT_PCM16 = 2, STATE_STARTED = 0, STATE_STOPPED = 1, RATE = 48000 };
 
@@ -26,7 +52,7 @@ typedef struct {
     gbuf *q[QMAX]; _Atomic uint32_t q_head, q_tail;       // 待播：游戏侧写，出声端读 | Pending: written by the game side, read by the output side
     gbuf *rel[RELMAX]; _Atomic uint32_t rel_head, rel_tail; // 已释放：出声端写，游戏侧读 | Released: written by the output side, read by the game side
     uint64_t pos;                      // 当前块已播字节 | Bytes already played of the current block
-    AudioUnit au;
+    dm_au_t au;                        // 真出声后端句柄（苹果 AudioUnit / 鸿蒙 OHAudio 流）；空 = 静音接收端 | Real-output backend handle; NULL = silent sink
     pthread_t null_th; _Atomic int null_run;
     dispatch_semaphore_t notify_sem;
     pthread_t notify_th; _Atomic int notify_run, notify_pending, notify_armed;
@@ -89,6 +115,11 @@ static void pull(aout *a, uint8_t *dst, uint64_t n) {
 
 static _Atomic uint64_t g_render_calls;   // 声卡回调累计（生命周期验证：恢复后须继续增长） | Cumulative sound card callbacks (lifecycle verification: must keep growing after resume)
 uint64_t dm_audio_render_calls(void) { return atomic_load_explicit(&g_render_calls, memory_order_relaxed); }
+#if !defined(__OHOS__)
+// 苹果的渲染回调与建流。鸿蒙侧换成 OHAudio，实现在 dm/ohos/audio_ohos.c——
+// 那边的回调体里调的也是同一个 pull()，参数含义一一对应（往给定指针写给定字节数）。
+// Apple's render callback and stream setup. HarmonyOS uses OHAudio in dm/ohos/audio_ohos.c; that
+// callback calls the same pull() with one-to-one parameter meanings (write N bytes at a given pointer).
 static OSStatus au_render(void *ctx, AudioUnitRenderActionFlags *f, const AudioTimeStamp *ts, UInt32 bus, UInt32 frames, AudioBufferList *bl) {
     (void)f; (void)ts; (void)bus; (void)frames;
     aout *a = ctx;
@@ -115,6 +146,7 @@ static void au_open(aout *a) {
         AudioUnitSetProperty(a->au, kAudioUnitProperty_SetRenderCallback, kAudioUnitScope_Input, 0, &cb, sizeof cb) ||
         AudioUnitInitialize(a->au)) die("AudioUnit 设置失败");
 }
+#endif
 // 静音接收端：每 5 ms 按 48 kHz 实时消耗
 // Silent sink: consumes in real time at 48 kHz every 5 ms
 static void *null_sink(void *p) {
@@ -136,7 +168,7 @@ HLE_FORCE("_ZN2nn5audio13ListAudioOutsEPNS0_12AudioOutInfoEi", "音频输出设�
     if (n < 1) return 0;
     memset(info, 0, 256); strcpy(info, "DeviceOut"); return 1;
 }
-HLE_FORCE("_ZN2nn5audio12OpenAudioOutEPNS0_8AudioOutEPNS_2os11SystemEventEPKcRKNS0_17AudioOutParameterE", "连 audout 服务；宿主 AudioUnit / 静音接收端",
+HLE_FORCE("_ZN2nn5audio12OpenAudioOutEPNS0_8AudioOutEPNS_2os11SystemEventEPKcRKNS0_17AudioOutParameterE", "连 audout 服务；宿主真出声后端 / 静音接收端",
           Result, h_au_Open, void *g, void *ev, const char *name, const uint8_t *param) {
     int ch = *(const uint16_t *)(param + 4); int rate = *(const int32_t *)param;
     if (!ch) ch = 2;
@@ -158,14 +190,14 @@ HLE_FORCE("_ZN2nn5audio12OpenAudioOutEPNS0_8AudioOutEPNS_2os11SystemEventEPKcRKN
     g_aos[slot] = a;
     pthread_mutex_unlock(&g_aos_lock);
     LOG("audio::OpenAudioOut %s 声道 %d %s", name ? name : "(默认)", ch, real_audio() ? "真出声" : "静音接收端");
-    if (real_audio()) au_open(a);
+    if (real_audio()) DM_AO_OPEN(a);
     return RES_OK;
 }
 HLE_FORCE("_ZN2nn5audio13StartAudioOutEPNS0_8AudioOutE", "开始播放", Result, h_au_Start, void *g) {
     aout *a = ao(g);
     pthread_mutex_lock(&a->m); int was = atomic_load_explicit(&a->state, memory_order_relaxed); atomic_store_explicit(&a->state, STATE_STARTED, memory_order_release); pthread_mutex_unlock(&a->m);
     if (was == STATE_STARTED) return RES_OK;
-    if (a->au && !g_suspended) { if (AudioOutputUnitStart(a->au)) die("AudioUnit 启动失败"); }
+    if (a->au && !g_suspended) { if (DM_AO_START(a)) die("音频输出启动失败"); }
     else { atomic_store_explicit(&a->null_run, 1, memory_order_release); pthread_create(&a->null_th, NULL, null_sink, a); }
     return RES_OK;
 }
@@ -174,7 +206,7 @@ HLE_FORCE("_ZN2nn5audio12StopAudioOutEPNS0_8AudioOutE", "停止播放", void, h_
     pthread_mutex_lock(&a->m); int was = atomic_load_explicit(&a->state, memory_order_relaxed); atomic_store_explicit(&a->state, STATE_STOPPED, memory_order_release); pthread_mutex_unlock(&a->m);
     if (was != STATE_STARTED) return;
     pthread_mutex_lock(&g_aos_lock); int susp = g_suspended; pthread_mutex_unlock(&g_aos_lock);
-    if (a->au && !susp) AudioOutputUnitStop(a->au);
+    if (a->au && !susp) DM_AO_STOP(a);
     else { atomic_store_explicit(&a->null_run, 0, memory_order_release); pthread_join(a->null_th, NULL); }   // 静音接收端（含暂停期间接手的） | Silent sink (including one that took over during suspension)
 }
 HLE_FORCE("_ZN2nn5audio13CloseAudioOutEPNS0_8AudioOutE", "关闭音频输出", void, h_au_Close, void *g) {
@@ -186,7 +218,7 @@ HLE_FORCE("_ZN2nn5audio13CloseAudioOutEPNS0_8AudioOutE", "关闭音频输出", v
     pthread_mutex_lock(&g_aos_lock);
     for (int i = 0; i < AOMAX; i++) if (g_aos[i] == a) g_aos[i] = NULL;
     pthread_mutex_unlock(&g_aos_lock);
-    if (a->au) { AudioUnitUninitialize(a->au); AudioComponentInstanceDispose(a->au); }
+    if (a->au) DM_AO_CLOSE(a);
     dispatch_release(a->notify_sem);
     pthread_mutex_destroy(&a->m); free(a);
 }
@@ -239,11 +271,11 @@ void dm_audio_suspend(int on) {
             if (!a || !a->au || atomic_load_explicit(&a->state, memory_order_acquire) != STATE_STARTED) continue;
             // 暂停期间改由静音接收端按实时消耗：否则缓冲不再释放，FMOD 输出线程永久等待、游戏音频节奏卡死（来电打断同理）
             // While suspended the silent sink consumes in real time instead: otherwise buffers are no longer released, the FMOD output thread waits forever and the game's audio pacing stalls (same for an incoming call interruption)
-            if (on) { AudioOutputUnitStop(a->au); atomic_store_explicit(&a->null_run, 1, memory_order_release); pthread_create(&a->null_th, NULL, null_sink, a); }
+            if (on) { DM_AO_STOP(a); atomic_store_explicit(&a->null_run, 1, memory_order_release); pthread_create(&a->null_th, NULL, null_sink, a); }
             else { atomic_store_explicit(&a->null_run, 0, memory_order_release); pthread_join(a->null_th, NULL);
-                   OSStatus st = AudioOutputUnitStart(a->au);
+                   dm_au_status_t st = DM_AO_START(a);
                    if (st) {   // 会话还被别人占着（通话没挂就切回游戏、打断结束时人还在别的 App）：不致命，继续由静音接收端顶着，等下一次恢复再试 | The session is still held by someone else (switched back to the game with a call not yet hung up, or the user is still in another app when the interruption ends): not fatal, the silent sink keeps covering, and we retry at the next resume
-                       LOG("【红】AudioUnit 恢复失败（状态 %d）：保持静音接收端，等下次恢复重试", (int)st);
+                       LOG("【红】音频输出恢复失败（状态 %d）：保持静音接收端，等下次恢复重试", (int)st);
                        atomic_store_explicit(&a->null_run, 1, memory_order_release); pthread_create(&a->null_th, NULL, null_sink, a); failed = 1; } }
         }
         if (failed) g_suspended = 1;   // 没恢复成：状态留在「暂停」，下次调 0 会再试 | Resume did not succeed: the state stays "suspended", and the next call with 0 will retry

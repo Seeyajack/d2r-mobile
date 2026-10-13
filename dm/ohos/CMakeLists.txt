@@ -40,6 +40,7 @@ set(DM_COMPAT_SOURCES
 set(DM_SOURCES
     ${DM_OHOS}/front_ohos.c              # front.h 契约的鸿蒙实现
     ${DM_OHOS}/dm_log.c                  # 统一日志出口（LOG → hilog）
+    ${DM_OHOS}/audio_ohos.c              # 音频后端（OHAudio）：第一步是诚实的空实现，第二步填真实现
     ${DM_COMPAT_SOURCES}
 
     # ---- 宿主（dm/host）：等"能链接的一整批"凑齐后再逐个打开 ----

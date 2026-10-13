@@ -83,17 +83,21 @@ Linux/鸿蒙没有"非特权读另一个线程寄存器"的接口，`ptrace` 要
 ## 四、实测现状（`tools/probe_host.sh` 可复现）
 
 ```
-共 71 个 .c，通过 67   未通过 4
+共 71 个 .c，通过 68   未通过 3
 ```
 
-**未通过的 4 个，分成两类：**
+**未通过的 3 个是同一回事，而且不是移植问题**：
 
-| 文件 | 卡在哪 | 性质 |
-|---|---|---|
-| `diag.c` / `dm_bright.c` / `dm_vault_ui.c` | 缺 `dm_hud_exp.h` / `dm_bright_levels.inc` / `dm_vault_tab.h` | **不是移植问题**：这三张表要用**你自己的游戏文件**生成（阶段 2） |
-| `hle_audio.c` | `AudioToolbox` | **不是"垫"的事**：CoreAudio AudioUnit → 鸿蒙音频服务，是换一个后端 |
+| 文件 | 卡在哪 |
+|---|---|
+| `diag.c` / `dm_bright.c` / `dm_vault_ui.c` | 缺 `dm_hud_exp.h` / `dm_bright_levels.inc` / `dm_vault_tab.h` —— 这三张表要用**你自己的游戏文件**生成（阶段 2） |
 
-**也就是说：宿主侧只剩 1 块要动脑的活（音频后端），另外 3 个等游戏文件。**
+**也就是说：宿主侧已经全部编过，剩下 3 个卡在游戏文件上。**
+
+> `hle_audio.c`（音频后端）已通过收口解决：苹果的 CoreAudio 部分被 `#if !defined(__OHOS__)` 关起来，
+> 4 个调用点收口成 `DM_AO_*` 宏，鸿蒙侧由 `dm/ohos/audio_ohos.c` 承接
+> （**目前是诚实的空实现** ⇒ 一律走静音接收端，节奏与真机一致、没有声音）。
+> 真出声是增量工作，方案见 `dm/ohos/音频后端方案-从CoreAudio到OHAudio.md`。
 
 ### 另外两件在编译探针之外、但已经验证掉的事
 
