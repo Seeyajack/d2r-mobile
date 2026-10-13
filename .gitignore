@@ -3,3 +3,36 @@
 .iosdd_mac/
 .iosdd_*/
 .DS_Store
+
+# ===== 游戏文件与派生内容：绝不入库（见移植计划第 3.4 节红线）=====
+data/switch/
+data/assets-src/
+*.nsp
+*.xci
+prod.keys
+*.tik
+*.cert
+
+# ===== 本地配置（含签名信息，不要公开）=====
+dm/ios/local.env
+dm/ohos/local.env
+local.env
+
+# ===== 构建产物 =====
+build/
+out/
+*.hap
+*.o
+
+# ===== 鸿蒙 / DevEco Studio =====
+oh_modules/
+.hvigor/
+.clangd
+.clang-format
+.clang-tidy
+*.har
+
+# ===== 编辑器 / 系统杂项 =====
+.vscode/
+.idea/
+Thumbs.db
