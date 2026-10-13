@@ -462,6 +462,58 @@ static void exp_e2(char *out, size_t cap, size_t *used) {
                         "    键页仍写 键号×8，不动。\n\n");
 }
 
+// ───── 实验 F：改写器生成的指令序列，在 musl 上真的能读到槽吗 ─────
+// 把 patch_nso.py 的 emit_slot_addr 在 OHOS 下生成的那串指令原样执行一遍：
+//     mrs T, tpidr_el0 → sub T,T,#272 → ldr T,[T] → add T,T,key*8 → ldr S,[T]
+// 值由 pthread_setspecific 写进去（改写后的游戏代码就是这么读的），
+// 看它能不能读回来、和 pthread_getspecific 是否一致。
+#if defined(__aarch64__)
+#define DM_SLOT_READ(dst, off) __asm__ volatile ( \
+    "mov x9, %1 \n"                  /* x9  = 键页里存的值（键号×8） */ \
+    "mrs x10, tpidr_el0 \n"          /* x10 = pthread 指针 */ \
+    "sub x10, x10, #272 \n"          /* x10 = &pthread->tsd */ \
+    "ldr x10, [x10] \n"              /* x10 = musl 的 tsd 数组 */ \
+    "add x9, x10, x9 \n"             /* x9  = 槽地址 */ \
+    "ldr %0, [x9] \n"                /* dst = 槽值 */ \
+    : "=r"(dst) : "r"((uint64_t)(off)) : "x9", "x10", "memory")
+#else
+#define DM_SLOT_READ(dst, off) do { (dst) = (uint64_t)(uintptr_t)pthread_getspecific(0); } while (0)
+#endif
+
+static void exp_f(char *out, size_t cap, size_t *used) {
+    app(out, cap, used, "【实验 F】改写器生成的指令序列能否读到宿主写的槽\n");
+    app(out, cap, used, "  原样执行 emit_slot_addr 在 OHOS 下生成的五条指令\n");
+
+    pthread_key_t k1, k2;
+    if (pthread_key_create(&k1, NULL) || pthread_key_create(&k2, NULL)) {
+        app(out, cap, used, "  ✗ 建键失败\n\n");
+        return;
+    }
+    const uint64_t v1 = 0xA5A5DEAD00000001ull;
+    const uint64_t v2 = 0xA5A5DEAD00000002ull;
+    pthread_setspecific(k1, (void *)(uintptr_t)v1);
+    pthread_setspecific(k2, (void *)(uintptr_t)v2);
+
+    uint64_t r1 = 0, r2 = 0;
+    DM_SLOT_READ(r1, (uint64_t)k1 * 8);
+    DM_SLOT_READ(r2, (uint64_t)k2 * 8);
+    uint64_t g1 = (uint64_t)(uintptr_t)pthread_getspecific(k1);
+    uint64_t g2 = (uint64_t)(uintptr_t)pthread_getspecific(k2);
+
+    appf(out, cap, used, "  键号 %-4lu：原生序列读回 0x%llx，宿主读回 0x%llx，写入 0x%llx  %s\n",
+         (unsigned long)k1, (unsigned long long)r1, (unsigned long long)g1,
+         (unsigned long long)v1, (r1 == g1 && r1 == v1) ? "✓" : "✗");
+    appf(out, cap, used, "  键号 %-4lu：原生序列读回 0x%llx，宿主读回 0x%llx，写入 0x%llx  %s\n",
+         (unsigned long)k2, (unsigned long long)r2, (unsigned long long)g2,
+         (unsigned long long)v2, (r2 == g2 && r2 == v2) ? "✓" : "✗");
+
+    if (r1 == g1 && r2 == g2 && r1 == v1 && r2 == v2)
+        app(out, cap, used, "  结论：改写器生成的代码序列在 musl 上读得到宿主写的槽，"
+                            "且与 pthread_getspecific 一致。\n\n");
+    else
+        app(out, cap, used, "  结论：读不到或不一致，需要细看。\n\n");
+}
+
 // ─────────────────────── 入口 ───────────────────────
 
 int dm_probe_run(const char *files_dir, char *out, size_t cap) {
@@ -482,6 +534,7 @@ int dm_probe_run(const char *files_dir, char *out, size_t cap) {
     logline(">>> 实验 D 开始"); exp_d(out, cap, &used); logline(">>> 实验 D 返回");
     logline(">>> 实验 E 开始"); exp_e(out, cap, &used); logline(">>> 实验 E 返回");
     logline(">>> 实验 E2 开始"); exp_e2(out, cap, &used); logline(">>> 实验 E2 返回");
+    logline(">>> 实验 F 开始"); exp_f(out, cap, &used); logline(">>> 实验 F 返回");
     logline(">>> 实验 C 开始"); exp_c(out, cap, &used); logline(">>> 实验 C 返回");
     logline(">>> 实验 B 开始"); exp_b(files_dir, out, cap, &used); logline(">>> 实验 B 返回");
     logline(">>> 实验 A 开始"); exp_a(out, cap, &used); logline(">>> 实验 A 返回");

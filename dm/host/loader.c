@@ -44,13 +44,24 @@ static void create_keys(void) {
         g_key18, g_keytls, g_keytlr, g_keygate, g_keyres[0], g_keyres[1], g_keyaspect, g_keyaspectui);
 }
 
-// K 槽校验：pthread TSD 布局固定，槽 = tpidrro_el0 + 8*key
-// K slot check: the pthread TSD layout is fixed, slot = tpidrro_el0 + 8*key
+// K 槽校验。等式因平台而异（依据：dm/ohos/线程槽方案-musl改法.md）：
+//   苹果：槽 = tpidrro_el0 + 8*key                pthread 把 TSD 放在 tpidrro_el0 指向的结构里
+//   鸿蒙：槽 = *(void**)(tpidr_el0 − 272) + 8*key  musl 两级间接，tsd 数组是单独分配的
+//         （−272 是真机实测；改写器 emit_slot_addr 生成的就是这两条多出来的指令）
+// K slot check. The equation differs per platform (see dm/ohos/thread slot plan):
+//   Apple: slot = tpidrro_el0 + 8*key       (pthread keeps the TSD in the structure tpidrro_el0 points at)
+//   OHOS : slot = *(void**)(tpidr_el0 - 272) + 8*key   (musl's two-level indirection; the tsd array is allocated separately)
 static void tsd_check(void) {
     pthread_setspecific(g_key18, (void *)0x1234);
-    uint64_t base; __asm__ volatile("mrs %0, tpidrro_el0" : "=r"(base));
     uint64_t off = *(uint64_t *)(g_mod[0].base + g_mod[0].key_page_off + g_mod[0].key_idx[KEY_K18] * 8);
+#if defined(__OHOS__)
+    uint64_t tp; __asm__ volatile("mrs %0, tpidr_el0" : "=r"(tp));
+    uint64_t tsd = *(uint64_t *)(tp - 272);
+    if (((uint64_t *)tsd)[off / 8] != 0x1234) die("TSD 布局不符（musl 两级间接）");
+#else
+    uint64_t base; __asm__ volatile("mrs %0, tpidrro_el0" : "=r"(base));
     if (((uint64_t *)(base & ~7ull))[off / 8] != 0x1234) die("TSD 布局不符");
+#endif
     pthread_setspecific(g_key18, 0);
 }
 

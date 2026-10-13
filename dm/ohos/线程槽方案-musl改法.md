@@ -170,12 +170,54 @@ static void tsd_check(void) {
 
 ---
 
-## 六、待办
+## 六、真机验证（已完成）
 
-- [ ] `patch_nso.py` 按上面第三节改（加常量、改 `emit_slot_addr`、换 6 处 `mrs`）
-- [ ] `loader.c` 的 `tsd_check()` 按第四节改成两级间接
-- [ ] 用真机再验一次：改写后的代码能正确读到宿主写进槽里的值
-      （可以造一个假 NSO 模块跑 `dm_ohos_map_image_alloc` + 槽读写）
+### 实验 F：改写器生成的指令序列能否读到宿主写的槽 —— ✅ 通过
+
+把 `emit_slot_addr` 在 OHOS 下生成的五条指令**原样执行**，值由 `pthread_setspecific` 写进去
+（改写后的游戏代码就是这么读的）：
+
+```
+mrs x10, tpidr_el0
+sub x10, x10, #272
+ldr x10, [x10]
+add x9,  x10, x9        /* x9 = 键页里存的值（键号×8） */
+ldr S,   [x9]
+```
+
+结果：
+
+```
+键号 30：原生序列读回 0xa5a5dead00000001，宿主读回 0xa5a5dead00000001，写入 0xa5a5dead00000001  ✓
+键号 31：原生序列读回 0xa5a5dead00000002，宿主读回 0xa5a5dead00000002，写入 0xa5a5dead00000002  ✓
+结论：读得到，且与 pthread_getspecific 一致
+```
+
+### 指令编码已交叉验证
+
+用 NDK 的 clang 汇编同样四条指令，对照 `patch_nso.py` 里的编码，逐条一致：
+
+| 指令 | 真实字节 | patch_nso.py |
+|---|---|---|
+| `mrs x0, tpidr_el0` | `d53bd040` | `MRS_TPIDR(0) = 0xD53BD040` ✅ |
+| `mrs x0, tpidrro_el0` | `d53bd060` | `MRS_TPIDRRO(0) = 0xD53BD060` ✅ |
+| `sub x0, x0, #272` | `d1044000` | `SUB(0,0,272) = 0xD1044000` ✅ |
+| `ldr x0, [x0]` | `f9400000` | `LDRX(0,0) = 0xF9400000` ✅ |
+
+### 已落地的改动
+
+| 文件 | 改动 |
+|---|---|
+| `dm/tools/patch_nso.py` | 加 `DM_PATCH_TARGET` 平台开关（缺省 apple，行为不变）；加 `MRS_TPIDR`/`SUB`/`mrs_tp`；`emit_slot_addr` 在 OHOS 下插入两条取 tsd 的指令；9 处调用点 `MRS_TPIDRRO` → `mrs_tp` |
+| `dm/host/loader.c` | `tsd_check()` 加 `#if defined(__OHOS__)` 分支，断言改用两级间接 |
+
+---
+
+## 七、待办（还剩）
+
+- [ ] 用真实 NSO 跑一次 `patch_nso.py`（`DM_PATCH_TARGET=ohos`），验证产物可执行
+      —— 需要游戏文件，放在阶段 2
+- [ ] 改写器其余部分的适配（剪口表 CUTS 等是 Mach-O 之外的通用逻辑，应无需改）
 
 ---
 
