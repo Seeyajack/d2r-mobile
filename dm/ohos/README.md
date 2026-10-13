@@ -100,11 +100,37 @@ ArkTS 侧
 
 | 问题 | 说明 |
 |---|---|
-| **嵌入镜像的定位** | iOS 靠 `getsectiondata` 从 Mach-O 段里取游戏镜像（`loader.c` 有两套 `map_image`：嵌入版 / 从目录读 `*.patched.bin` 版）。鸿蒙没有 Mach-O 这套机制，要换一种嵌入与定位方式。**这是目前最大的未决点。** |
-| `TargetConditionals.h` | `main.c` 第 170/173 行引用了它，鸿蒙上没这个头 —— 按适配清单第 1 项处理。 |
-| `sysctl(KERN_PROC_PID)` | `main.c` 的 `proc_start_mono_ns()` 用它算进程启动时刻（启动时间线的零点）；鸿蒙上要换等价做法。 |
-| 日志 | 上游用 `LOG()` 宏；鸿蒙侧要接到 hilog。 |
+| **线程槽机制** | `loader.c` 的 `tsd_check()` 用 `mrs tpidrro_el0` 并假定「槽 = tpidrro_el0 + 8×键号」—— 这是**苹果 pthread 的 TSD 布局**。musl 不同，且 Linux 上 `tpidrro_el0` 通常为 0。**要按 musl TLS 重新设计，并牵连改写器的改写目标**（比 Mach-O 那两项更底层）。**这是目前最大的未决点。** |
+| `sysctl(KERN_PROC_PID)` | `main.c` 的 `proc_start_mono_ns()` 用它算进程启动时刻；鸿蒙上要换等价做法。 |
+| 日志 | 上游用 `LOG()` 宏；鸿蒙侧要接到 hilog（`map_image_ohos.c` 里已用 `OH_LOG_Print` 示范）。 |
 | 大栈线程 | `front_mac.m` 用 64 MiB 栈；鸿蒙侧 `pthread_attr_setstacksize` 是否允许这么大，需实测。 |
+
+### 已解决
+
+| 问题 | 结论 |
+|---|---|
+| 进入游戏主流程 | ✅ 直接 `extern int main(...)` 调 `main.c` 的 `main()`（它不调 exit，`front_run` 不阻塞） |
+| `TargetConditionals.h` | ✅ `loader.c` 已加 `#if !defined(__OHOS__)` 守卫；未定义时 `#if TARGET_OS_IPHONE` 按 0 处理 |
+| **嵌入镜像的定位** | ✅ 自定义 ELF 段 + `__start_/__stop_` 链接器符号（真机实验 C 验证）。实现：`map_image_ohos.c`，接线在 `loader.c` 的 `#elif defined(__OHOS__)` 分支 |
+| **运行时映射机制** | ✅ 匿名 `mmap` + `memcpy` + `mprotect` 成 R+X（真机实验 A 验证）。**照抄上游桌面版 `map_image()`**，不需要 iOS 的文件映射 |
+
+---
+
+## 本目录文件
+
+| 文件 | 是什么 |
+|---|---|
+| `front_ohos.c/.h` | `front.h` 契约的鸿蒙实现（前端骨架） |
+| `map_image_ohos.c/.h` | 鸿蒙版 `map_image`：把嵌入的映像放进内存（**真机实验验证过**） |
+| `CMakeLists.txt` | 鸿蒙 NDK 构建脚本（骨架，暂只挂前端） |
+| `装载方案-镜像嵌入与定位.md` | 嵌入/定位/映射的完整方案 + 真机实验结果 |
+| `app/` | 鸿蒙工程（devecocli create 生成，含第 1 站三个真机实验） |
+
+## 下一步
+
+1. **重新设计线程槽机制**（`tsd_check()`，牵涉改写器的改写目标）—— 目前最大的未决点
+2. 写 `dm/ohos/tools/gen_embed_ohos.py`（产出带自定义段的 `.S`）
+3. 逐类替换适配清单里剩下的苹果专属依赖，把宿主编进 `libdmohos.so`
 
 ### 已用真实 SDK 核对通过的部分
 

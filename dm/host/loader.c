@@ -3,14 +3,19 @@
 // Multi-module loading (playing the role of Horizon's rtld): mapping, claiming thread slots, gate registration, cross-module relocation, take-over by name, segment permissions.
 // The code area (original text and patch area) is set to read-only+execute as soon as it is copied in, and from then on the loader only writes data: on iOS these two blocks must be embedded as is as signed code segments.
 #include "dm.h"
-#include <TargetConditionals.h>
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
-#include <mach-o/getsect.h>
+#if !defined(__OHOS__)
+#include <TargetConditionals.h>   // 鸿蒙上没有这个头；下面 #if TARGET_OS_IPHONE 时未定义即按 0 处理
+#include <mach-o/getsect.h>       // getsectiondata：取 Mach-O 段。鸿蒙改走自定义 ELF 段（见 map_image_ohos.c）
 #include <mach-o/ldsyms.h>
+#endif
 #include "hle.h"
+#if defined(__OHOS__)
+#include "map_image_ohos.h"
+#endif
 
 module_t g_mod[MAX_MOD];
 int g_nmod;
@@ -124,7 +129,13 @@ static uint64_t resolve_sym(module_t *m, const char *name) {
 // Forced take-over table (hle.h HLE_FORCE, the __DATA,swforce section): a hit overrides the definition inside the module
 static const hle_force_ent *g_force; static unsigned g_nforce; static unsigned *g_force_hits;
 static void force_init(void) {
-    unsigned long sz; g_force = (const hle_force_ent *)getsectiondata(&_mh_execute_header, "__DATA", "swforce", &sz);
+    unsigned long sz = 0;
+#if defined(__OHOS__)
+    // 鸿蒙：HLE_FORCE 宏把表写进 dmswforce 段，靠链接器符号取（真机实验 C 验证）
+    g_force = (const hle_force_ent *)dm_ohos_force_table(&sz);
+#else
+    g_force = (const hle_force_ent *)getsectiondata(&_mh_execute_header, "__DATA", "swforce", &sz);
+#endif
     g_nforce = g_force ? (unsigned)(sz / sizeof *g_force) : 0;
     g_force_hits = calloc(g_nforce + 1, sizeof *g_force_hits);
     for (unsigned i = 0; i < g_nforce; i++)
@@ -323,6 +334,17 @@ static void map_image(module_t *m, const char *dir) {
     remap_at(m, base + z0, w, zw, TRUE, VM_PROT_READ | VM_PROT_WRITE);
     remap_at(m, base + m->patch_off, x1, z1, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
     m->base = (uint8_t *)base; install_key_page(m);
+}
+#elif defined(__OHOS__)
+// 鸿蒙：映像由 gen_embed_ohos.py 编成自定义 ELF 段，运行时用链接器符号定位，
+// 再拷进匿名内存并把代码区封成 R+X。
+// 依据：dm/ohos/装载方案-镜像嵌入与定位.md（真机实验 A/C 已验证）。
+// 顺序与桌面版一致：分配+拷贝 → 装键页（此刻要可写）→ 封代码区。
+static void map_image(module_t *m, const char *dir) {
+    (void)dir;
+    if (dm_ohos_map_image_alloc(m)) die("%s 鸿蒙装载：分配/拷贝映像失败", m->name);
+    install_key_page(m);
+    if (dm_ohos_map_image_seal(m)) die("%s 鸿蒙装载：封代码区失败", m->name);
 }
 #else
 static uint8_t *slurp(const char *path, size_t *n) {
