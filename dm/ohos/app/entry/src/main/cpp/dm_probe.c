@@ -301,6 +301,95 @@ static void exp_d(char *out, size_t cap, size_t *used) {
         app(out, cap, used, "  结论：链路有问题，需细看（见 hilog）。\n\n");
 }
 
+// ───────── 实验 E：musl 的线程槽布局（决定改写规则怎么改）─────────
+// 整套改写方案只依赖一条等式：线程槽地址 = tpidrro_el0 + 键号 × 8
+// （苹果的 pthread 把 TSD 放在 tpidrro_el0 指向的结构里）。
+// 这里把 musl 的真实情况测出来：两个线程指针寄存器各是什么，
+// pthread_setspecific 写的值落在 tpidr_el0 的哪个偏移上，键号是不是线性 ×8。
+static void exp_e(char *out, size_t cap, size_t *used) {
+    app(out, cap, used, "【实验 E】musl 的线程槽布局\n");
+    app(out, cap, used, "  要验的等式：槽地址 = tpidrro_el0 + 键号×8（苹果 pthread 的布局）\n");
+
+    uint64_t tp_el0 = 0, tp_ro = 0;
+    __asm__ volatile("mrs %0, tpidr_el0" : "=r"(tp_el0));
+    __asm__ volatile("mrs %0, tpidrro_el0" : "=r"(tp_ro));
+    appf(out, cap, used, "  tpidr_el0   = 0x%llx\n", (unsigned long long)tp_el0);
+    appf(out, cap, used, "  tpidrro_el0 = 0x%llx%s\n", (unsigned long long)tp_ro,
+         tp_ro ? "" : "   ← 为 0！苹果方案靠它取基址，这里取不到");
+
+    #define NK 4
+    pthread_key_t k[NK];
+    const uint64_t marker[NK] = { 0x1111111111111111ull, 0x2222222222222222ull,
+                                  0x3333333333333333ull, 0x4444444444444444ull };
+    for (int i = 0; i < NK; i++) {
+        if (pthread_key_create(&k[i], NULL)) {
+            appf(out, cap, used, "  ✗ 建第 %d 个键失败\n\n", i);
+            return;
+        }
+        pthread_setspecific(k[i], (void *)(uintptr_t)marker[i]);
+    }
+    appf(out, cap, used, "  建了 %d 个键，键号：%lu %lu %lu %lu\n", NK,
+         (unsigned long)k[0], (unsigned long)k[1], (unsigned long)k[2], (unsigned long)k[3]);
+
+    // 在 tpidr_el0 附近扫，看每个 marker 落在哪个偏移。
+    // 整段扫描包在一个信号兜底里：万一越界，进程不至于挂。
+    struct sigaction sa, old_segv, old_bus;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = probe_segv_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_NODEFER;
+    sigaction(SIGSEGV, &sa, &old_segv);
+    sigaction(SIGBUS, &sa, &old_bus);
+
+    long off[NK] = { 0 };
+    int faulted = 0;
+    if (sigsetjmp(g_probe_jmp, 1) == 0) {
+        g_probe_jmp_armed = 1;
+        for (int i = 0; i < NK; i++) {
+            off[i] = 0;
+            for (long o = -0x2000; o < 0x8000; o += 8) {
+                uint64_t v = *(const uint64_t *)(uintptr_t)(tp_el0 + (uint64_t)o);
+                if (v == marker[i]) { off[i] = o; break; }
+            }
+        }
+        g_probe_jmp_armed = 0;
+    } else {
+        faulted = 1;
+    }
+    sigaction(SIGSEGV, &old_segv, NULL);
+    sigaction(SIGBUS, &old_bus, NULL);
+
+    if (faulted) {
+        app(out, cap, used, "  ⚠ 扫描时越界，结果不完整\n\n");
+        return;
+    }
+
+    for (int i = 0; i < NK; i++) {
+        if (off[i]) {
+            appf(out, cap, used, "  键号 %-4lu → 值落在 tpidr_el0 %+ld（0x%lx）\n",
+                 (unsigned long)k[i], off[i], (unsigned long)off[i]);
+        } else {
+            appf(out, cap, used, "  键号 %-4lu → 在 tpidr_el0-0x2000..+0x8000 内没找到\n",
+                 (unsigned long)k[i]);
+        }
+    }
+
+    // 键号相邻的两个槽，偏移差应该是 8（说明是数组）
+    if (off[0] && off[1]) {
+        long d = off[1] - off[0];
+        long dk = (long)k[1] - (long)k[0];
+        appf(out, cap, used, "  相邻键的偏移差 %ld，键号差 %ld → 每键 %s\n",
+             d, dk, (dk && d == dk * 8) ? "8 字节（是数组）" : "不是 8 字节，要细看");
+        if (dk && d == dk * 8) {
+            appf(out, cap, used, "  结论：槽地址 = tpidr_el0 + %ld + 键号×8\n",
+                 off[0] - (long)k[0] * 8);
+            app(out, cap, used, "        → 改写器把 tpidrro_el0 换成 tpidr_el0，\n"
+                                "          键页里写 (上面那个常数 + 键号×8) 即可。\n");
+        }
+    }
+    app(out, cap, used, "\n");
+}
+
 // ─────────────────────── 入口 ───────────────────────
 
 int dm_probe_run(const char *files_dir, char *out, size_t cap) {
@@ -319,6 +408,7 @@ int dm_probe_run(const char *files_dir, char *out, size_t cap) {
     // 顺序有讲究：A 的最后一步要真执行一段可能不可执行的内存，
     // 万一信号兜底没兜住、进程挂了，B/C 也已经跑完并写进日志了。
     logline(">>> 实验 D 开始"); exp_d(out, cap, &used); logline(">>> 实验 D 返回");
+    logline(">>> 实验 E 开始"); exp_e(out, cap, &used); logline(">>> 实验 E 返回");
     logline(">>> 实验 C 开始"); exp_c(out, cap, &used); logline(">>> 实验 C 返回");
     logline(">>> 实验 B 开始"); exp_b(files_dir, out, cap, &used); logline(">>> 实验 B 返回");
     logline(">>> 实验 A 开始"); exp_a(out, cap, &used); logline(">>> 实验 A 返回");
