@@ -13,17 +13,23 @@
  * limitations under the License.
  */
 
-// 第 1 站：跑三个真机实验并把报告显示出来。
+// 真机探针页：装载机制实验 + 图形层能力探测。报告直接显示出来，也可以从 hilog 里取。
 // 实验代码在 entry/src/main/cpp/dm_probe.c，说明见 dm/ohos/装载方案-镜像嵌入与定位.md 第四节。
+// 能力探测在 entry/src/main/cpp/vk_probe.c，说明见 dm/ohos/图形层能力探测方案.md。
 import dmprobe from 'libdmprobe.so';
 import common from '@ohos.app.ability.common';
 
-const HINT: string = '点下面的按钮，在真机上跑三个实验。\n\n' +
-  'C  自定义 ELF 段能否生成 __start_/__stop_ 符号（预期：能）\n' +
+const HINT: string = '两个探针，点按钮就跑。\n\n' +
+  '【装载机制实验】C 自定义 ELF 段能否生成 __start_/__stop_ 符号（预期：能）\n' +
   'B  mmap 自己的 .so 能否可执行（预期：成功，整个方案的基石）\n' +
   '   B-3 换应用数据目录的文件再试，分辨禁令范围\n' +
   'A  匿名内存能否拿到可执行权限（预期：失败）\n\n' +
-  '跑完把报告发回来，就能定下装载方案。';
+  '【图形层能力探测】枚举设备的 Vulkan 能力，回答"Metal → Vulkan 这条路能不能走"。\n' +
+  '不问窗口、不用 XComponent，纯枚举。最关键的一项是压缩贴图格式。\n\n' +
+  '跑完把报告发回来。';
+
+const VK_HINT: string = '图形层能力探测：只枚举能力，不创建窗口。\n' +
+  '重点看三处：压缩贴图（BC/ASTC）、内存模型（统一内存）、时间线信号量与缓冲设备地址。';
 
 @Entry
 @Component
@@ -32,11 +38,11 @@ struct Index {
 
   build() {
     Column({ space: 12 }) {
-      Text('D2R Mobile · 鸿蒙移植 · 第 1 站')
+      Text('D2R Mobile · 鸿蒙移植 · 真机探针')
         .fontSize(18)
         .fontWeight(FontWeight.Bold)
 
-      Button('运行三个实验')
+      Button('运行装载机制实验（A / B / C）')
         .width('100%')
         .onClick(() => {
           try {
@@ -46,6 +52,23 @@ struct Index {
             this.result = '调用原生模块失败：' + JSON.stringify(err);
           }
         })
+
+      Button('探测图形层能力（Vulkan）')
+        .width('100%')
+        .onClick(() => {
+          try {
+            const ctx = getContext(this) as common.UIAbilityContext;
+            this.result = dmprobe.runVkProbe(ctx.filesDir);
+          } catch (err) {
+            this.result = '调用原生模块失败：' + JSON.stringify(err);
+          }
+        })
+
+      Text(VK_HINT)
+        .fontSize(11)
+        .textAlign(TextAlign.Start)
+        .width('100%')
+        .padding(6)
 
       Scroll() {
         Text(this.result)

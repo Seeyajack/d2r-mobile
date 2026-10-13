@@ -17,6 +17,7 @@ set(DM_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../../")
 
 add_library(dmprobe SHARED
     dm_probe.c
+    vk_probe.c
     napi_init.c
     # 被测对象：鸿蒙版 map_image（与宿主 loader.c 用的是同一份）
     ${DM_DIR}/ohos/map_image_ohos.c
@@ -30,5 +31,6 @@ target_include_directories(dmprobe PRIVATE
     ${DM_DIR}/ohos     # map_image_ohos.h
 )
 
-# 官方要求：用 NAPI 要链 libace_napi.z.so；打 hilog 要链 libhilog_ndk.z.so
-target_link_libraries(dmprobe PUBLIC libace_napi.z.so libhilog_ndk.z.so)
+# 官方要求：用 NAPI 要链 libace_napi.z.so；打 hilog 要链 libhilog_ndk.z.so；
+# 图形层能力探测要链 libvulkan.so（NDK sysroot 里就有）。
+target_link_libraries(dmprobe PUBLIC libace_napi.z.so libhilog_ndk.z.so libvulkan.so)
