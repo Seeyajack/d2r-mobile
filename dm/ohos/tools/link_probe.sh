@@ -28,18 +28,19 @@ rm -rf "$WORK"; mkdir -p "$WORK/obj"
 CF+=(-fPIC -O0 -w)
 
 # ---- 收集源文件 ----
+# 分三处取：被测项目的源、L1 的垫片实现、以及配置里列的额外源。
+# 垫片实现永远从 **L1 根**（本仓库）取——探测别的项目时也一样，那正是"通用"的意思。
 SRCS=()
-for f in "$HOST"/*.c; do
-    probe_excluded "$(basename "$f")" || SRCS+=("$f")
-done
-[ -f "$HOST/entry.S" ] && SRCS+=("$HOST/entry.S")
+while IFS= read -r f; do [ -n "$f" ] && SRCS+=("$f"); done < <(probe_sources "$DM_HOST_DIR" c)
+[ -f "$PROJECT/$DM_HOST_DIR/entry.S" ] && SRCS+=("$PROJECT/$DM_HOST_DIR/entry.S")
 
-while read -r p; do [ -n "$p" ] && SRCS+=("$p"); done < <(probe_expand_list "$DM_OHOS_SRCS")
 [ -n "$DM_COMPAT_SRC_DIR" ] && for f in "$REPO/$DM_COMPAT_SRC_DIR"/*.c; do [ -f "$f" ] && SRCS+=("$f"); done
-while read -r p; do [ -n "$p" ] && SRCS+=("$p"); done < <(probe_expand_list "$DM_EXTRA_SRCS")
-while read -r p; do [ -n "$p" ] && SRCS+=("$p"); done < <(probe_expand_list "$DM_THIRD_PARTY_SRCS")
+while IFS= read -r p; do [ -n "$p" ] && SRCS+=("$p"); done < <(probe_expand_list "$PROJECT" "$DM_OHOS_SRCS")
+while IFS= read -r p; do [ -n "$p" ] && SRCS+=("$p"); done < <(probe_expand_list "$PROJECT" "$DM_EXTRA_SRCS")
+while IFS= read -r p; do [ -n "$p" ] && SRCS+=("$p"); done < <(probe_expand_list "$PROJECT" "$DM_THIRD_PARTY_SRCS")
 
 echo "==== 1/2 编译 ===="
+echo "  被测项目：$PROJECT"
 OBJS=()
 n=0
 for src in "${SRCS[@]}"; do

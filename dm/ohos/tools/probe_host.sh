@@ -11,8 +11,10 @@
 # 用法（Git Bash / WSL / Linux 都行）：
 #   bash dm/ohos/tools/probe_host.sh              # 全部
 #   bash dm/ohos/tools/probe_host.sh hle_os.c     # 只看某几个文件
-# 所有「项目专有清单」（排除名单、include 路径…）在 tools/probe.conf 里，本脚本不含。
-# 工具链不在缺省位置时：DM_OHOS_NDK=/path/to/openharmony/native bash ...
+# 探测**别的项目**（这才是"通用"的用法）：
+#   DM_PROBE_PROJECT=/path/to/other/project bash dm/ohos/tools/probe_host.sh
+# 所有「项目专有清单」（排除名单、include 路径…）在 probe.conf 里（先找被测项目的，
+# 再退回本仓库工具目录那份）；任何一项都能用同名环境变量临时覆盖。
 #
 # 注意：只做 -fsyntax-only（不产出目标文件、不链接）。
 # 「能编过」不等于「能跑」，也不等于「能链接成 .so」——链接那一层看 link_probe.sh。
@@ -21,10 +23,10 @@ set -u
 . "$(cd "$(dirname "$0")" && pwd)/probe_common.sh"
 probe_require_tools
 
-HOST="$REPO/$DM_HOST_DIR"
+HOST="$PROJECT/$DM_HOST_DIR"
 ERR="${TMPDIR:-/tmp}/dm_probe_err.$$"
 
-# 参数：显式指定文件；给相对名就到宿主目录下找
+# 参数：显式指定文件；给相对名就到被测项目的宿主目录下找
 if [ "$#" -gt 0 ]; then
     FILES=()
     for f in "$@"; do
@@ -34,7 +36,8 @@ if [ "$#" -gt 0 ]; then
         esac
     done
 else
-    FILES=("$HOST"/*.c)
+    FILES=()
+    while IFS= read -r f; do [ -n "$f" ] && FILES+=("$f"); done < <(probe_sources "$DM_HOST_DIR" c)
 fi
 
 ok=0; bad=0; skip=0
@@ -54,7 +57,9 @@ rm -f "$ERR"
 
 echo "=============================================="
 echo " 编译探针：通过 $ok，未通过 $bad，跳过 $skip（配置里排除的）"
+echo " 被测项目：$PROJECT"
 echo " 配置：$CONF"
+echo " 垫片层：$REPO/$DM_SHIM_DIR"
 echo "=============================================="
 if [ "$skip" -gt 0 ]; then
     # 跳过的也列出来：排除是对的，但"排除了什么"必须看得见，否则漏掉真问题。
