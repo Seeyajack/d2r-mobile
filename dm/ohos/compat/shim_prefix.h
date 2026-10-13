@@ -19,9 +19,45 @@
 // libc ever ships the same symbol, its version wins at link time without a clash.
 #pragma once
 
+// 本文件全部内容对汇编文件无意义，所以先挡一层：
+// 构建里对**所有源文件**统一 `-include shim_prefix.h`（.S 也在内），不必为汇编单独开一套选项。
+// 汇编器不认 <time.h> / <pthread.h> 这些 C 头——一开始 `entry.S` 编不过就是这个原因。
+// Everything below is meaningless to an assembler, so it is fenced off here: the build force-includes
+// shim_prefix.h into every translation unit including .S files, so no separate option set is needed for
+// assembly. The assembler rejects C headers like <time.h> / <pthread.h> -- that is exactly why entry.S
+// failed to compile at first.
+#if defined(__ASSEMBLER__) || defined(__ASSEMBLY__)
+// 汇编文件：什么都不做 | Assembly: do nothing.
+#else
+
 #include <stddef.h>
 #include <stdint.h>
 #include <time.h>
+#include <pthread.h>
+
+// 苹果独有的三个函数，靠 <time.h> / <pthread.h> "顺带声明"，所以按头文件普查是数不到的。
+// 它们由**链接探针**抓出来（`tools/link_probe.sh`）：只做 `-fsyntax-only` 永远发现不了。
+// Three Apple-only functions that arrived through <time.h> / <pthread.h>, invisible to a header census.
+// They were caught by the link probe (tools/link_probe.sh); -fsyntax-only can never find them.
+//
+// ⚠️ 有一条特别要命：`clock_gettime_nsec_np` 不声明也能编过（C 只给警告），
+// 而**编译器会默认它返回 int**——64 位纳秒值当场被截断到 32 位，而且是静默的。
+// 宿主有 4 个文件在用它（dm_bossrush.c / dm_textbox.c / hle_fs.c / hle_time.c）。
+// ⚠️ One is especially nasty: clock_gettime_nsec_np compiles without a declaration (C only warns), and
+// the compiler assumes it returns int -- silently truncating 64-bit nanoseconds to 32 bits. Four host
+// files call it (dm_bossrush.c / dm_textbox.c / hle_fs.c / hle_time.c).
+uint64_t clock_gettime_nsec_np(clockid_t clock_id);
+
+// 苹果的栈信息接口：返回调用线程的**栈顶**（高地址）与栈大小。
+// Linux 的等价物是 pthread_getattr_np + pthread_attr_getstack（给的是**低**地址），
+// 所以实现里要换算一下，见 src/dm_compat_mach.c。hle_svc.c 拿它来回答"这个地址是不是在主线程栈上"。
+// Apple's stack introspection: the stack base (high address) and size of a thread. The Linux equivalent
+// is pthread_getattr_np + pthread_attr_getstack, which yields the LOW address, so the implementation
+// converts; see src/dm_compat_mach.c. hle_svc.c uses it to answer "is this address on the main stack?".
+// 返回 NULL / 0 = 取不到（调用方本来就写了"取不到就按别的方式答"的分支）。
+// NULL / 0 means unavailable (the caller already handles that).
+void  *pthread_get_stackaddr_np(pthread_t thread);
+size_t pthread_get_stacksize_np(pthread_t thread);
 
 // 有些上游文件用了 TARGET_OS_IPHONE / TARGET_OS_MAC，却没有自己包含 <TargetConditionals.h>
 // （在苹果上靠别的头间接带进来）。这里统一带上，顺手把这个坑填平——hle_fs.c:311 就是这种情况。
@@ -65,3 +101,5 @@ int renamex_np(const char *from, const char *to, unsigned int flags);
 #ifdef __cplusplus
 }
 #endif
+
+#endif   // !__ASSEMBLER__

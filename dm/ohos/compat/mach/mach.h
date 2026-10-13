@@ -40,6 +40,16 @@ kern_return_t vm_read_overwrite(mach_port_t task, vm_address_t addr, vm_size_t s
 // Only used in hle_thread.c on the array returned by task_threads; a real munmap-backed implementation.
 kern_return_t vm_deallocate(mach_port_t task, vm_address_t addr, vm_size_t size);
 
+// mach_port_deallocate：把某个端口的使用权还回去。鸿蒙侧根本没有"端口"这个东西，
+// 而唯一调用它的地方（hle_thread.c 对 task_threads 返回的线程端口逐个释放）在我们这里**不可达**——
+// 因为 task_threads 恒失败。所以这里如实返回成功、不做任何事：**不是假装成功，是真的没事可做**
+// （没有任何资源被分配过）。若哪天 task_threads 有了实现，这个桩要跟着改。
+// mach_port_deallocate returns a port's user reference. HarmonyOS has no ports at all, and its only call
+// site (releasing each thread port returned by task_threads) is unreachable here because task_threads
+// always fails. So it returns success and does nothing: not fake success, but genuinely nothing to do,
+// since no resource was ever allocated. If task_threads is ever implemented, this stub must follow.
+kern_return_t mach_port_deallocate(mach_port_t task, mach_port_t name);
+
 // mach_task_self：恒为 1（本进程）。真实实现，用来对齐 vm_read_overwrite / task_info 的入参语义。
 #define MACH_PORT_NULL 0
 mach_port_t mach_task_self(void);

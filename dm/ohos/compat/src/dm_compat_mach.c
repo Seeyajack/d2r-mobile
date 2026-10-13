@@ -51,6 +51,44 @@ mach_port_t mach_task_self(void) { return 1; }
 mach_port_t mach_thread_self(void) { return (mach_port_t)(uintptr_t)pthread_self(); }
 mach_port_t pthread_mach_thread_np(pthread_t t) { return (mach_port_t)(uintptr_t)t; }
 
+// 苹果独有的纳秒时钟。**必须有真实现、且返回 64 位**——理由见 compat/shim_prefix.h：
+// 不声明它编译器只会给警告，然后当成返回 int，纳秒值被静默截断到 32 位。
+// 宿主有 4 个文件在用它。
+// Apple's nanosecond clock. It must really exist and return 64 bits -- see compat/shim_prefix.h:
+// without a declaration the compiler only warns, then assumes int and silently truncates the value to
+// 32 bits. Four host files call it.
+uint64_t clock_gettime_nsec_np(clockid_t clock_id) {
+    struct timespec ts;
+    if (clock_gettime(clock_id, &ts)) return 0;
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
+// 栈信息：苹果返回**栈顶**（高地址），而 Linux 的 pthread_attr_getstack 给的是**栈底**（低地址），
+// 所以这里换算成苹果的口径。hle_svc.c 用 top 与 top−size 框出 [栈底, 栈顶) 来判断
+// "某个地址是不是落在当前线程的栈上"——口径错了它就会把栈上的地址当成代码页。
+// Stack info: Apple returns the stack base (high address) while Linux's pthread_attr_getstack yields the
+// low address, so the value is converted to Apple's convention. hle_svc.c frames [top-size, top) to decide
+// whether an address lies on the current thread's stack; the wrong convention would misclassify stack
+// addresses as code pages.
+static int dm_stack_of(pthread_t t, void **base, size_t *size) {
+    pthread_attr_t attr;
+    *base = NULL; *size = 0;
+    if (pthread_getattr_np(t, &attr)) return -1;
+    int rc = pthread_attr_getstack(&attr, base, size);
+    pthread_attr_destroy(&attr);
+    return rc ? -1 : 0;
+}
+void *pthread_get_stackaddr_np(pthread_t t) {
+    void *base = NULL; size_t size = 0;
+    if (dm_stack_of(t, &base, &size) || !base) return NULL;   // 取不到就返回 NULL，调用方有对应分支
+    return (char *)base + size;                                // 低地址 + 大小 = 栈顶（苹果口径）
+}
+size_t pthread_get_stacksize_np(pthread_t t) {
+    void *base = NULL; size_t size = 0;
+    if (dm_stack_of(t, &base, &size)) return 0;
+    return size;
+}
+
 // ================================================================ ⓑ 读内存与内存统计
 
 // 宿主用 vm_read_overwrite 要的是"读一个**可能非法**的地址，读不到就失败、不要崩"。
@@ -114,6 +152,15 @@ kern_return_t vm_deallocate(mach_port_t task, vm_address_t addr, vm_size_t size)
     // 所以这条路径目前不可达。给一个 munmap 实现，防止将来有人改成别的用法而漏内存。
     // Unreachable today (task_threads always fails); a munmap implementation guards against future misuse.
     if (munmap((void *)(uintptr_t)addr, (size_t)size) && errno != EINVAL) return KERN_FAILURE;
+    return KERN_SUCCESS;
+}
+
+// 与 vm_deallocate 同理：唯一调用点在 task_threads 成功之后，而 task_threads 恒失败 ⇒ 不可达。
+// 返回成功是如实的——**确实没有任何资源被分配过**，不是假装成功。
+// Same as vm_deallocate: the only call site sits after a successful task_threads, which never happens
+// here, so it is unreachable. Returning success is truthful -- nothing was ever allocated.
+kern_return_t mach_port_deallocate(mach_port_t task, mach_port_t name) {
+    (void)task; (void)name;
     return KERN_SUCCESS;
 }
 

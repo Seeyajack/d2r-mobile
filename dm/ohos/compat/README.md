@@ -44,7 +44,7 @@
 | `malloc/malloc.h` | malloc zone 统计 | 填 0 + 明确说明 | 诚实降级 |
 | `mach-o/dyld.h` | `_NSGetExecutablePath` | 返回 `$DM_ROOT/D2R`，让上游拼出的 `/dm/derived.tsv` 落到 `$DM_ROOT/dm/` | 换落点 |
 | `dispatch/dispatch.h` | GCD —— **只做信号量**（`dispatch_semaphore_*` / `dispatch_time` / `dispatch_release`），pthread 实现 | 见第六节：block 那块**刻意不做** | 真实现（局部） |
-| `shim_prefix.h` | 一批散用符号 | `strlcpy`/`strlcat`/`arc4random*`/`renamex_np`/`st_mtimespec`/`CLOCK_UPTIME_RAW` | 真实现 |
+| `shim_prefix.h` | 一批散用符号 | `strlcpy`/`strlcat`/`arc4random*`/`renamex_np`/`st_mtimespec`/`CLOCK_UPTIME_RAW`，以及**靠链接探针才发现的** `clock_gettime_nsec_np` / `pthread_get_stackaddr_np` / `pthread_get_stacksize_np` | 真实现 |
 
 实现代码在 `src/`，分四个文件：`dm_compat_str.c`、`dm_compat_hash.c`、`dm_compat_mach.c`、`dm_compat_fs.c`。
 
@@ -98,6 +98,28 @@ Linux/鸿蒙没有"非特权读另一个线程寄存器"的接口，`ptrace` 要
 > 4 个调用点收口成 `DM_AO_*` 宏，鸿蒙侧由 `dm/ohos/audio_ohos.c` 承接
 > （**目前是诚实的空实现** ⇒ 一律走静音接收端，节奏与真机一致、没有声音）。
 > 真出声是增量工作，方案见 `dm/ohos/音频后端方案-从CoreAudio到OHAudio.md`。
+
+### 再往下一层：链接（`tools/link_probe.sh`）
+
+`-fsyntax-only` 只验"每个文件自己讲得通"，**验不了"甲文件喊的名字乙文件里到底有没有"**。
+所以另做了一个链接探针：把 83 个目标文件真的链一次。
+
+```
+83 个目标文件 → 只剩 39 个未解析符号，且全部可解释
+  · 5 个来自图形层（dm/gfx，尚未开工）
+  · 34 个来自 diag.c / dm_vault_ui.c（要用你自己的游戏文件生成数据表）
+```
+
+**链接这一层抓出了 4 个 `-fsyntax-only` 永远发现不了的问题**（其中一个是真 bug）：
+
+| 问题 | 为什么要紧 |
+|---|---|
+| `clock_gettime_nsec_np`（4 个文件在用） | 苹果独有；**不声明也能编过**，编译器默认它返回 `int` ⇒ **64 位纳秒被静默截断**。会算错时间且不报错 —— 最坏的一类 bug |
+| `entry.S` 的符号带前导下划线（Mach-O 约定） | ELF 上没有下划线 ⇒ 7 个符号全对不上。已加按平台的 `CSYM()` 宏，正文汇编一字未改 |
+| `pthread_get_stack*_np` 两边口径相反 | 苹果给**栈顶**、Linux 给**栈底**；反了会把栈上地址当成代码页 |
+| `ld.lld` 默认只报 20 条错误 | 第一次跑出来"正好 20 个"，关掉上限后真实数字是 74 —— **工具给的数字不等于全部真相** |
+
+详见 **`dm/ohos/链接现状与缺口.md`**。
 
 ### 另外两件在编译探针之外、但已经验证掉的事
 
@@ -173,6 +195,7 @@ Linux/鸿蒙没有"非特权读另一个线程寄存器"的接口，`ptrace` 要
 | `dm/host/crash.c` | 新增 `DM_UC_PC/LR/FP/SP/X` 五个取寄存器宏；缺页的读/写判断加鸿蒙分支 | 两边 `ucontext_t` 一个是**指针**、一个是**值**，字段名全不同 |
 | `dm/host/hle_fdstat.c` | 新增 `DM_FD_PATH` 宏（鸿蒙走 `/proc/self/fd/<n>`） | 苹果的 `F_GETPATH` 是 fcntl 扩展，Linux 没有；`fcntl` 是可变参数，垫不了 |
 | `dm/host/hle_lifecycle.c` | 两处 dispatch（`dispatch_after` + `dispatch_source_*`）在鸿蒙侧改用 pthread 直写 | 它们收的是 block，见第五节——块运行时无法验证，所以换成能看懂的写法 |
+| `dm/host/entry.S` | 加了 `CSYM()` 符号名宏（鸿蒙 `x` / 苹果 `_x`） | ELF 与 Mach-O 的 C 符号命名约定不同；汇编无法"垫"，只能按平台绑名。**正文指令一字未改** |
 | `dm/host/dm.h` | 日志宏加 `DM_LOG_TO_HILOG` 守卫 | 宏定义只能在一处收口 |
 
 另外一处**没动源码**：`dm_textbox_core.c` 用了 `memmem`，在苹果上由 `<string.h>` 顺带声明，
