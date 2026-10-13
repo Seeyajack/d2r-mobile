@@ -17,6 +17,11 @@ prod.keys
 dm/ios/local.env
 dm/ohos/local.env
 local.env
+# DevEco 的工程配置：devecocli signature generate 会往里写签名配置
+# （加密后的密码 + 本机绝对路径）。仓库是公开的，所以不入库。
+# 换机器时：cp 回来一个不含 signingConfigs 的版本，再跑
+#   devecocli signature generate
+dm/ohos/app/build-profile.json5
 
 # ===== 构建产物 =====
 build/
