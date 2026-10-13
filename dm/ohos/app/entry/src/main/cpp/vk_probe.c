@@ -4,6 +4,7 @@
 #include "vk_probe.h"
 
 #include <vulkan/vulkan.h>
+#include <hilog/log.h>
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -79,6 +80,24 @@ static const want_t WANT_DEVICE_EXT[] = {
     { "VK_KHR_dynamic_rendering_local_read", "动态渲染下的「可读 tile」（上游有专门的可读 tile 着色器版本）" },
     { "VK_EXT_queue_family_foreign",  "跨队列族共享（若图形/计算队列是分开的）" },
 };
+
+// 报告同时打一份进 hilog：手机屏幕上的文字不好复制，日志里可以直接取
+// （devecocli log --keyword dmvk，或 hdc shell hilog -x | grep dmvk）。
+// The report is also mirrored into hilog: text on a phone screen is awkward to copy, while the log can
+// be pulled directly.
+static void log_report(const char *s) {
+    for (const char *p = s; *p; ) {
+        const char *nl = strchr(p, '\n');
+        size_t n = nl ? (size_t)(nl - p) : strlen(p);
+        char line[480];
+        if (n >= sizeof line) n = sizeof line - 1;
+        memcpy(line, p, n);
+        line[n] = 0;
+        OH_LOG_Print(LOG_APP, LOG_INFO, 0x0D2Cu, "dmvk", "%{public}s", line);
+        if (!nl) break;
+        p = nl + 1;
+    }
+}
 
 int dm_vk_probe_run(char *out, size_t cap) {
     if (!out || cap < 256) return -1;
@@ -283,6 +302,7 @@ int dm_vk_probe_run(char *out, size_t cap) {
     ap(&o, "  2. 统一内存类型 > 0 ⇒ 零拷贝缓冲可行；= 0 ⇒ 由宿主自己分配显存再交给游戏\n");
     ap(&o, "  3. 时间线信号量 / 缓冲设备地址 全有 ⇒ FenceSync 与 SBUFP 可直接映射\n");
 
+    log_report(out);      // 打一份进 hilog（屏幕上看不全也没关系） | mirror into hilog
     free(qs);
     free(de);
     free(pds);
