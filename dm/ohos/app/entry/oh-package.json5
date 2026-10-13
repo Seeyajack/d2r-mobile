@@ -5,6 +5,7 @@
   "main": "",
   "author": "",
   "license": "",
+  "types": "./src/main/cpp/types/libdmprobe/index.d.ts",
   "dependencies": {}
 }
 
