@@ -15,6 +15,9 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
+#include "dm.h"                 // module_t
+#include "map_image_ohos.h"     // 鸿蒙版 map_image —— 实验 D 的被测对象
+
 // ───────────────────────── 输出小工具 ─────────────────────────
 
 // 每写一行，同时打进 hilog —— 万一界面没显示出来（或进程中途挂了），
@@ -251,6 +254,53 @@ static void exp_c(char *out, size_t cap, size_t *used) {
     app(out, cap, used, "\n");
 }
 
+// ─────────── 实验 D：完整链路（嵌入 → 定位 → 映射 → 执行）───────────
+// 用 gen_embed_ohos.py 生成的 test_image.S 当"游戏映像"：
+//   偏移 0x0000  代码 mov w0,#0x1234 ; ret
+//   偏移 0x4000  数据 "DM_OHOS_IMAGE_OK"
+//   TEXT_END 0x2000 / 键页 0x4000 / PATCH_OFF 0x8000 / 共 0xC000
+// 走的是真正的 dm_ohos_map_image_alloc/seal（dm/ohos/map_image_ohos.c）。
+static void exp_d(char *out, size_t cap, size_t *used) {
+    app(out, cap, used, "【实验 D】完整链路：嵌入 → 定位 → 映射 → 执行\n");
+    app(out, cap, used, "  用 gen_embed_ohos.py 生成的测试映像走真正的 map_image\n");
+
+    module_t m;
+    memset(&m, 0, sizeof m);
+    strncpy(m.name, "main", sizeof m.name - 1);
+    m.text_end = 0x2000;
+    m.patch_off = 0x8000;
+    m.key_page_off = 0x4000;
+    m.key_page_size = 0x4000;
+
+    if (dm_ohos_map_image_alloc(&m)) {
+        app(out, cap, used, "  ✗ alloc 失败（见 hilog）\n\n");
+        return;
+    }
+    appf(out, cap, used, "  ✓ 定位 + 拷贝：base %p，size %zu\n", (void *)m.base, m.size);
+
+    // 封代码区之前，先确认数据段读得到（w 段落在映像偏移 0x4000）
+    const char *magic = (const char *)(m.base + 0x4000);
+    int data_ok = (memcmp(magic, "DM_OHOS_IMAGE_OK", 16) == 0);
+    appf(out, cap, used, "  %s 数据段：\"%.16s\"\n", data_ok ? "✓" : "✗", magic);
+
+    if (dm_ohos_map_image_seal(&m)) {
+        app(out, cap, used, "  ✗ seal 失败（见 hilog）\n\n");
+        return;
+    }
+    app(out, cap, used, "  ✓ 代码区已封为只读+可执行\n");
+
+    // 真执行映像偏移 0 处的代码，应返回 0x1234
+    int r = ((int (*)(void))m.base)();
+    int code_ok = (r == 0x1234);
+    appf(out, cap, used, "  %s 执行映像代码：返回 0x%x（期望 0x1234）\n",
+         code_ok ? "✓" : "✗", (unsigned)r);
+
+    if (code_ok && data_ok)
+        app(out, cap, used, "  结论：整条链路通了 —— 嵌入/定位/映射/执行全部成立。\n\n");
+    else
+        app(out, cap, used, "  结论：链路有问题，需细看（见 hilog）。\n\n");
+}
+
 // ─────────────────────── 入口 ───────────────────────
 
 int dm_probe_run(const char *files_dir, char *out, size_t cap) {
@@ -268,6 +318,7 @@ int dm_probe_run(const char *files_dir, char *out, size_t cap) {
     // 从日志里就能看出死在哪一步（有"进入"没"返回"）。
     // 顺序有讲究：A 的最后一步要真执行一段可能不可执行的内存，
     // 万一信号兜底没兜住、进程挂了，B/C 也已经跑完并写进日志了。
+    logline(">>> 实验 D 开始"); exp_d(out, cap, &used); logline(">>> 实验 D 返回");
     logline(">>> 实验 C 开始"); exp_c(out, cap, &used); logline(">>> 实验 C 返回");
     logline(">>> 实验 B 开始"); exp_b(files_dir, out, cap, &used); logline(">>> 实验 B 返回");
     logline(">>> 实验 A 开始"); exp_a(out, cap, &used); logline(">>> 实验 A 返回");

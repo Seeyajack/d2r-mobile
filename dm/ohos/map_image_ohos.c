@@ -17,17 +17,22 @@
 // 段名由 gen_embed_ohos.py 生成：dm<模块名>x0 / dm<模块名>w / dm<模块名>x1。
 // 段名必须是合法的 C 标识符，链接器才会生成 __start_<段名> / __stop_<段名>
 // 这一对（真机实验 C 已验证）。
+//
+// 全部声明为【弱符号】：这样只嵌入了部分模块时也不会链接失败
+// （段不存在 → 运行时为 NULL，由 find_img() 跳过）。实测 lld 行为：
+//   段存在  → 链接器生成强符号，弱引用被正常解析
+//   段不存在 → 弱引用保持未定义，值为 0，不报 undefined symbol
 #define DM_IMG_SYMS(nm) \
-    extern const uint8_t __start_dm##nm##x0[], __stop_dm##nm##x0[]; \
-    extern const uint8_t __start_dm##nm##w[],  __stop_dm##nm##w[];  \
-    extern const uint8_t __start_dm##nm##x1[], __stop_dm##nm##x1[];
+    __attribute__((weak)) extern const uint8_t __start_dm##nm##x0[], __stop_dm##nm##x0[]; \
+    __attribute__((weak)) extern const uint8_t __start_dm##nm##w[],  __stop_dm##nm##w[];  \
+    __attribute__((weak)) extern const uint8_t __start_dm##nm##x1[], __stop_dm##nm##x1[];
 
 DM_IMG_SYMS(main)
 DM_IMG_SYMS(sdk)
 DM_IMG_SYMS(subsdk0)
 
 // 强制接管表所在的段（上游 hle.h 的 HLE_FORCE 宏在鸿蒙侧改写到这个段名）
-extern const uint8_t __start_dmswforce[], __stop_dmswforce[];
+__attribute__((weak)) extern const uint8_t __start_dmswforce[], __stop_dmswforce[];
 
 typedef struct {
     const char *name;
@@ -46,14 +51,20 @@ static const img_sections g_imgs[] = {
 };
 
 const void *dm_ohos_force_table(size_t *nbytes) {
+    if (nbytes) *nbytes = 0;
+    // 弱符号：段不存在时两个符号都是 0
+    if (!__start_dmswforce || !__stop_dmswforce) return NULL;
     size_t n = (size_t)(__stop_dmswforce - __start_dmswforce);
     if (nbytes) *nbytes = n;
     return n ? (const void *)__start_dmswforce : NULL;
 }
 
 static const img_sections *find_img(const char *name) {
-    for (size_t i = 0; i < sizeof g_imgs / sizeof g_imgs[0]; i++)
+    for (size_t i = 0; i < sizeof g_imgs / sizeof g_imgs[0]; i++) {
+        // 弱符号：没嵌入的模块三个指针都是 0，跳过
+        if (!g_imgs[i].x0 || !g_imgs[i].w || !g_imgs[i].x1) continue;
         if (!strcmp(g_imgs[i].name, name)) return &g_imgs[i];
+    }
     return NULL;
 }
 
