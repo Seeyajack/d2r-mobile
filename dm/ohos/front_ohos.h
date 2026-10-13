@@ -18,14 +18,19 @@
 void *front_ohos_native_window(void);
 
 // ArkTS → 原生 的启动入口（经 NAPI 暴露，名字与 ArkTS 侧封装一致）。
-// 做三件事：备好环境（游戏资源 / 存档 / 临时目录）→ 让宿主装载提前起跑 → 起跑游戏。
+// 做三件事：备好环境（模块目录 / 游戏资源 / 存档 / 临时目录）→ 让宿主装载提前起跑 → 起跑游戏。
 // 返回 0 成功，非 0 失败（错误写 hilog）。
 //
 // 参数都是鸿蒙应用沙箱里的绝对路径：
+//   mods  —— 放 *.fixups.tsv / *.gates.tsv 的目录（对应上游 argv[1]；loader.c 的 read_layout /
+//            register_gates 总是从这个目录读表）
 //   romfs —— 游戏资源目录（对应上游的 DM_ROMFS）
 //   save  —— 存档目录（对应 DM_SAVE，上游要求必须给）
 //   temp  —— 临时目录（对应 DM_TEMP，可为 NULL）
-int dm_ohos_boot(const char *romfs, const char *save, const char *temp);
+//
+// 注意：模块镜像本身（*.patched.bin）在 iOS 上是「嵌入成签名代码段」由 getsectiondata 取的
+// （loader.c 的两套 map_image）；鸿蒙侧要换一种嵌入与定位方式，见 dm/ohos/README.md 的未解决项。
+int dm_ohos_boot(const char *mods, const char *romfs, const char *save, const char *temp);
 
 // 当前 XComponent 表面尺寸（像素）。表面没就绪或已销毁时返回 0。
 // 触摸回调要用它把触点坐标归一化到 [0,1)。

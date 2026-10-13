@@ -86,16 +86,39 @@ ArkTS 侧
 
 ---
 
-## 未解决 / 需要真机验证的问题
+## 已解决 / 未解决
+
+### 已解决（读完 `dm/host/main.c` 后确认，2026-10-13）
+
+| 问题 | 结论 |
+|---|---|
+| **怎么进入游戏主流程** | ✅ **不需要改 `main.c`**。它的 `main()` 不是 `static`，而且只做三件事：预载 → `front_run(guest_main)` → `return 0`。本文件的 `front_run` 不阻塞，所以鸿蒙侧直接 `extern int main(...)` 调它即可。 |
+| `argc/argv` 怎么给 | ✅ 形状照 `main.c`：`argv[0]` 程序名、**`argv[1]` = 模块目录**（`loader.c` 的 `read_layout` / `register_gates` 从这里读 `*.fixups.tsv` / `*.gates.tsv`）、其后是模块名（缺省 `main` `sdk`）、`--` 之后是游戏参数。`dm_ohos_boot()` 已按此构造。 |
+| `main()` 里的 `exit()` | ✅ `main()` 结尾是 `return 0`，**不调 `exit()`**，不会杀掉应用进程。 |
+
+### 未解决
 
 | 问题 | 说明 |
 |---|---|
-| **怎么进入游戏主流程** | `main.c` 的 `main()` 是进程入口；鸿蒙应用没有 `main()`。要么给 `main.c` 加一个可导出的入口，要么在鸿蒙侧复刻它的 boot 序列。**这是本骨架最大的未决点。** |
-| `argc/argv` 怎么给 | `dm_host_preload_start(argc, argv)` 要参数，鸿蒙侧没有命令行。先构造一个最小 argv。 |
-| `main()` 里的 `exit()` | 若直接调 `main()`，它退出时会 `exit()`，在鸿蒙上会结束整个应用进程。需要改成可返回的形式。 |
+| **嵌入镜像的定位** | iOS 靠 `getsectiondata` 从 Mach-O 段里取游戏镜像（`loader.c` 有两套 `map_image`：嵌入版 / 从目录读 `*.patched.bin` 版）。鸿蒙没有 Mach-O 这套机制，要换一种嵌入与定位方式。**这是目前最大的未决点。** |
+| `TargetConditionals.h` | `main.c` 第 170/173 行引用了它，鸿蒙上没这个头 —— 按适配清单第 1 项处理。 |
+| `sysctl(KERN_PROC_PID)` | `main.c` 的 `proc_start_mono_ns()` 用它算进程启动时刻（启动时间线的零点）；鸿蒙上要换等价做法。 |
 | 日志 | 上游用 `LOG()` 宏；鸿蒙侧要接到 hilog。 |
 | 大栈线程 | `front_mac.m` 用 64 MiB 栈；鸿蒙侧 `pthread_attr_setstacksize` 是否允许这么大，需实测。 |
-| `mach-o/*` 那类 | 宿主里定位嵌入镜像段的部分（见适配清单），要换机制。 |
+
+### 已用真实 SDK 核对通过的部分
+
+骨架的 include 路径与 API 签名，已逐条对过本机安装的 DevEco Studio SDK
+（`D:/Program Files/Huawei/DevEco Studio/sdk/default/openharmony/native/sysroot/usr/include/`）：
+
+- `<ace/xcomponent/native_interface_xcomponent.h>`、`<napi/native_api.h>`、`<hilog/log.h>` 均存在
+- `OH_NATIVE_XCOMPONENT_OBJ` = `"__NATIVE_XCOMPONENT_OBJ__"`
+- `OH_NATIVEXCOMPONENT_RESULT_SUCCESS = 0`
+- `OH_NativeXComponent_Callback` 的 `OnSurfaceCreated(OH_NativeXComponent*, void* window)`
+- `OH_NativeXComponent_GetXComponentSize` / `GetTouchEvent` / `RegisterCallback`
+- `OH_NativeXComponent_TouchEvent`：`numPoints`、`type`、`touchPoints[]`
+- `OH_NativeXComponent_TouchPoint`：`id`、`x`、`y`、`isPressed`
+- 触摸类型枚举：`OH_NATIVEXCOMPONENT_DOWN/UP/MOVE/CANCEL/UNKNOWN`
 
 ---
 

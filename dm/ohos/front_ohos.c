@@ -133,19 +133,26 @@ int front_text_input(const char *title, const char *sub, const char *guide, cons
 
 // ───────────────────── ArkTS → 原生 的入口 ─────────────────────
 
-// TODO(关键未决点)：鸿蒙应用没有进程入口 main()。
-// 上游 dm/host/main.c 的 main() 自己会调 front_run(guest_main)，而 guest_main 是 static。
-// 两条路（见 README「未解决」表）：
-//   A) 给 main.c 加一个可导出的入口（如 dm_host_main_ohos(argc, argv)），鸿蒙侧调它；
-//   B) 在鸿蒙侧复刻 main.c 的 boot 序列。
-// 现在按 A 写，先声明成 extern，等改 main.c 时对上。
-extern int dm_host_main_ohos(int argc, char **argv);
+// 入口：读完 dm/host/main.c 后确认——它的 main() 不是 static，而且只做三件事：
+//   ① 预载（host_preload，或等 dm_host_preload_start 起的后台线程）
+//   ② front_run(guest_main)
+//   ③ return 0        ← 不调 exit()，不会杀掉进程
+// 而本文件的 front_run 不阻塞（只把游戏挂到线程上就返回），
+// 所以鸿蒙侧【可以直接调 main()，不需要改 main.c】。
+//
+// 唯一前提：main.c 第 170 行 #include <TargetConditionals.h> 和第 173 行 #if TARGET_OS_OSX，
+// 鸿蒙上没有这个头 —— 按「适配清单-宿主层.md」第 1 项处理（去掉该分支或提供平台宏）即可。
+//
+// 若链接器不接受共享库里出现名为 main 的符号，就在 main.c 加一个薄包装（如 dm_host_main_ohos）转调。
+extern int main(int argc, char **argv);
 
 static int boot_started;
 
-int dm_ohos_boot(const char *romfs, const char *save, const char *temp) {
+int dm_ohos_boot(const char *mods, const char *romfs, const char *save, const char *temp) {
     if (boot_started) { LOG("鸿蒙前端：已启动过，忽略"); return 0; }
-    if (!romfs || !*romfs || !save || !*save) { LOG("【红】鸿蒙前端：romfs / save 不能为空"); return -1; }
+    if (!mods || !*mods || !romfs || !*romfs || !save || !*save) {
+        LOG("【红】鸿蒙前端：mods / romfs / save 都不能为空"); return -1;
+    }
     boot_started = 1;
 
     setenv("DM_ROMFS", romfs, 1);
@@ -155,14 +162,18 @@ int dm_ohos_boot(const char *romfs, const char *save, const char *temp) {
     // 上游在 main() 开头就把 cwd 设到工作目录；鸿蒙侧同样要有确定的 cwd。
     if (chdir(save) != 0) LOG("【黄】鸿蒙前端：chdir(%s) 失败，沿用当前 cwd", save);
 
-    // 宿主装载提前起跑（与 iOS 壳一致：UI 起来之前先叫它跑）。
-    // 鸿蒙没有命令行参数，构造一个最小 argv。
-    static char a0[] = "dmohos", a1[] = "main", a2[] = "sdk";
-    static char *av[] = { a0, a1, a2 };
-    dm_host_preload_start(3, av);
+    // argv 的形状照 main.c：argv[0] = 程序名，argv[1] = 模块目录（loader.c 的 read_layout /
+    // register_gates 从这里读 *.fixups.tsv / *.gates.tsv），其后是模块名，"--" 之后是游戏参数。
+    static char a0[] = "dmhost", a2[] = "main", a3[] = "sdk", mods_copy[1024];
+    snprintf(mods_copy, sizeof mods_copy, "%s", mods);
+    static char *av[] = { a0, mods_copy, a2, a3 };
+    const int ac = (int)(sizeof av / sizeof av[0]);
 
-    // 进入游戏主流程（内部会调 front_run）。
-    int r = dm_host_main_ohos(3, av);
+    // 宿主装载提前起跑（与 iOS 壳一致：UI 起来之前先叫它跑）。
+    dm_host_preload_start(ac, av);
+
+    // 进入游戏主流程：main() 会等预载完成，再调 front_run(guest_main) 把游戏挂到独立线程上，随即返回。
+    int r = main(ac, av);
     if (r) LOG("【红】鸿蒙前端：主流程返回 %d", r);
     return r;
 }
@@ -176,13 +187,14 @@ static char *js_str(napi_env env, napi_value v, char *buf, size_t cap) {
 }
 
 static napi_value JsBoot(napi_env env, napi_callback_info info) {
-    size_t argc = 3; napi_value argv[3] = { NULL, NULL, NULL };
+    size_t argc = 4; napi_value argv[4] = { NULL, NULL, NULL, NULL };
     napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
-    char romfs[1024] = {0}, save[1024] = {0}, temp[1024] = {0};
-    if (argc > 0 && argv[0]) js_str(env, argv[0], romfs, sizeof romfs);
-    if (argc > 1 && argv[1]) js_str(env, argv[1], save, sizeof save);
-    if (argc > 2 && argv[2]) js_str(env, argv[2], temp, sizeof temp);
-    int r = dm_ohos_boot(romfs, save, temp);
+    char mods[1024] = {0}, romfs[1024] = {0}, save[1024] = {0}, temp[1024] = {0};
+    if (argc > 0 && argv[0]) js_str(env, argv[0], mods, sizeof mods);
+    if (argc > 1 && argv[1]) js_str(env, argv[1], romfs, sizeof romfs);
+    if (argc > 2 && argv[2]) js_str(env, argv[2], save, sizeof save);
+    if (argc > 3 && argv[3]) js_str(env, argv[3], temp, sizeof temp);
+    int r = dm_ohos_boot(mods, romfs, save, temp);
     napi_value ret; napi_create_int32(env, r, &ret); return ret;
 }
 
