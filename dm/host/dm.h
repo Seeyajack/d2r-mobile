@@ -8,7 +8,15 @@
 #include <string.h>
 
 #define MAX_MOD 8
+// 日志出口：鸿蒙构建定义 DM_LOG_TO_HILOG，统一走 hilog（实现在 dm/ohos/dm_log.h）；
+// 苹果构建不定义，保持原来的 stderr 行为——**上游三个平台的行为零变化**。
+// Log sink: the HarmonyOS build defines DM_LOG_TO_HILOG and goes through hilog (see dm/ohos/dm_log.h);
+// Apple builds do not define it and keep the original stderr path, so upstream behaviour is unchanged.
+#ifdef DM_LOG_TO_HILOG
+#include "dm_log.h"
+#else
 #define LOG(...) do { fprintf(stderr, "[dm] " __VA_ARGS__); fputc('\n', stderr); } while (0)
+#endif
 #define die(...) do { LOG("FATAL " __VA_ARGS__); abort(); } while (0)
 
 typedef struct { uint32_t st_name; uint8_t st_info, st_other; uint16_t st_shndx; uint64_t st_value, st_size; } Elf64_Sym;

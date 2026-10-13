@@ -1,6 +1,7 @@
 # dm/ohos —— HarmonyOS NEXT 前端（设计骨架）
 
-> 状态：**未编译、未在真机运行**。这是"缝"的设计落地，不是可用的实现。
+> 状态：`front_ohos.c` **尚未编进 `libdmohos.so`**——因为它依赖的宿主还没替换完苹果专属依赖。
+> 但本目录并非"未验证"：`map_image_ohos.c` 已通过真机实验验证，`app/` 工程已在真机 build/run 通过。
 > 依据：`适配清单-宿主层.md` ｜ 决策：鸿蒙侧另开接口（不动 `front.h`）+ 新建本目录
 
 ---
@@ -100,7 +101,6 @@ ArkTS 侧
 
 | 问题 | 说明 |
 |---|---|
-| **线程槽机制** | `loader.c` 的 `tsd_check()` 用 `mrs tpidrro_el0` 并假定「槽 = tpidrro_el0 + 8×键号」—— 这是**苹果 pthread 的 TSD 布局**。musl 不同，且 Linux 上 `tpidrro_el0` 通常为 0。**要按 musl TLS 重新设计，并牵连改写器的改写目标**（比 Mach-O 那两项更底层）。**这是目前最大的未决点。** |
 | `sysctl(KERN_PROC_PID)` | `main.c` 的 `proc_start_mono_ns()` 用它算进程启动时刻；鸿蒙上要换等价做法。 |
 | 日志 | 上游用 `LOG()` 宏；鸿蒙侧要接到 hilog（`map_image_ohos.c` 里已用 `OH_LOG_Print` 示范）。 |
 | 大栈线程 | `front_mac.m` 用 64 MiB 栈；鸿蒙侧 `pthread_attr_setstacksize` 是否允许这么大，需实测。 |
@@ -113,6 +113,7 @@ ArkTS 侧
 | `TargetConditionals.h` | ✅ `loader.c` 已加 `#if !defined(__OHOS__)` 守卫；未定义时 `#if TARGET_OS_IPHONE` 按 0 处理 |
 | **嵌入镜像的定位** | ✅ 自定义 ELF 段 + `__start_/__stop_` 链接器符号（真机实验 C 验证）。实现：`map_image_ohos.c`，接线在 `loader.c` 的 `#elif defined(__OHOS__)` 分支 |
 | **运行时映射机制** | ✅ 匿名 `mmap` + `memcpy` + `mprotect` 成 R+X（真机实验 A 验证）。**照抄上游桌面版 `map_image()`**，不需要 iOS 的文件映射 |
+| **线程槽机制（`tsd_check`）** | ✅ 真机测出 musl 是**两级间接**：`槽 = *(void**)(tpidr_el0 − 272) + 键号×8`（实验 E/E2/F 验证）。`patch_nso.py` 已加 `DM_PATCH_TARGET` 平台开关，`tsd_check()` 已改。详见 `线程槽方案-musl改法.md` |
 
 ---
 
@@ -125,12 +126,6 @@ ArkTS 侧
 | `CMakeLists.txt` | 鸿蒙 NDK 构建脚本（骨架，暂只挂前端） |
 | `装载方案-镜像嵌入与定位.md` | 嵌入/定位/映射的完整方案 + 真机实验结果 |
 | `app/` | 鸿蒙工程（devecocli create 生成，含第 1 站三个真机实验） |
-
-## 下一步
-
-1. **重新设计线程槽机制**（`tsd_check()`，牵涉改写器的改写目标）—— 目前最大的未决点
-2. 写 `dm/ohos/tools/gen_embed_ohos.py`（产出带自定义段的 `.S`）
-3. 逐类替换适配清单里剩下的苹果专属依赖，把宿主编进 `libdmohos.so`
 
 ### 已用真实 SDK 核对通过的部分
 
@@ -148,8 +143,14 @@ ArkTS 侧
 
 ---
 
-## 下一步
+## 下一步（2026-10-13 深夜更新）
 
-1. 解决"怎么进入游戏主流程"（上面第一条）——**这是能不能跑起来的关键**
-2. 逐类替换适配清单里的 8 项苹果专属依赖
-3. 在 DevEco Studio 里建工程，把 `libdmohos.so` 编出来（阶段 1：先出清屏画面）
+之前那条"重新设计线程槽机制""解决怎么进入游戏主流程"的待办**已经完成**，不再重复。
+
+现在的主线是**把宿主编进 `libdmohos.so`**，分四步：
+
+1. **搭兼容垫片** `dm/ohos/compat/`——宿主里的苹果头全是 `#include <...>` 尖括号形式，
+   用同名垫片头 + `-I` 前置即可替换，**上游文件一个字都不用改**（见该目录的 `README.md`）
+2. **统一日志**：把上游散落的 `LOG()` 接到 hilog（`dm_log.h`）
+3. **分批把宿主编进来**：批 1 平台中立 → 批 2 系统服务 → 批 3 平台相关
+4. **图形层（Metal → Vulkan）暂不碰**——等宿主编译这条主线走完再开
