@@ -31,6 +31,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <sys/syscall.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -236,6 +239,62 @@ static void *open_test(const char *dir, const char *lib, char *tried, size_t tca
     return h;
 }
 
+// ---- 环境前提检查 ----
+// 上游这些单测是在 macOS 上跑的，默认了几条宿主环境前提。真机上这几条**不一定成立**，
+// 而一旦不成立，失败信息会指向错误的方向（比如"大小写不对"其实是 xattr 不支持）。
+// 所以开跑前先把它们逐条报出来——**报告里哪几条不成立，看后面的失败就能对症**。
+// The upstream tests run on macOS and assume a few host prerequisites. Those do not necessarily hold on
+// the device, and when they do not, the failure points in the wrong direction. So report them up front.
+static void precheck(sink_t *s, const char *logdir) {
+    emit(s, "---- 环境前提检查 ----");
+
+    // 1) /tmp 存不存在（t_fs 硬编码了 /tmp）
+    struct stat st;
+    int has_tmp = (stat("/tmp", &st) == 0);
+    emit(s, "  /tmp 存在：%s%s", has_tmp ? "是" : "**否**",
+         has_tmp ? "" : "   ← t_fs 硬编码 /tmp，会因此早退");
+
+    // 2) 数据目录可写
+    emit(s, "  数据目录可写：%s", (access(logdir, W_OK) == 0) ? "是" : "**否**");
+
+    // 3) xattr 能不能用（hle_fs 的路由全靠它：宿主文件上贴"客体原名"）
+    //    直接用系统调用，免得跟垫片头混在一起看不清是谁的问题
+    char f[1200];
+    snprintf(f, sizeof f, "%s/.xattr-probe", logdir);
+    FILE *fp = fopen(f, "w");
+    int sx = -1, gx = -1, sx_errno = 0, gx_errno = 0;
+    if (fp) {
+        fclose(fp);
+        errno = 0;
+        sx = (int)syscall(SYS_setxattr, f, "user.dmprobe", "1", (size_t)1, 0);
+        sx_errno = errno;
+        errno = 0;
+        char v[8];
+        gx = (int)syscall(SYS_getxattr, f, "user.dmprobe", v, sizeof v);
+        gx_errno = errno;
+        unlink(f);
+    }
+    emit(s, "  xattr 可用：setxattr rc=%d(errno=%d) getxattr rc=%d(errno=%d) %s",
+         sx, sx_errno, gx, gx_errno,
+         (gx >= 0 || gx_errno == ENODATA) ? "→ 可用"
+                                          : "→ **不可用**：hle_fs 的路径查找会全线失败，"
+                                            "后面 t_fs_case 的失败应当归因到这里");
+
+    // 4) fork 能不能用（t_hid_script 有两条检查靠 fork + 等子进程被信号杀掉）
+    errno = 0;
+    pid_t pid = fork();
+    if (pid < 0) {
+        emit(s, "  fork 可用：**否**（errno=%d）   ← t_hid_script 里靠 fork 的检查必然失败", errno);
+    } else if (pid == 0) {
+        _exit(0);                                  // 子进程：立刻退出
+    } else {
+        int status = 0;
+        waitpid(pid, &status, 0);
+        emit(s, "  fork 可用：是（子进程正常退出）");
+    }
+    emit(s, "");
+}
+
 int dm_host_tests_run(const char *logpath, const char *filter, char *out, size_t cap) {
     if (!out || cap < 128) return -1;
     out[0] = 0;
@@ -264,6 +323,7 @@ int dm_host_tests_run(const char *logpath, const char *filter, char *out, size_t
     emit(&s, "=== 宿主单测（上游 dm/host/tests，在鸿蒙上跑）===");
     emit(&s, "共 %d 条；自身目录：%s；筛选：%s；数据目录：%s", dm_host_tests_count,
          have_dir && *dir ? dir : "（取不到）", *filter ? filter : "（续跑）", logdir);
+    precheck(&s, logdir);
 
     char cappath[512];
     snprintf(cappath, sizeof cappath, "%s.out", g_logpath);
