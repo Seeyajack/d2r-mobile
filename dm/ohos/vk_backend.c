@@ -228,7 +228,13 @@ static void rec_clear(VkCommandBuffer cb, void *ud) {
 }
 
 int vk_backend_clear(vk_ctx *ctx, vk_rt *rt, float r, float g, float b, float a) {
-    clear_pack p = { rt, { { { r, g, b, a } } } };
+    // ⚠️ 花括号层数：VkClearColorValue 是 union{ float32[4]; ... }，初始化它要**两层**
+    // （外层 union、内层数组）。多写一层会把 float32[0] 当数组初始化 ⇒ 只有第一个分量生效、
+    // 其余补零——真机上表现为"清红只得红、清绿全零"，是逐像素验证抓出来的。
+    // ⚠️ Brace count matters: VkClearColorValue is a union{ float32[4]; ... }, so initialising it takes
+    // exactly two levels. One extra level initialises float32[0] as an array, leaving the rest zeroed --
+    // measured on the device as "red came out red, green came out black", caught by pixel verification.
+    clear_pack p = { rt, { { r, g, b, a } } };
     return one_shot(ctx, rec_clear, &p);
 }
 
@@ -300,10 +306,18 @@ int vk_backend_smoke(char *out, size_t cap) {
             if (px[0] != steps[s].expect[0] || px[1] != steps[s].expect[1] ||
                 px[2] != steps[s].expect[2] || px[3] != steps[s].expect[3]) bad++;
         }
-        EMIT("%s 清成%s后读回：%u 像素中 %llu 个符合预期（%llums）",
+        // 失败时把实际像素字节打出来——没有这个就只能瞎猜是通道序、布局还是拷贝的问题
+        // (on failure, dump the actual bytes; without them the cause is guesswork)
+        EMIT("%s 清成%s后读回：%u 像素中 %llu 个不符（%llums）",
              bad ? "❌" : "✅", steps[s].name, t->w * t->h, (unsigned long long)bad,
              (unsigned long long)(ms_now() - a));
-        if (bad) fails++;
+        if (bad) {
+            const uint8_t *f = pix, *m = pix + (size_t)(t->w * t->h / 2) * 4, *l = pix + (size_t)(t->w * t->h - 1) * 4;
+            EMIT("   实际字节：首=(%u,%u,%u,%u) 中=(%u,%u,%u,%u) 尾=(%u,%u,%u,%u)；预期 R8G8B8A8=(%u,%u,%u,%u)",
+                 f[0], f[1], f[2], f[3], m[0], m[1], m[2], m[3], l[0], l[1], l[2], l[3],
+                 steps[s].expect[0], steps[s].expect[1], steps[s].expect[2], steps[s].expect[3]);
+            fails++;
+        }
     }
     free(pix);
     vk_backend_target_free(c, t);
