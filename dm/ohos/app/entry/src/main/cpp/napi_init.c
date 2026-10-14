@@ -7,10 +7,12 @@
 #include "dm_probe.h"
 #include "host_tests.h"
 #include "vk_probe.h"
+#include "vk_backend.h"
 
 #define PROBE_BUF    16384
 #define VKPROBE_BUF  32768   // Vulkan 报告比实验报告长（要列扩展/格式/上限/特性），给大一点
-#define TEST_BUF     65536   // 27 个单测的报告 + 失败时的诊断行，给足
+#define TEST_BUF     65536   // 单测的报告 + 失败时的诊断行，给足
+#define VKSMOKE_BUF  16384   // Vulkan 冒烟报告（设备名 + 逐项结论）
 
 // 共用一个"跑一个探针，把报告字符串返回"的骨架，几种探针只差调哪个函数、缓冲区多大。
 // Shared skeleton: run a probe and return its report as a string; the probes differ only in which
@@ -95,11 +97,26 @@ static napi_value RunHostTests(napi_env env, napi_callback_info info) {
     return RunOne(env, files_dir, filter, 2);
 }
 
+static napi_value RunVkSmoke(napi_env env, napi_callback_info info) {
+    // 图形层阶段 1：Vulkan 离屏冒烟（清屏 + 读回逐像素验证），不依赖窗口与游戏文件。
+    // 参数留位（将来加 surface 阶段时要存日志），现在不看。
+    char files_dir[1024];
+    Arg0String(env, info, files_dir, sizeof files_dir);
+    napi_value ret = NULL;
+    char *buf = (char *)malloc(VKSMOKE_BUF);
+    if (!buf) { napi_create_string_utf8(env, "内存不足", NAPI_AUTO_LENGTH, &ret); return ret; }
+    vk_backend_smoke(buf, VKSMOKE_BUF);
+    napi_create_string_utf8(env, buf, NAPI_AUTO_LENGTH, &ret);
+    free(buf);
+    return ret;
+}
+
 static napi_value Init(napi_env env, napi_value exports) {
     napi_property_descriptor desc[] = {
         { "runProbes",     NULL, RunProbes,     NULL, NULL, NULL, napi_default, NULL },
         { "runVkProbe",    NULL, RunVkProbe,    NULL, NULL, NULL, napi_default, NULL },
         { "runHostTests",  NULL, RunHostTests,  NULL, NULL, NULL, napi_default, NULL },
+        { "runVkSmoke",    NULL, RunVkSmoke,    NULL, NULL, NULL, napi_default, NULL },
     };
     napi_define_properties(env, exports, sizeof desc / sizeof desc[0], desc);
     return exports;

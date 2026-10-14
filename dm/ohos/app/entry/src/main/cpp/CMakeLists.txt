@@ -19,6 +19,8 @@ add_library(dmprobe SHARED
     dm_probe.c
     vk_probe.c
     napi_init.c
+    # 阶段 1 的 Vulkan 冒烟后端（离屏：清屏 + 读回逐像素验证；对标 dm/gfx/metal/mtl_backend）
+    ${DM_DIR}/ohos/vk_backend.c
     # 宿主单测跑测框架 + 统一日志（框架靠 dlopen 去载入各单测 .so，所以它自己很薄）
     ${DM_DIR}/ohos/host_tests.c
     ${DM_DIR}/ohos/host_tests_gen.c   # 生成：单测清单（哪些 .so、叫什么名字）
