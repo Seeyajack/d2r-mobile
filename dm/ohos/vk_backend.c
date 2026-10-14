@@ -2133,6 +2133,11 @@ static int pace_one_arm(os_emit em, os_ctx *o, const pace_arm *arm, pace_run *R,
     VkCommandPool pool = dm_ohos_vk_pool();
     int fails = 0, got = 0;
 
+    if (arm->slots < 1 || arm->slots > PACE_MAX_SLOT) {   // 槽位表是定长的，越界前先挡住
+        OS_EMIT(em, "❌ 组的槽位数 %d 超出上限 %d", arm->slots, PACE_MAX_SLOT);
+        memset(res, 0, sizeof *res);
+        return 1;
+    }
     memset(R, 0, sizeof *R);
     atomic_init(&R->stop, 0); atomic_init(&R->in_cb, 0); atomic_init(&R->done_n, 0);
     R->o = o; R->pool = pool; R->arm = *arm;
@@ -2236,9 +2241,15 @@ int vk_backend_pace(char *out, size_t cap) {
     };
     const int NARM = (int)(sizeof ARMS / sizeof *ARMS);
     static pace_run R;                 // 放静态：回调要活到 Stop 之后，不能是正在退栈的局部量
-    pace_res res[5];
+    pace_res res[8];                   // 定长表 + 下面挡住 NARM 超出（加组时不会悄悄越界）
     memset(res, 0, sizeof res);
 
+    if (NARM > (int)(sizeof res / sizeof *res)) {
+        OS_EMIT(em, "❌ 组数 %d 超出读数表容量", NARM);
+        os_teardown(&o);
+        *em.p = 0;
+        return 1;
+    }
     for (int i = 0; i < NARM; i++) {
         OS_EMIT(em, "");
         fails += pace_one_arm(em, &o, &ARMS[i], &R, &res[i]);
