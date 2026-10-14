@@ -48,6 +48,7 @@ set(DM_HOST_TEST_LIBS
     dmt_t_oe
     dmt_t_padmap
     dmt_t_romfs_validate
+    dmt_t_rwlv
     dmt_t_swkbd
     dmt_t_target_rank
     dmt_t_textbox
@@ -329,6 +330,20 @@ add_library(dmt_t_romfs_validate SHARED
     "${DM_REPO}/dm/ohos/audio_ohos.c"
 )
 dm_host_test_config(dmt_t_romfs_validate)
+
+# ---- t_rwlv ----
+add_library(dmt_t_rwlv SHARED
+    "${DM_REPO}/dm/host/tests/t_rwlv.c"
+    "${DM_REPO}/dm/host/dm_rwlv_core.c"
+    "${DM_REPO}/dm/ohos/compat/src/dm_compat_dispatch.c"
+    "${DM_REPO}/dm/ohos/compat/src/dm_compat_fs.c"
+    "${DM_REPO}/dm/ohos/compat/src/dm_compat_hash.c"
+    "${DM_REPO}/dm/ohos/compat/src/dm_compat_mach.c"
+    "${DM_REPO}/dm/ohos/compat/src/dm_compat_str.c"
+    "${DM_REPO}/dm/ohos/dm_log.c"
+    "${DM_REPO}/dm/ohos/audio_ohos.c"
+)
+dm_host_test_config(dmt_t_rwlv)
 
 # ---- t_swkbd ----
 add_library(dmt_t_swkbd SHARED

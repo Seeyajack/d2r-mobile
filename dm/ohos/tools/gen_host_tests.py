@@ -41,6 +41,9 @@ SKIP = {
                     '一起丢掉"，所以只链 hle_os.c 就够；ELF 的 -shared 丢不掉，会缺 16 个宿主符号'
                     '（dm_str / dm_game_notice / g_nmod / dm_hud_request_players …）。'
                     '要搬它得先把那些宿主文件补进它的清单，或换一种链接策略——留作待办。',
+    't_rift_next': '同 t_rift_clock：上游规则用 -dead_strip 只链 t_rift_next.c + hle_os.c，'
+                   '而 hle_os.c 引用的 dm_guest_clock_advanced 定义在 hle_thread.c（没链）⇒ ELF 上缺符号',
+    't_rift_oldrun': '同 t_rift_clock：上游规则用 -dead_strip 只链 t_rift_oldrun.c + hle_os.c ⇒ ELF 上缺符号',
 }
 
 # 每个单测 .so 都要带上的支撑源（相对仓库根）：垫片层 + 我们自己的日志/音频后端。
@@ -97,6 +100,10 @@ def parse_run_recipe():
         if not in_run or not raw.strip():
             continue
         line = raw.strip()
+        # 上游把 run: 的前置条件列表也用反斜杠续行写在同一目标下，行尾会带一个 `\`；
+        # 剥掉它，免得被当成参数带进清单（真机上生成出 "\" 这种孤立参数，编译都过不了）。
+        while line.endswith('\\'):
+            line = line[:-1].strip()
         # for m in ...; do <cmd> done  —— 同一个单测带不同参数跑多次
         m = re.search(r'for\s+(\w+)\s+in\s+([^;]+);\s*do\s+(.*?)\s*(?:\|\|\s*exit \d+)?\s*;?\s*done', line)
         if m:
@@ -148,12 +155,19 @@ def main():
                     for f in os.listdir(os.path.join(DM_OHOS, 'compat', 'src'))
                     if f.endswith('.c'))
 
-    # 每个单测"怎么被调用"（环境 + 参数）——从 Makefile 的 run: 配方里读，不自己猜
+    # 每个单测"怎么被调用"（环境 + 参数）——从 Makefile 的 run: 配方里读，不自己猜。
+    # 同一条 (名字, 参数, 环境) 可能因为"前置条件列表 + 配方"各出现一次，**去重**：
+    # 去重时保序，t_i18n 那 7 种语言参数各不相同，不会误伤。
     runinfo = parse_run_recipe()
     entries = []          # (显示名, .so 名, argv[1], 环境串)
+    seen = set()
     for n in names:
         calls = runinfo.get(n) or [(n, '', '')]
         for disp, arg, env in calls:
+            key = (disp, arg, env)
+            if key in seen:
+                continue
+            seen.add(key)
             entries.append((disp, 'dmt_' + n, arg, env))
 
     # ---- 1) 清单 C 文件（跑测框架靠它知道该 dlopen 哪些 .so、以及怎么调）----
