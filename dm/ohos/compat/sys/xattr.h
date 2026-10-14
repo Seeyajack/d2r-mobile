@@ -32,8 +32,24 @@
 #define ENOATTR ENODATA
 #endif
 
-ssize_t getxattr(const char *path, const char *name, void *value, size_t size,
-                 uint32_t position, int options);
-ssize_t setxattr(const char *path, const char *name, const void *value, size_t size,
-                 uint32_t position, int options);
-int removexattr(const char *path, const char *name, int options);
+ssize_t dm_compat_getxattr(const char *path, const char *name, void *value, size_t size,
+                           uint32_t position, int options);
+ssize_t dm_compat_setxattr(const char *path, const char *name, const void *value, size_t size,
+                           uint32_t position, int options);
+int dm_compat_removexattr(const char *path, const char *name, int options);
+
+// ⚠️ 这里**必须用宏别名，不能直接定义 getxattr 这个名字**。
+// 原因是真机上撞出来的：鸿蒙的 libc **也有** getxattr（4 参版）。动态链接时符号按查找顺序抢占，
+// libc 排在我们前面 ⇒ 我们的同名定义**永远不会被调到**——哪怕它是强符号、哪怕它就在同一个 .so 里。
+// 结果是 hle_fs 一直调到 libc 的 4 参版，错误码也不对（真机上查"属性不存在"返回的是 EOPNOTSUPP
+// 而不是 ENOATTR），t_fs_case 的 51 项里 44 项一起挂。
+// 用独有名 + 宏别名，调用点在编译期就指向我们，谁也抢不走。
+// （strlcpy / arc4random 那几个同名垫片没出事是**运气**：musl 恰好有正确实现、renamex_np 恰好没有。
+//  正确姿势是：**凡是 musl 也有、但签名不同的符号，一律独有名 + 宏别名。**）
+// ⚠️ The alias macro is mandatory. HarmonyOS's libc *also* exports getxattr (the 4-argument form), and
+// dynamic linking resolves by lookup order, with libc ahead of us -- so a same-named definition of ours
+// is never called, no matter how strong. Defining distinct names and aliasing via macros binds every
+// call site to us at compile time, which nothing can preempt.
+#define getxattr      dm_compat_getxattr
+#define setxattr      dm_compat_setxattr
+#define removexattr   dm_compat_removexattr

@@ -176,22 +176,75 @@ int clonefileat(int src_dirfd, const char *src, int dst_dirfd, const char *dst, 
 // 位置参数（position）苹果也只支持 0，这里同样只支持 0。
 // Used in one place: tagging a host file with the guest's original name. Apple supports only position 0
 // as well, and so does this.
-ssize_t getxattr(const char *path, const char *name, void *value, size_t size,
-                 uint32_t position, int options) {
-    if (position != 0) { errno = EINVAL; return -1; }
-    return (ssize_t)syscall((options & XATTR_NOFOLLOW) ? SYS_lgetxattr : SYS_getxattr,
-                            path, name, value, size);
+// 真机实测出来的一处平台差异：**查一个不存在的属性**时，鸿蒙给的是 EOPNOTSUPP(95)，
+// 而不是 Linux 常规的 ENODATA(61)（= 苹果的 ENOATTR）。
+// 这一处小差异的后果很大：hle_fs 的 guest_name() 是"拿到 ENOATTR → 用物理名，拿到别的 → 整条路径判失败"，
+// 于是真机上**每一次路径解析都失败**，t_fs_case 的 51 项里 44 项一起挂。
+//
+// 为什么把它归一化成 ENODATA 是安全的：读到"没有这个名字"之后，hle_fs 的既定行为就是
+// **回退成"物理名即客体名"**——而万一某个文件系统真的完全不支持 xattr，这个回退正是我们想要的，
+// 不会比"整条路径失败"更糟。
+// Measured on the device: reading a **non-existent** attribute returns EOPNOTSUPP(95) rather than the
+// usual ENODATA(61) (= Apple's ENOATTR). The consequence is large: hle_fs's guest_name() treats
+// "ENOATTR" as "use the physical name" and anything else as a hard path failure, so on the device every
+// path resolution failed and 44 of t_fs_case's 51 checks went down with it.
+// Normalising to ENODATA is safe: the caller's established fallback is "physical name == guest name",
+// which is exactly what we would want even if a filesystem supported no xattrs at all.
+// 真机实测出来的一处平台差异：**查一个不存在的属性**时，鸿蒙给的是 EOPNOTSUPP(95)，
+// 而不是 Linux 常规的 ENODATA(61)（= 苹果的 ENOATTR）。
+// 这一处小差异的后果很大：hle_fs 的 guest_name() 是"拿到 ENOATTR → 用物理名，拿到别的 → 整条路径判失败"，
+// 于是真机上**每一次路径解析都失败**，t_fs_case 的 51 项里 44 项一起挂。
+//
+// 为什么把它归一化成 ENODATA 是安全的：读到"没有这个名字"之后，hle_fs 的既定行为就是
+// **回退成"物理名即客体名"**——而万一某个文件系统真的完全不支持 xattr，这个回退正是我们想要的，
+// 不会比"整条路径失败"更糟。
+// Measured on the device: reading a **non-existent** attribute returns EOPNOTSUPP(95) rather than the
+// usual ENODATA(61) (= Apple's ENOATTR). hle_fs's guest_name() treats "ENOATTR" as "use the physical
+// name" and anything else as a hard path failure, so on the device every path resolution failed.
+// Normalising to ENODATA is safe: the caller's established fallback is "physical name == guest name".
+// Linux 的 xattr 名**必须带命名空间前缀**（user. / security. / system. / trusted.）；
+// 苹果允许任意名字（上游用的是 org.d2rmobile.guest-name，没有前缀）。
+// 不带前缀在鸿蒙上返回 EOPNOTSUPP(95)。这是**命名约定**的差异，不是语义差异，
+// 所以在垫片里统一补上 user. 前缀——上游的属性名照用，落到盘上带前缀。
+// Linux requires a namespace prefix on xattr names (user./security./system./trusted.); Apple allows any
+// name and upstream uses "org.d2rmobile.guest-name", which returns EOPNOTSUPP(95) here. That is a naming
+// convention, not a semantic difference, so the shim prefixes "user." while keeping upstream's name.
+static void xattr_name(const char *name, char *out, size_t n) {
+    if (!strncmp(name, "user.", 5) || !strncmp(name, "security.", 9) ||
+        !strncmp(name, "system.", 7) || !strncmp(name, "trusted.", 8)) {
+        snprintf(out, n, "%s", name);
+        return;
+    }
+    snprintf(out, n, "user.%s", name);
 }
 
-ssize_t setxattr(const char *path, const char *name, const void *value, size_t size,
-                 uint32_t position, int options) {
+static ssize_t xattr_get_norm(const char *path, const char *name, void *value, size_t size, int nofollow) {
+    char nm[256];
+    xattr_name(name, nm, sizeof nm);
+    ssize_t r = (ssize_t)syscall(nofollow ? SYS_lgetxattr : SYS_getxattr, path, nm, value, size);
+    if (r < 0 && errno == EOPNOTSUPP) errno = ENODATA;
+    return r;
+}
+
+ssize_t dm_compat_getxattr(const char *path, const char *name, void *value, size_t size,
+                           uint32_t position, int options) {
     if (position != 0) { errno = EINVAL; return -1; }
+    return xattr_get_norm(path, name, value, size, (options & XATTR_NOFOLLOW) != 0);
+}
+
+ssize_t dm_compat_setxattr(const char *path, const char *name, const void *value, size_t size,
+                           uint32_t position, int options) {
+    if (position != 0) { errno = EINVAL; return -1; }
+    char nm[256];
+    xattr_name(name, nm, sizeof nm);
     return (ssize_t)syscall((options & XATTR_NOFOLLOW) ? SYS_lsetxattr : SYS_setxattr,
-                            path, name, value, size, 0 /* flags */);
+                            path, nm, value, size, 0 /* flags */);
 }
 
-int removexattr(const char *path, const char *name, int options) {
-    return (int)syscall((options & XATTR_NOFOLLOW) ? SYS_lremovexattr : SYS_removexattr, path, name);
+int dm_compat_removexattr(const char *path, const char *name, int options) {
+    char nm[256];
+    xattr_name(name, nm, sizeof nm);
+    return (int)syscall((options & XATTR_NOFOLLOW) ? SYS_lremovexattr : SYS_removexattr, path, nm);
 }
 
 // ================================================================ malloc 统计：如实给 0

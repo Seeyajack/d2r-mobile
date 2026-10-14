@@ -172,21 +172,30 @@ static int self_dir(char *out, size_t cap) {
     return 0;
 }
 
-// ---- 把单测自己的 stdout 引到文件里（不引走的话，它的诊断输出在 App 里根本看不到）----
+static int g_saved_out = -1, g_saved_err = -1;
+
+// ---- 把单测自己的 stdout **和 stderr** 引到文件里 ----
+// stderr 也要：hle_fs.c 的 LOG() 除了进 hilog 还镜像一份到 stderr，那些正是定位问题的线索
+// （这次 t_fs_case 的 errno=95 就是先在 hilog 里看到的）。
 static int capture_begin(const char *path) {
     fflush(stdout);
-    int saved = dup(STDOUT_FILENO);
-    if (saved < 0) return -1;
+    fflush(stderr);
+    g_saved_out = dup(STDOUT_FILENO);
+    g_saved_err = dup(STDERR_FILENO);
+    if (g_saved_out < 0) return -1;
     int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
-    if (fd < 0) { close(saved); return -1; }
+    if (fd < 0) { close(g_saved_out); g_saved_out = -1; return -1; }
     dup2(fd, STDOUT_FILENO);
+    if (g_saved_err >= 0) dup2(fd, STDERR_FILENO);
     close(fd);
-    return saved;
+    return g_saved_out;
 }
 
 static void capture_end(int saved) {
     fflush(stdout);
+    fflush(stderr);
     if (saved >= 0) { dup2(saved, STDOUT_FILENO); close(saved); }
+    if (g_saved_err >= 0) { dup2(g_saved_err, STDERR_FILENO); close(g_saved_err); g_saved_err = -1; }
 }
 
 static uint64_t now_ms(void) {
@@ -258,27 +267,42 @@ static void precheck(sink_t *s, const char *logdir) {
     emit(s, "  数据目录可写：%s", (access(logdir, W_OK) == 0) ? "是" : "**否**");
 
     // 3) xattr 能不能用（hle_fs 的路由全靠它：宿主文件上贴"客体原名"）
-    //    直接用系统调用，免得跟垫片头混在一起看不清是谁的问题
-    char f[1200];
+    //    两个系统调用要**分开测**：垫片把苹果的 XATTR_NOFOLLOW 映射到 lgetxattr，
+    //    而普通调用走 getxattr——真机上这两个的支持情况**可能不一样**，
+    //    只测一个会得出"xattr 可用"这种把问题掩盖掉的结论（这次就踩了）。
+    //    Test the two syscalls separately: the shim maps Apple's XATTR_NOFOLLOW onto lgetxattr while
+    //    ordinary calls use getxattr, and a device may support one but not the other. Testing only one
+    //    yields a misleading "xattr works" and hides the real failure.
+    char f[1200], f2[1200];
     snprintf(f, sizeof f, "%s/.xattr-probe", logdir);
     FILE *fp = fopen(f, "w");
-    int sx = -1, gx = -1, sx_errno = 0, gx_errno = 0;
     if (fp) {
         fclose(fp);
-        errno = 0;
-        sx = (int)syscall(SYS_setxattr, f, "user.dmprobe", "1", (size_t)1, 0);
-        sx_errno = errno;
-        errno = 0;
+        errno = 0; int s1 = (int)syscall(SYS_setxattr, f, "user.dmprobe", "1", (size_t)1, 0); int e1 = errno;
+        errno = 0; int s2 = (int)syscall(SYS_lsetxattr, f, "user.dmprobe2", "1", (size_t)1, 0); int e2 = errno;
         char v[8];
-        gx = (int)syscall(SYS_getxattr, f, "user.dmprobe", v, sizeof v);
-        gx_errno = errno;
+        errno = 0; int g1 = (int)syscall(SYS_getxattr, f, "user.dmprobe", v, sizeof v); int e1g = errno;
+        errno = 0; int g2 = (int)syscall(SYS_lgetxattr, f, "user.dmprobe", v, sizeof v); int e2g = errno;
+        // 不存在的属性：hle_fs 期望拿到 ENOATTR(=ENODATA)，拿别的就当作"失败"
+        errno = 0; int g3 = (int)syscall(SYS_lgetxattr, f, "org.d2rmobile.guest-name", v, sizeof v); int e3g = errno;
+        emit(s, "  xattr(set/get)      rc=%d/%d errno=%d/%d", s1, g1, e1, e1g);
+        emit(s, "  xattr(lset/lget)    rc=%d/%d errno=%d/%d   ← hle_fs 走的是这一对",
+             s2, g2, e2, e2g);
+        emit(s, "  lgetxattr 查不存在的属性：rc=%d errno=%d（%s）", g3, e3g,
+             (e3g == ENODATA) ? "正好是 ENOATTR，符合 hle_fs 的期待"
+                              : "**不是 ENOATTR** ⇒ hle_fs 会把整条路径判为失败");
         unlink(f);
+        unlink(f2);
+    } else {
+        emit(s, "  xattr：建探针文件失败");
     }
-    emit(s, "  xattr 可用：setxattr rc=%d(errno=%d) getxattr rc=%d(errno=%d) %s",
-         sx, sx_errno, gx, gx_errno,
-         (gx >= 0 || gx_errno == ENODATA) ? "→ 可用"
-                                          : "→ **不可用**：hle_fs 的路径查找会全线失败，"
-                                            "后面 t_fs_case 的失败应当归因到这里");
+
+    // 3b) lstat 一个不存在的路径：hle_fs 的"另取物理名"分支要求这里必须是 ENOENT
+    errno = 0;
+    struct stat st2;
+    int lr = lstat("/no/such/path/dm-probe", &st2);
+    emit(s, "  lstat(不存在) rc=%d errno=%d（%s）", lr, errno,
+         errno == ENOENT ? "ENOENT，符合期待" : "**不是 ENOENT**");
 
     // 4) fork 能不能用（t_hid_script 有两条检查靠 fork + 等子进程被信号杀掉）
     errno = 0;
