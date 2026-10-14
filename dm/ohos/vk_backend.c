@@ -14,12 +14,21 @@
 #include "vk_ctx_ohos.h"
 #include "vk_surface_ohos.h"
 
+#include <pthread.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>          // usleep：轮询等拍、等回调退出
 
 #include <vulkan/vulkan.h>
+
+// 鸿蒙的"报时员"：官方 DisplaySoloist（自渲染视区的可变帧率调度，API 12 起）。
+// 头文件在子目录里（NDK 的 sysroot/usr/include/native_display_soloist/），库是 libnative_display_soloist.so。
+// The platform timekeeper: the official DisplaySoloist (variable frame rate scheduling for self-drawn
+// surfaces, since API 12). The header lives in a subdirectory and the library is libnative_display_soloist.so.
+#include <native_display_soloist/native_display_soloist.h>
 
 // 上游能力探测的结论：这台设备是 Vulkan 1.3（Maleoon 920）。按 1.3 建 instance/device，
 // 阶段 3 要用的 dynamic rendering 等 1.3 特性不必再动这里。
@@ -1546,12 +1555,15 @@ int vk_backend_psocache(const char *dir, char *out, size_t cap) {
     return fails;
 }
 
-// ================= 阶段 4（3.3-A）：出图 —— 屏幕上出画面 =================
+// ================= 阶段 4：出图（3.3-A）与节拍（3.3-B）=================
 // ArkUI 的 XComponent 给出 OHNativeWindow → VkSurfaceKHR → swapchain → 画 → present。
 // 这是"离屏验证"与"真上屏"的分界线：前面所有判据都是读回像素，这里第一次让画面**出现在屏幕上**。
 //
-// 判据：① 表面能力 / 格式 / 呈现模式逐个报出（不猜）；② 60 帧 present 间隔统计（节拍稳不稳）。
-// 画面本身用截图做视觉确认（真机上肉眼可辨）。
+// 两个探针共用下面这套骨架：
+//   os_setup()    —— 搭出 surface / swapchain / 通道 / 管线 / 顶点缓冲（3.3-A、3.3-B 都要）
+//   os_frame_do() —— 出一帧（取图 → 录命令 → 提交 → present），两种等待模式都由它一个函数表达
+//   os_teardown() —— 拆干净
+// **共用而不是抄第二份**：这两个探针的"搭"完全一样，抄两份意味着以后每次改都可能只改一处。
 typedef struct {
     VkSurfaceKHR   surface;
     VkSwapchainKHR sc;
@@ -1559,15 +1571,62 @@ typedef struct {
     uint32_t       nimg; VkImage img[8]; VkImageView view[8]; VkFramebuffer fb[8];
     VkRenderPass   rp; VkPipeline pl; VkPipelineLayout lay;
     VkBuffer       vb; VkDeviceMemory vbm;
-    VkSemaphore    sem_avail, sem_done;
     VkQueue        qpresent;          // 负责 present 的队列（真机：图形族不支持）
 } os_ctx;
+
+// 一帧要用的同步对象，凑成"槽位"：命令缓冲 + 栅栏 + 两个信号量。
+// 为什么要按槽位、而不是全局一份：**不等 GPU 时上一帧还在飞**——同一份命令缓冲或同一个信号量被连续
+// 两帧复用，就是经典的 use-after-flight（画面偶发花屏/崩，且极难复现）。3.3-B 要两种等待模式都量，
+// 所以同步对象一律按槽位发。
+// Per-slot sync objects. With non-blocking present the previous frame is still in flight; reusing one
+// command buffer or one semaphore would be a use-after-flight bug. Slots make double buffering explicit.
+typedef struct {
+    VkCommandBuffer cb;
+    VkFence         fence;
+    VkSemaphore     avail, done;
+} os_slot;
+
+// 报告出口：一块缓冲区 + 一个游标，同时镜像一份进 hilog（手机屏幕上长文字不好复制）。
+// 抽出来是为了让上面那套骨架能在两个探针之间共用（原先它是 3.3-A 函数内的局部宏 EMIT9）。
+typedef struct { char *p, *end; } os_emit;
+
+#define OS_EMIT(em, ...) do { int _n = snprintf((em).p, (size_t)((em).end - (em).p) + 1, __VA_ARGS__); \
+                              if (_n > 0) { (em).p += _n; if ((em).p > (em).end) (em).p = (em).end; } \
+                              dm_log_printf(__VA_ARGS__); } while (0)
+
+// 槽位的创建与释放。**栅栏要建成已置位**：第一帧等它时不必先等一个从未置位的栅栏（否则要等超时）。
+static int os_slot_init(os_slot *s, int n, os_emit em) {
+    VkDevice dev = dm_ohos_vk_device();
+    int fails = 0;
+    for (int i = 0; i < n; i++) {
+        VkSemaphoreCreateInfo si = { VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
+        VkFenceCreateInfo fi = { VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+        fi.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+        if (vkCreateSemaphore(dev, &si, NULL, &s[i].avail) != VK_SUCCESS ||
+            vkCreateSemaphore(dev, &si, NULL, &s[i].done) != VK_SUCCESS ||
+            vkCreateFence(dev, &fi, NULL, &s[i].fence) != VK_SUCCESS) {
+            OS_EMIT(em, "❌ 建同步对象（信号量/栅栏）失败"); return 1;
+        }
+    }
+    return fails;
+}
+
+static void os_slot_free(os_slot *s, int n, VkCommandPool pool) {
+    VkDevice dev = dm_ohos_vk_device();
+    if (!dev) return;
+    // 不等 GPU 的模式下，收尾这一瞬间可能还有帧在飞 —— 先等干净再释放（探针不吝惜这几毫秒）。
+    vkDeviceWaitIdle(dev);
+    for (int i = 0; i < n; i++) {
+        if (s[i].cb) { vkFreeCommandBuffers(dev, pool, 1, &s[i].cb); s[i].cb = VK_NULL_HANDLE; }
+        if (s[i].fence) vkDestroyFence(dev, s[i].fence, NULL);
+        if (s[i].avail) vkDestroySemaphore(dev, s[i].avail, NULL);
+        if (s[i].done)  vkDestroySemaphore(dev, s[i].done, NULL);
+    }
+}
 
 static void os_teardown(os_ctx *o) {
     VkDevice dev = dm_ohos_vk_device();
     if (!dev) return;
-    if (o->sem_avail) vkDestroySemaphore(dev, o->sem_avail, NULL);
-    if (o->sem_done) vkDestroySemaphore(dev, o->sem_done, NULL);
     if (o->vb) vkDestroyBuffer(dev, o->vb, NULL);
     if (o->vbm) vkFreeMemory(dev, o->vbm, NULL);
     if (o->pl) vkDestroyPipeline(dev, o->pl, NULL);
@@ -1608,29 +1667,24 @@ static void rec_os_draw(VkCommandBuffer cb, void *ud) {
     vkCmdEndRenderPass(cb);
 }
 
-int vk_backend_onscreen(char *out, size_t cap) {
-    if (!out || cap < 256) return -1;
-    char *p = out, *end = out + cap - 1;
+// 搭出图所需的全部东西：XComponent 窗口 → VkSurfaceKHR → 挑出 present 队列 → swapchain → 通道 →
+// 管线 → 顶点缓冲。报告行经 em 输出（和调用方自己的报告拼在一起）。返回失败项数。
+// 失败时可能已经建了一部分对象 —— 调用方照常 os_teardown（它对空句柄是安全的）。
+static int os_setup(os_emit em, os_ctx *o) {
     int fails = 0;
-    uint64_t t0 = ms_now();
-    os_ctx o; memset(&o, 0, sizeof o);
-    #define EMIT9(...) do { int _n = snprintf(p, (size_t)(end - p) + 1, __VA_ARGS__); \
-                            if (_n > 0) { p += _n; if (p > end) p = end; } \
-                            dm_log_printf(__VA_ARGS__); } while (0)
-
-    EMIT9("=== 阶段 4（3.3-A）：出图 —— 屏幕上出画面 ===");
-    EMIT9("XComponent 窗口 → VkSurfaceKHR → swapchain → 画 → present");
-
     char err[256] = "";
     uint32_t win_w = 0, win_h = 0;
-    if (!dm_ohos_surface_window() || dm_ohos_surface_size(&win_w, &win_h) != 0) {
-        EMIT9("❌ 还没拿到 XComponent 窗口（页面里要有 XComponent，且 surface 回调已到）");
-        EMIT9("===== 失败 ====="); *p = 0; return 1;
-    }
-    EMIT9("XComponent 窗口：%ux%u", win_w, win_h);
+    memset(o, 0, sizeof *o);
+    o->fmt = VK_FORMAT_UNDEFINED;
 
-    if (dm_ohos_surface_create(&o.surface, err, sizeof err) != 0) {
-        EMIT9("❌ %s", err); EMIT9("===== 失败 ====="); *p = 0; return 1;
+    if (!dm_ohos_surface_window() || dm_ohos_surface_size(&win_w, &win_h) != 0) {
+        OS_EMIT(em, "❌ 还没拿到 XComponent 窗口（页面里要有 XComponent，且 surface 回调已到）");
+        return 1;
+    }
+    OS_EMIT(em, "XComponent 窗口：%ux%u", win_w, win_h);
+
+    if (dm_ohos_surface_create(&o->surface, err, sizeof err) != 0) {
+        OS_EMIT(em, "❌ %s", err); return 1;
     }
     VkDevice dev = dm_ohos_vk_device();
     VkPhysicalDevice pd = dm_ohos_vk_phys();
@@ -1647,88 +1701,86 @@ int vk_backend_onscreen(char *out, size_t cap) {
             uint32_t f = dm_ohos_vk_qfam_at(k);
             if (f >= qn) continue;
             VkBool32 pres = VK_FALSE;
-            vkGetPhysicalDeviceSurfaceSupportKHR(pd, f, o.surface, &pres);
+            vkGetPhysicalDeviceSurfaceSupportKHR(pd, f, o->surface, &pres);
             const char *what = (qsr[f].queueFlags & VK_QUEUE_GRAPHICS_BIT) ? "图形" :
                                (qsr[f].queueFlags & VK_QUEUE_COMPUTE_BIT) ? "计算" : "传输";
-            EMIT9("  队列族 %u：%s，队列数 %u，present %s", f, what, qsr[f].queueCount, pres ? "支持" : "不支持");
+            OS_EMIT(em, "  队列族 %u：%s，队列数 %u，present %s", f, what, qsr[f].queueCount, pres ? "支持" : "不支持");
             if (pres && qf == 0xFFFFFFFFu) qf = f;
         }
         free(qsr);
     }
     if (qf == 0xFFFFFFFFu) {
-        EMIT9("❌ 没有一个队列族支持 present —— 出图这条路走不通（要查 VK_OHOS_surface / 窗口是否有效）");
-        fails++; EMIT9("===== 失败 ====="); os_teardown(&o); *p = 0; return fails;
+        OS_EMIT(em, "❌ 没有一个队列族支持 present —— 出图这条路走不通（要查 VK_OHOS_surface / 窗口是否有效）");
+        return 1;
     }
     for (uint32_t k = 0; k < dm_ohos_vk_qfam_count(); k++)
-        if (dm_ohos_vk_qfam_at(k) == qf) o.qpresent = dm_ohos_vk_queue_at(k);
-    EMIT9("✅ 提交族 %u（渲染仍走主队列，命令缓冲跨族提交是非法的）", qf);
-    if (!o.qpresent) { EMIT9("❌ 拿不到提交族的队列"); fails++; }
-    if (fails) { EMIT9("===== 失败 ====="); os_teardown(&o); *p = 0; return fails; }
+        if (dm_ohos_vk_qfam_at(k) == qf) o->qpresent = dm_ohos_vk_queue_at(k);
+    OS_EMIT(em, "✅ 提交族 %u（渲染仍走主队列，命令缓冲跨族提交是非法的）", qf);
+    if (!o->qpresent) { OS_EMIT(em, "❌ 拿不到提交族的队列"); return 1; }
 
     // ---- 表面能力 / 格式 / 呈现模式：逐个报出，不猜 ----
     VkSurfaceCapabilitiesKHR caps; memset(&caps, 0, sizeof caps);
-    vkGetPhysicalDeviceSurfaceCapabilitiesKHR(pd, o.surface, &caps);
+    vkGetPhysicalDeviceSurfaceCapabilitiesKHR(pd, o->surface, &caps);
     uint32_t nf = 0;
-    vkGetPhysicalDeviceSurfaceFormatsKHR(pd, o.surface, &nf, NULL);
+    vkGetPhysicalDeviceSurfaceFormatsKHR(pd, o->surface, &nf, NULL);
     VkSurfaceFormatKHR *fmts = calloc(nf ? nf : 1, sizeof *fmts);
-    vkGetPhysicalDeviceSurfaceFormatsKHR(pd, o.surface, &nf, fmts);
+    vkGetPhysicalDeviceSurfaceFormatsKHR(pd, o->surface, &nf, fmts);
     uint32_t npm = 0;
-    vkGetPhysicalDeviceSurfacePresentModesKHR(pd, o.surface, &npm, NULL);
+    vkGetPhysicalDeviceSurfacePresentModesKHR(pd, o->surface, &npm, NULL);
     VkPresentModeKHR *pms = calloc(npm ? npm : 1, sizeof *pms);
-    vkGetPhysicalDeviceSurfacePresentModesKHR(pd, o.surface, &npm, pms);
-    EMIT9("表面：图像数 %u..%u，当前范围 %ux%u，变换 %#x，支持的用法 %#x",
-          caps.minImageCount, caps.maxImageCount, caps.currentExtent.width, caps.currentExtent.height,
-          (unsigned)caps.supportedTransforms, (unsigned)caps.supportedUsageFlags);
+    vkGetPhysicalDeviceSurfacePresentModesKHR(pd, o->surface, &npm, pms);
+    OS_EMIT(em, "表面：图像数 %u..%u，当前范围 %ux%u，变换 %#x，支持的用法 %#x",
+            caps.minImageCount, caps.maxImageCount, caps.currentExtent.width, caps.currentExtent.height,
+            (unsigned)caps.supportedTransforms, (unsigned)caps.supportedUsageFlags);
     for (uint32_t i = 0; i < nf && i < 6; i++)
-        EMIT9("  格式 %u：VkFormat %d / 色彩空间 %d", i, (int)fmts[i].format, (int)fmts[i].colorSpace);
+        OS_EMIT(em, "  格式 %u：VkFormat %d / 色彩空间 %d", i, (int)fmts[i].format, (int)fmts[i].colorSpace);
     for (uint32_t i = 0; i < npm && i < 6; i++)
-        EMIT9("  呈现模式 %u：%d（0=立即 1=信箱 2=队列 3=三重缓冲）", i, (int)pms[i]);
+        OS_EMIT(em, "  呈现模式 %u：%d（0=立即 1=信箱 2=队列 3=三重缓冲）", i, (int)pms[i]);
 
     // 选：优先 RGBA8/BGRA8 非 sRGB，否则用第一个；呈现模式优先 FIFO（稳定 vsync）
-    o.fmt = VK_FORMAT_UNDEFINED; o.cs = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
     for (uint32_t i = 0; i < nf; i++)
         if (fmts[i].format == VK_FORMAT_R8G8B8A8_UNORM || fmts[i].format == VK_FORMAT_B8G8R8A8_UNORM) {
-            o.fmt = fmts[i].format; o.cs = fmts[i].colorSpace; break;
+            o->fmt = fmts[i].format; o->cs = fmts[i].colorSpace; break;
         }
-    if (o.fmt == VK_FORMAT_UNDEFINED && nf) { o.fmt = fmts[0].format; o.cs = fmts[0].colorSpace; }
+    if (o->fmt == VK_FORMAT_UNDEFINED && nf) { o->fmt = fmts[0].format; o->cs = fmts[0].colorSpace; }
     VkPresentModeKHR pm = VK_PRESENT_MODE_FIFO_KHR;
     for (uint32_t i = 0; i < npm; i++) if (pms[i] == VK_PRESENT_MODE_FIFO_KHR) { pm = pms[i]; break; }
-    if (nf == 0 || npm == 0) { EMIT9("❌ 表面没报格式或呈现模式"); fails++; }
+    if (nf == 0 || npm == 0) { OS_EMIT(em, "❌ 表面没报格式或呈现模式"); fails++; }
     free(fmts); free(pms);
-    if (fails) { EMIT9("===== 失败 ====="); os_teardown(&o); *p = 0; return fails; }
+    if (fails) return fails;
 
-    o.ext.width = caps.currentExtent.width;
-    o.ext.height = caps.currentExtent.height;
-    if (o.ext.width == 0xFFFFFFFFu || !o.ext.width) o.ext.width = win_w;
-    if (o.ext.height == 0xFFFFFFFFu || !o.ext.height) o.ext.height = win_h;
-    EMIT9("选用：VkFormat %d，呈现模式 %d，交换链 %ux%u", (int)o.fmt, (int)pm, o.ext.width, o.ext.height);
+    o->ext.width = caps.currentExtent.width;
+    o->ext.height = caps.currentExtent.height;
+    if (o->ext.width == 0xFFFFFFFFu || !o->ext.width) o->ext.width = win_w;
+    if (o->ext.height == 0xFFFFFFFFu || !o->ext.height) o->ext.height = win_h;
+    OS_EMIT(em, "选用：VkFormat %d，呈现模式 %d，交换链 %ux%u", (int)o->fmt, (int)pm, o->ext.width, o->ext.height);
 
     // ---- swapchain ----
     uint32_t want = caps.minImageCount + 1;
     if (caps.maxImageCount && want > caps.maxImageCount) want = caps.maxImageCount;
     {
         VkSwapchainCreateInfoKHR ci = { VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR };
-        ci.surface = o.surface; ci.minImageCount = want; ci.imageFormat = o.fmt; ci.imageColorSpace = o.cs;
-        ci.imageExtent = o.ext; ci.imageArrayLayers = 1;
+        ci.surface = o->surface; ci.minImageCount = want; ci.imageFormat = o->fmt; ci.imageColorSpace = o->cs;
+        ci.imageExtent = o->ext; ci.imageArrayLayers = 1;
         ci.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
         ci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
         ci.preTransform = caps.currentTransform;
         ci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
         ci.presentMode = pm; ci.clipped = VK_TRUE; ci.oldSwapchain = VK_NULL_HANDLE;
-        VkResult r = vkCreateSwapchainKHR(dev, &ci, NULL, &o.sc);
-        if (r != VK_SUCCESS) { EMIT9("❌ vkCreateSwapchainKHR 失败 VkResult=%d", (int)r); fails++; }
+        VkResult r = vkCreateSwapchainKHR(dev, &ci, NULL, &o->sc);
+        if (r != VK_SUCCESS) { OS_EMIT(em, "❌ vkCreateSwapchainKHR 失败 VkResult=%d", (int)r); fails++; }
     }
-    if (fails) { EMIT9("===== 失败 ====="); os_teardown(&o); *p = 0; return fails; }
-    o.nimg = 0;
-    vkGetSwapchainImagesKHR(dev, o.sc, &o.nimg, NULL);
-    if (o.nimg > 8) o.nimg = 8;
-    vkGetSwapchainImagesKHR(dev, o.sc, &o.nimg, o.img);
-    EMIT9("交换链：%u 张图像", o.nimg);
+    if (fails) return fails;
+    o->nimg = 0;
+    vkGetSwapchainImagesKHR(dev, o->sc, &o->nimg, NULL);
+    if (o->nimg > 8) o->nimg = 8;
+    vkGetSwapchainImagesKHR(dev, o->sc, &o->nimg, o->img);
+    OS_EMIT(em, "交换链：%u 张图像", o->nimg);
 
     // ---- 通道：结束布局 = PRESENT_SRC（可以直接 present）----
     {
         VkAttachmentDescription att; memset(&att, 0, sizeof att);
-        att.format = o.fmt; att.samples = VK_SAMPLE_COUNT_1_BIT;
+        att.format = o->fmt; att.samples = VK_SAMPLE_COUNT_1_BIT;
         att.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR; att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
         att.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
         att.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
@@ -1740,25 +1792,25 @@ int vk_backend_onscreen(char *out, size_t cap) {
         VkRenderPassCreateInfo rp = { VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO };
         rp.attachmentCount = 1; rp.pAttachments = &att;
         rp.subpassCount = 1; rp.pSubpasses = &sp;
-        if (vkCreateRenderPass(dev, &rp, NULL, &o.rp) != VK_SUCCESS) { EMIT9("❌ vkCreateRenderPass 失败"); fails++; }
+        if (vkCreateRenderPass(dev, &rp, NULL, &o->rp) != VK_SUCCESS) { OS_EMIT(em, "❌ vkCreateRenderPass 失败"); fails++; }
     }
-    for (uint32_t i = 0; i < o.nimg && !fails; i++) {
+    for (uint32_t i = 0; i < o->nimg && !fails; i++) {
         VkImageViewCreateInfo vi = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
-        vi.image = o.img[i]; vi.viewType = VK_IMAGE_VIEW_TYPE_2D; vi.format = o.fmt;
+        vi.image = o->img[i]; vi.viewType = VK_IMAGE_VIEW_TYPE_2D; vi.format = o->fmt;
         vi.subresourceRange = (VkImageSubresourceRange){ VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
-        if (vkCreateImageView(dev, &vi, NULL, &o.view[i]) != VK_SUCCESS) { EMIT9("❌ 建图像视图 %u 失败", i); fails++; break; }
+        if (vkCreateImageView(dev, &vi, NULL, &o->view[i]) != VK_SUCCESS) { OS_EMIT(em, "❌ 建图像视图 %u 失败", i); fails++; break; }
         VkFramebufferCreateInfo fi = { VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
-        fi.renderPass = o.rp; fi.attachmentCount = 1; fi.pAttachments = &o.view[i];
-        fi.width = o.ext.width; fi.height = o.ext.height; fi.layers = 1;
-        if (vkCreateFramebuffer(dev, &fi, NULL, &o.fb[i]) != VK_SUCCESS) { EMIT9("❌ 建帧缓冲 %u 失败", i); fails++; break; }
+        fi.renderPass = o->rp; fi.attachmentCount = 1; fi.pAttachments = &o->view[i];
+        fi.width = o->ext.width; fi.height = o->ext.height; fi.layers = 1;
+        if (vkCreateFramebuffer(dev, &fi, NULL, &o->fb[i]) != VK_SUCCESS) { OS_EMIT(em, "❌ 建帧缓冲 %u 失败", i); fails++; break; }
     }
-    if (fails) { EMIT9("===== 失败 ====="); os_teardown(&o); *p = 0; return fails; }
+    if (fails) return fails;
 
     // ---- 管线（用阶段 2 那两条 SPIR-V）----
     {
         VkShaderModule vm = make_module(dev, dm_spv_vert, dm_spv_vert_n, err, sizeof err);
         VkShaderModule fm = vm ? make_module(dev, dm_spv_frag, dm_spv_frag_n, err, sizeof err) : NULL;
-        if (!vm || !fm) { EMIT9("❌ 建着色器模块失败：%s", err); fails++; }
+        if (!vm || !fm) { OS_EMIT(em, "❌ 建着色器模块失败：%s", err); fails++; }
         else {
             VkPipelineShaderStageCreateInfo st[2] = {
                 { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_VERTEX_BIT, vm, "main", NULL },
@@ -1789,87 +1841,125 @@ int vk_backend_onscreen(char *out, size_t cap) {
             VkPipelineDynamicStateCreateInfo ds = { VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO };
             ds.dynamicStateCount = 2; ds.pDynamicStates = dyn;
             VkPipelineLayoutCreateInfo li = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
-            if (vkCreatePipelineLayout(dev, &li, NULL, &o.lay) != VK_SUCCESS) { EMIT9("❌ 建管线布局失败"); fails++; }
+            if (vkCreatePipelineLayout(dev, &li, NULL, &o->lay) != VK_SUCCESS) { OS_EMIT(em, "❌ 建管线布局失败"); fails++; }
             else {
                 VkGraphicsPipelineCreateInfo gi = { VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
                 gi.stageCount = 2; gi.pStages = st;
                 gi.pVertexInputState = &vi; gi.pInputAssemblyState = &ia;
                 gi.pViewportState = &vps; gi.pRasterizationState = &rs; gi.pMultisampleState = &ms;
                 gi.pDepthStencilState = &dss; gi.pColorBlendState = &cb; gi.pDynamicState = &ds;
-                gi.layout = o.lay; gi.renderPass = o.rp;
-                if (vkCreateGraphicsPipelines(dev, NULL, 1, &gi, NULL, &o.pl) != VK_SUCCESS) {
-                    EMIT9("❌ vkCreateGraphicsPipelines 失败"); fails++;
+                gi.layout = o->lay; gi.renderPass = o->rp;
+                if (vkCreateGraphicsPipelines(dev, NULL, 1, &gi, NULL, &o->pl) != VK_SUCCESS) {
+                    OS_EMIT(em, "❌ vkCreateGraphicsPipelines 失败"); fails++;
                 }
             }
             vkDestroyShaderModule(dev, vm, NULL);
             vkDestroyShaderModule(dev, fm, NULL);
         }
     }
+    if (fails) return fails;
 
-    // ---- 顶点缓冲 + 信号量 ----
-    if (!fails) {
+    // ---- 顶点缓冲（三角形顶点；同步对象由调用方按槽位自己建）----
+    {
         const float verts[6] = { -1.f, -1.f,  1.f, -1.f,  0.f, 1.f };
         VkBufferCreateInfo bi = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
         bi.size = sizeof verts; bi.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
-        if (vkCreateBuffer(dev, &bi, NULL, &o.vb) != VK_SUCCESS) { EMIT9("❌ 建顶点缓冲失败"); fails++; }
+        if (vkCreateBuffer(dev, &bi, NULL, &o->vb) != VK_SUCCESS) { OS_EMIT(em, "❌ 建顶点缓冲失败"); fails++; }
         else {
-            VkMemoryRequirements mr; vkGetBufferMemoryRequirements(dev, o.vb, &mr);
+            VkMemoryRequirements mr; vkGetBufferMemoryRequirements(dev, o->vb, &mr);
             VkMemoryAllocateInfo mi = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
             mi.allocationSize = mr.size; mi.memoryTypeIndex = dm_ohos_heap_mem_type();
             void *mp = NULL;
-            if (!(mr.memoryTypeBits & (1u << dm_ohos_heap_mem_type()))) { EMIT9("❌ 顶点缓冲的 memoryTypeBits 不含统一内存类型"); fails++; }
-            else if (vkAllocateMemory(dev, &mi, NULL, &o.vbm) != VK_SUCCESS) { EMIT9("❌ 分配顶点缓冲内存失败"); fails++; }
-            else if (vkBindBufferMemory(dev, o.vb, o.vbm, 0) != VK_SUCCESS) { EMIT9("❌ 绑定顶点缓冲失败"); fails++; }
-            else if (vkMapMemory(dev, o.vbm, 0, sizeof verts, 0, &mp) != VK_SUCCESS) { EMIT9("❌ 映射顶点缓冲失败"); fails++; }
-            else { memcpy(mp, verts, sizeof verts); vkUnmapMemory(dev, o.vbm); }
+            if (!(mr.memoryTypeBits & (1u << dm_ohos_heap_mem_type()))) { OS_EMIT(em, "❌ 顶点缓冲的 memoryTypeBits 不含统一内存类型"); fails++; }
+            else if (vkAllocateMemory(dev, &mi, NULL, &o->vbm) != VK_SUCCESS) { OS_EMIT(em, "❌ 分配顶点缓冲内存失败"); fails++; }
+            else if (vkBindBufferMemory(dev, o->vb, o->vbm, 0) != VK_SUCCESS) { OS_EMIT(em, "❌ 绑定顶点缓冲失败"); fails++; }
+            else if (vkMapMemory(dev, o->vbm, 0, sizeof verts, 0, &mp) != VK_SUCCESS) { OS_EMIT(em, "❌ 映射顶点缓冲失败"); fails++; }
+            else { memcpy(mp, verts, sizeof verts); vkUnmapMemory(dev, o->vbm); }
         }
     }
-    if (!fails) {
-        VkSemaphoreCreateInfo si = { VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
-        if (vkCreateSemaphore(dev, &si, NULL, &o.sem_avail) != VK_SUCCESS ||
-            vkCreateSemaphore(dev, &si, NULL, &o.sem_done) != VK_SUCCESS) {
-            EMIT9("❌ 建信号量失败"); fails++;
-        }
-    }
-    if (fails) { EMIT9("===== 失败 ====="); os_teardown(&o); *p = 0; return fails; }
+    return fails;
+}
 
-    // ---- 出 60 帧，量 present 间隔 ----
+// 出一帧：取图 → 录命令 → 提交 → present。
+// wait_idle = 1：present 之后 vkQueueWaitIdle（3.3-A 的老做法，每帧等 GPU 干完）；
+// wait_idle = 0：只提交不等（**上游语义：出图只入队、立即返回**），靠槽位栅栏保证不覆盖还在飞的东西。
+// 返回 0 成功；否则 >0 是 VkResult、-1 是我方准备步骤失败，原因写进 *why。
+static int os_frame_do(os_ctx *o, VkCommandPool pool, os_slot *s, int wait_idle,
+                       uint32_t *idx_out, uint64_t *ts_out, const char **why) {
+    VkDevice dev = dm_ohos_vk_device();
+    *why = "";
+    *idx_out = 0; *ts_out = 0;
+
+    // 这一槽位上一帧还没完就先等它 —— "多缓冲"要做的全部事情就这一句。
+    // 栅栏带超时：探针宁可如实报"等超时"，也不把 App 挂死在一个永远不置位的栅栏上。
+    if (vkWaitForFences(dev, 1, &s->fence, VK_TRUE, 2000000000ull) != VK_SUCCESS) {
+        *why = "等这一槽位上一帧的栅栏超时"; return -1;
+    }
+    vkResetFences(dev, 1, &s->fence);
+
+    uint32_t idx = 0;
+    VkResult r = vkAcquireNextImageKHR(dev, o->sc, 2000000000ull, s->avail, VK_NULL_HANDLE, &idx);
+    if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) { *why = "取图失败"; return (int)r; }
+    if (idx > 7) idx = 0;
+
+    if (!s->cb) {   // 命令缓冲每个槽位分配一次、反复复用（不必每帧新建）
+        VkCommandBufferAllocateInfo ai = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+        ai.commandPool = pool; ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY; ai.commandBufferCount = 1;
+        if (vkAllocateCommandBuffers(dev, &ai, &s->cb) != VK_SUCCESS) { *why = "取命令缓冲失败"; return -1; }
+    }
+    vkResetCommandBuffer(s->cb, 0);
+    VkCommandBufferBeginInfo bi = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(s->cb, &bi);
     {
+        os_ctx tmp = *o; tmp.fb[0] = o->fb[idx];     // 本帧用第 idx 张
+        rec_os_draw(s->cb, &tmp);
+    }
+    vkEndCommandBuffer(s->cb);
+
+    VkPipelineStageFlags wait = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    VkSubmitInfo si = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
+    si.waitSemaphoreCount = 1; si.pWaitSemaphores = &s->avail; si.pWaitDstStageMask = &wait;
+    si.commandBufferCount = 1; si.pCommandBuffers = &s->cb;
+    si.signalSemaphoreCount = 1; si.pSignalSemaphores = &s->done;
+    if (vkQueueSubmit(dm_ohos_vk_queue(), 1, &si, s->fence) != VK_SUCCESS) { *why = "提交失败"; return -1; }
+
+    VkPresentInfoKHR pi = { VK_STRUCTURE_TYPE_PRESENT_INFO_KHR };
+    pi.waitSemaphoreCount = 1; pi.pWaitSemaphores = &s->done;
+    pi.swapchainCount = 1; pi.pSwapchains = &o->sc; pi.pImageIndices = &idx;
+    uint64_t ts = ns_now2();
+    r = vkQueuePresentKHR(o->qpresent, &pi);
+    if (wait_idle) vkQueueWaitIdle(dm_ohos_vk_queue());
+    *idx_out = idx; *ts_out = ts;
+    if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) { *why = "present 失败"; return (int)r; }
+    return 0;
+}
+
+int vk_backend_onscreen(char *out, size_t cap) {
+    if (!out || cap < 256) return -1;
+    os_emit em = { out, out + cap - 1 };
+    os_ctx o;
+    int fails = 0;
+    uint64_t t0 = ms_now();
+
+    // 判据：① 表面能力 / 格式 / 呈现模式逐个报出（不猜）；② 60 帧 present 间隔统计（节拍稳不稳）。
+    // 画面本身用截图做视觉确认（真机上肉眼可辨）。
+    OS_EMIT(em, "=== 阶段 4（3.3-A）：出图 —— 屏幕上出画面 ===");
+    OS_EMIT(em, "XComponent 窗口 → VkSurfaceKHR → swapchain → 画 → present");
+
+    fails = os_setup(em, &o);
+    VkCommandPool pool = dm_ohos_vk_pool();
+    os_slot s; memset(&s, 0, sizeof s);
+    if (!fails) fails = os_slot_init(&s, 1, em);
+
+    // ---- 出 60 帧，量 present 间隔（单槽位 + 每帧等 GPU —— 与 3.3-A 首次通过时同一套口径）----
+    if (!fails) {
         const int FRAMES = 60;
-        uint64_t best = ~0ull, worst = 0, sum = 0; int got = 0; uint64_t prev = 0;
-        VkQueue q = dm_ohos_vk_queue();
-        VkCommandPool pool = dm_ohos_vk_pool();
+        uint64_t best = ~0ull, worst = 0, sum = 0, prev = 0; int got = 0;
         for (int f = 0; f < FRAMES && !fails; f++) {
-            uint32_t idx = 0;
-            VkResult r = vkAcquireNextImageKHR(dev, o.sc, UINT64_MAX, o.sem_avail, VK_NULL_HANDLE, &idx);
-            if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) { EMIT9("❌ 第 %d 帧取图失败 VkResult=%d", f, (int)r); fails++; break; }
-            if (idx > 7) idx = 0;
-            VkCommandBuffer cb = VK_NULL_HANDLE;
-            VkCommandBufferAllocateInfo ai = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
-            ai.commandPool = pool; ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY; ai.commandBufferCount = 1;
-            if (vkAllocateCommandBuffers(dev, &ai, &cb) != VK_SUCCESS) { EMIT9("❌ 取命令缓冲失败"); fails++; break; }
-            VkCommandBufferBeginInfo bi = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
-            bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-            vkBeginCommandBuffer(cb, &bi);
-            {
-                os_ctx tmp = o; tmp.fb[0] = o.fb[idx];     // 本帧用第 idx 张
-                rec_os_draw(cb, &tmp);
-            }
-            vkEndCommandBuffer(cb);
-            VkPipelineStageFlags wait = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-            VkSubmitInfo si = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
-            si.waitSemaphoreCount = 1; si.pWaitSemaphores = &o.sem_avail; si.pWaitDstStageMask = &wait;
-            si.commandBufferCount = 1; si.pCommandBuffers = &cb;
-            si.signalSemaphoreCount = 1; si.pSignalSemaphores = &o.sem_done;
-            if (vkQueueSubmit(q, 1, &si, NULL) != VK_SUCCESS) { EMIT9("❌ 第 %d 帧提交失败", f); fails++; break; }
-            VkPresentInfoKHR pi = { VK_STRUCTURE_TYPE_PRESENT_INFO_KHR };
-            pi.waitSemaphoreCount = 1; pi.pWaitSemaphores = &o.sem_done;
-            pi.swapchainCount = 1; pi.pSwapchains = &o.sc; pi.pImageIndices = &idx;
-            uint64_t ts = ns_now2();
-            r = vkQueuePresentKHR(o.qpresent, &pi);
-            vkQueueWaitIdle(q);                            // 探针：每帧等干净，测的是"节拍上限"
-            vkFreeCommandBuffers(dev, pool, 1, &cb);
-            if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) { EMIT9("❌ 第 %d 帧 present 失败 VkResult=%d", f, (int)r); fails++; break; }
+            uint32_t idx = 0; uint64_t ts = 0; const char *why = "";
+            int rc = os_frame_do(&o, pool, &s, 1, &idx, &ts, &why);
+            if (rc) { OS_EMIT(em, "❌ 第 %d 帧失败：%s（%d）", f, why, rc); fails++; break; }
             if (prev) {
                 uint64_t dt = ts - prev;
                 if (dt < best) best = dt;
@@ -1880,20 +1970,329 @@ int vk_backend_onscreen(char *out, size_t cap) {
         }
         if (got) {
             double avg = (double)sum / (double)got;
-            EMIT9("present %d 帧：间隔 最小 %.2f ms / 平均 %.2f ms / 最大 %.2f ms（约 %.1f fps）",
-                  got, (double)best / 1e6, avg / 1e6, (double)worst / 1e6, 1e9 / avg);
+            OS_EMIT(em, "present %d 帧：间隔 最小 %.2f ms / 平均 %.2f ms / 最大 %.2f ms（约 %.1f fps）",
+                    got, (double)best / 1e6, avg / 1e6, (double)worst / 1e6, 1e9 / avg);
             if (avg > 0 && (double)worst > avg * 2.0)
-                EMIT9("⚠ 最大间隔是平均的两倍以上 —— 节拍有抖动（下一步接 OH_DisplaySoloist 再看）");
-            else EMIT9("✅ 节拍稳定（最大间隔未超平均两倍）");
-        } else { EMIT9("❌ 一帧都没出成"); fails++; }
+                OS_EMIT(em, "⚠ 最大间隔是平均的两倍以上 —— 节拍有抖动（下一步接 OH_DisplaySoloist 再看）");
+            else OS_EMIT(em, "✅ 节拍稳定（最大间隔未超平均两倍）");
+        } else { OS_EMIT(em, "❌ 一帧都没出成"); fails++; }
+    }
+
+    os_slot_free(&s, 1, pool);
+    os_teardown(&o);
+    OS_EMIT(em, "");
+    OS_EMIT(em, "===== 3.3-A %s：失败 %d 项（总耗时 %llums）=====",
+            fails ? "未全通过" : "全部通过", fails, (unsigned long long)(ms_now() - t0));
+    if (!fails) OS_EMIT(em, "结论：XComponent → VkSurfaceKHR → swapchain → present 这条链通了；屏幕上应能看到三角形");
+    *em.p = 0;
+    return fails;
+}
+
+// ================= 阶段 4（3.3-B）：可变帧率节拍 —— OH_DisplaySoloist =================
+// 3.3-A 量的是"裸 present 的节拍上限"：自己埋头连画 60 张，而且每帧 vkQueueWaitIdle 等 GPU。
+// 这一步请来系统当报时员：每次 VSync 到来时系统调我们的回调（跑在系统给的线程上），还把本拍与
+// 下一拍的时间戳一并告诉你。于是能回答三个 3.3-A 回答不了的问题：
+//
+//   ① 回调真的被周期调用吗？时间戳间隔应 ≈16.67 ms（60 Hz）——这是"屏幕给的拍子"，比自测权威；
+//   ② 可变帧率真的生效吗？设 expected=30 后间隔应翻倍到 ≈33.3 ms（这是鸿蒙比 Metal 侧强的一点）；
+//   ③ 回调里能不能阻塞？同一段代码跑"等 GPU"与"不等 GPU"两组，比间隔有没有被拖崩。
+//
+// 另外量三项，供将来定生产形态（回放层怎么接它）用：回调线程身份、回调单次耗时、present 耗时。
+// 同一轮里跑完 5 组，**自带裸 present 对照**——跨轮次对比读数会漂，同一轮里比才作数。
+#define PACE_MAX_SLOT    3
+#define PACE_ARM_FRAMES  60
+
+typedef struct {
+    const char *name;
+    int  use_ds;        // 1 = 由 DisplaySoloist 驱动；0 = 裸 present（我们自己的循环）
+    int  wait_idle;     // 1 = present 后每帧等 GPU（3.3-A 老做法）；0 = 只入队不等（上游语义）
+    int  rate;          // 0 = 不设帧率（跟随系统）；否则 min=max=expected=rate
+    int  target;        // 收满多少拍收工
+    int  slots;         // 槽位数：1 = 单缓冲；≥2 = 上一帧还在飞时就开下一帧
+} pace_arm;
+
+typedef struct {
+    int    got, fails;
+    double ts_avg_ms;   // 系统给的拍子（裸 present 的组为 0）
+    double pr_avg_ms;   // 我们自己出图的节奏
+    double jitter;      // 最大间隔 / 平均间隔（越接近 1 越整齐）
+    double cb_cost_ms;  // 回调单次耗时（平均）
+} pace_res;
+
+typedef struct {
+    os_ctx       *o;
+    VkCommandPool pool;
+    os_slot      *slot;
+    pace_arm      arm;
+
+    atomic_int    stop;     // 主线程置位：回调别再干活
+    atomic_int    in_cb;    // 正在回调里的线程数（收尾要等它归零，否则 Destroy 会踩到正在用 Vulkan 的回调）
+    atomic_int    done_n;   // 已完成的拍数
+    int           fails;
+
+    uint64_t      ts_prev, ts_best, ts_worst, ts_sum; int ts_n;   // 系统给的拍子
+    uint64_t      pr_prev, pr_best, pr_worst, pr_sum; int pr_n;   // 我们出图的节奏
+    uint64_t      cb_cost_max, cb_cost_sum;                       // 回调单次耗时
+    unsigned long main_tid, cb_tid;
+} pace_run;
+
+// 每拍进来一次。**这里跑在系统给的线程上**（Create(true) 时是独占线程），不是 UI 线程 ——
+// 两边的线程 id 都记下来，报告里直接比。
+static void pace_frame_cb(long long timestamp, long long targetTimestamp, void *data) {
+    (void)targetTimestamp;                       // 下一拍的时刻暂时不用；将来做"提前量"的时候要用
+    pace_run *R = (pace_run *)data;
+    atomic_fetch_add(&R->in_cb, 1);
+    if (!atomic_load(&R->stop) && atomic_load(&R->done_n) < R->arm.target) {
+        uint64_t t0 = ns_now2();
+        if (!R->cb_tid) R->cb_tid = (unsigned long)pthread_self();
+
+        // 系统给的拍子：相邻两次回调的时间戳之差
+        uint64_t now_ts = (uint64_t)timestamp;
+        if (R->ts_prev) {
+            uint64_t dt = now_ts - R->ts_prev;
+            if (dt < R->ts_best) R->ts_best = dt;
+            if (dt > R->ts_worst) R->ts_worst = dt;
+            R->ts_sum += dt; R->ts_n++;
+        }
+        R->ts_prev = now_ts;
+
+        // 出图：按拍数轮换槽位 —— "不等 GPU" 时这才安全（上一帧还在飞，不能碰它的命令缓冲）
+        int n = atomic_load(&R->done_n);
+        os_slot *s = &R->slot[n % R->arm.slots];
+        uint32_t idx = 0; uint64_t pts = 0; const char *why = "";
+        int rc = os_frame_do(R->o, R->pool, s, R->arm.wait_idle, &idx, &pts, &why);
+        if (rc) {
+            R->fails++;
+            dm_log_printf("节拍探针：第 %d 拍出图失败：%s（%d）", n, why, rc);
+        } else {
+            if (R->pr_prev) {
+                uint64_t dt = pts - R->pr_prev;
+                if (dt < R->pr_best) R->pr_best = dt;
+                if (dt > R->pr_worst) R->pr_worst = dt;
+                R->pr_sum += dt; R->pr_n++;
+            }
+            R->pr_prev = pts;
+        }
+        uint64_t cost = ns_now2() - t0;
+        if (cost > R->cb_cost_max) R->cb_cost_max = cost;
+        R->cb_cost_sum += cost;
+        atomic_fetch_add(&R->done_n, 1);
+    }
+    atomic_fetch_sub(&R->in_cb, 1);
+}
+
+// 一组跑完后的读数落进 res（供最后的判据汇总用）
+static void pace_res_of(const pace_arm *a, const pace_run *R, int got, pace_res *res) {
+    memset(res, 0, sizeof *res);
+    res->got = got; res->fails = R->fails;
+    if (R->ts_n) {
+        double avg = (double)R->ts_sum / (double)R->ts_n;
+        res->ts_avg_ms = avg / 1e6;
+    }
+    if (R->pr_n) {
+        double avg = (double)R->pr_sum / (double)R->pr_n;
+        res->pr_avg_ms = avg / 1e6;
+        if (avg > 0) res->jitter = (double)R->pr_worst / avg;
+    }
+    if (got) res->cb_cost_ms = (double)R->cb_cost_sum / (double)got / 1e6;
+    (void)a;
+}
+
+// 把一组的过程与读数打进报告（给人在手机上读，所以每个数都写明是什么）
+static void pace_report(os_emit em, const pace_arm *a, const pace_run *R, int got) {
+    OS_EMIT(em, "---- %s ----", a->name);
+    if (a->use_ds) {
+        OS_EMIT(em, "  收到 %d 拍（目标 %d）%s", got, a->target, got < a->target ? " ← **没收到应有的拍数**" : "");
+        OS_EMIT(em, "  回调线程 %#lx ／ 主线程 %#lx ⇒ %s", R->cb_tid, R->main_tid,
+                (R->cb_tid && R->cb_tid != R->main_tid)
+                    ? "系统另起了一条线程（回调不在主/UI 线程上）"
+                    : "回调跑在主线程上（或一次都没收到）");
+    } else {
+        OS_EMIT(em, "  自己出了 %d 帧（目标 %d）", got, a->target);
+    }
+    if (R->ts_n) {
+        double avg = (double)R->ts_sum / (double)R->ts_n;
+        OS_EMIT(em, "  系统给的拍子：最小 %.2f ／ 平均 %.2f ／ 最大 %.2f ms（≈ %.1f fps）",
+                (double)R->ts_best / 1e6, avg / 1e6, (double)R->ts_worst / 1e6, 1e9 / avg);
+    }
+    if (R->pr_n) {
+        double avg = (double)R->pr_sum / (double)R->pr_n;
+        OS_EMIT(em, "  我们出图的节奏：最小 %.2f ／ 平均 %.2f ／ 最大 %.2f ms（≈ %.1f fps）",
+                (double)R->pr_best / 1e6, avg / 1e6, (double)R->pr_worst / 1e6, 1e9 / avg);
+    }
+    if (a->use_ds && got)
+        OS_EMIT(em, "  回调单次耗时：平均 %.2f ms，最大 %.2f ms", (double)R->cb_cost_sum / got / 1e6,
+                (double)R->cb_cost_max / 1e6);
+    OS_EMIT(em, "  等待方式：%s", a->wait_idle ? "每帧等 GPU 干完（3.3-A 老做法）"
+                                              : "只入队不等（上游语义）");
+    if (R->fails) OS_EMIT(em, "  ❌ 其中 %d 拍出图失败（详见 hilog）", R->fails);
+}
+
+// 跑一组。返回失败项数；读数写进 res。
+static int pace_one_arm(os_emit em, os_ctx *o, const pace_arm *arm, pace_run *R, pace_res *res) {
+    VkCommandPool pool = dm_ohos_vk_pool();
+    int fails = 0, got = 0;
+
+    memset(R, 0, sizeof *R);
+    atomic_init(&R->stop, 0); atomic_init(&R->in_cb, 0); atomic_init(&R->done_n, 0);
+    R->o = o; R->pool = pool; R->arm = *arm;
+    R->main_tid = (unsigned long)pthread_self();
+    R->ts_best = R->pr_best = ~0ull;
+
+    os_slot slot[PACE_MAX_SLOT];
+    memset(slot, 0, sizeof slot);
+    R->slot = slot;
+    if (os_slot_init(slot, arm->slots, em) != 0) { memset(res, 0, sizeof *res); return 1; }
+
+    if (!arm->use_ds) {
+        // 裸 present：我们自己的循环。只有"我画得多快"，没有系统拍子。
+        for (int f = 0; f < arm->target; f++) {
+            os_slot *s = &slot[f % arm->slots];
+            uint32_t idx = 0; uint64_t ts = 0; const char *why = "";
+            int rc = os_frame_do(o, pool, s, arm->wait_idle, &idx, &ts, &why);
+            if (rc) { OS_EMIT(em, "❌ 第 %d 帧失败：%s（%d）", f, why, rc); R->fails++; break; }
+            if (R->pr_prev) {
+                uint64_t dt = ts - R->pr_prev;
+                if (dt < R->pr_best) R->pr_best = dt;
+                if (dt > R->pr_worst) R->pr_worst = dt;
+                R->pr_sum += dt; R->pr_n++;
+            }
+            R->pr_prev = ts;
+            got++;
+        }
+    } else {
+        OH_DisplaySoloist *ds = OH_DisplaySoloist_Create(true);   // true = 独占一条线程
+        if (!ds) {
+            OS_EMIT(em, "❌ OH_DisplaySoloist_Create 失败（拿不到报时员）");
+            os_slot_free(slot, arm->slots, pool);
+            memset(res, 0, sizeof *res);
+            return 1;
+        }
+
+        // 帧率要在 Start 之前设（官方说明：Start 之后再设"也可以生效但可能存在延迟"）
+        if (arm->rate) {
+            DisplaySoloist_ExpectedRateRange rg;
+            rg.min = rg.max = rg.expected = arm->rate;
+            if (OH_DisplaySoloist_SetExpectedFrameRateRange(ds, &rg) != 0)
+                OS_EMIT(em, "⚠ 设期望帧率 %d 失败（继续跑，但下面的间隔不代表它）", arm->rate);
+        }
+
+        if (OH_DisplaySoloist_Start(ds, pace_frame_cb, R) != 0) {
+            OS_EMIT(em, "❌ OH_DisplaySoloist_Start 失败");
+            OH_DisplaySoloist_Destroy(ds);
+            fails++;
+        } else {
+            // 等它收满拍。**轮询 + 超时**：探针宁可如实报"没收到拍"，也不把 App 挂死。
+            // 需要多久由帧率算得（60 拍 @60Hz ≈ 1 s、@30Hz ≈ 2 s），宽放一倍再加兜底。
+            uint64_t need_ms = (uint64_t)arm->target * 1000ull / (uint64_t)(arm->rate ? arm->rate : 60);
+            uint64_t deadline = need_ms * 2 + 3000;
+            uint64_t t0 = ms_now();
+            while (atomic_load(&R->done_n) < arm->target && ms_now() - t0 < deadline) usleep(1000);
+            got = atomic_load(&R->done_n);
+
+            // 收尾顺序要紧：置 stop（回调不再干活）→ Stop → **等最后一拍退出** → 才 Destroy。
+            // 少最后那一步，就是"Destroy 之后回调还在碰 Vulkan 对象"，真机上会直接崩。
+            atomic_store(&R->stop, 1);
+            OH_DisplaySoloist_Stop(ds);
+            while (atomic_load(&R->in_cb)) usleep(1000);
+            OH_DisplaySoloist_Destroy(ds);
+        }
+    }
+
+    pace_report(em, arm, R, got);
+    pace_res_of(arm, R, got, res);
+    os_slot_free(slot, arm->slots, pool);
+    if (got < arm->target) fails++;
+    return fails;
+}
+
+int vk_backend_pace(char *out, size_t cap) {
+    if (!out || cap < 256) return -1;
+    os_emit em = { out, out + cap - 1 };
+    os_ctx o;
+    int fails = 0;
+    uint64_t t0 = ms_now();
+
+    OS_EMIT(em, "=== 阶段 4（3.3-B）：可变帧率节拍 —— OH_DisplaySoloist ===");
+    OS_EMIT(em, "系统每拍 VSync 调一次回调 → 回调里出一帧；与「裸 present」在同一轮里对照");
+
+    fails = os_setup(em, &o);
+    if (fails) {
+        os_teardown(&o);
+        OS_EMIT(em, "");
+        OS_EMIT(em, "===== 3.3-B 未全通过：图都搭不出来（失败 %d 项）=====", fails);
+        *em.p = 0;
+        return fails;
+    }
+
+    // 五组，顺序有讲究：先立裸 present 的基线（① 等 GPU = 3.3-A 口径；② 不等 GPU = 上游语义），
+    // 再看系统报时（③），最后拿 ④ 回答"回调里等 GPU 会怎样"、拿 ⑤ 验可变帧率。
+    static const pace_arm ARMS[] = {
+        { "① 裸 present · 等 GPU（3.3-A 老基线）",  0, 1,  0, PACE_ARM_FRAMES, 1 },
+        { "② 裸 present · 不等 GPU（上游语义）",    0, 0,  0, PACE_ARM_FRAMES, 3 },
+        { "③ DisplaySoloist 60Hz · 不等 GPU",       1, 0, 60, PACE_ARM_FRAMES, 3 },
+        { "④ DisplaySoloist 60Hz · 等 GPU",         1, 1, 60, PACE_ARM_FRAMES, 3 },
+        { "⑤ DisplaySoloist 30Hz · 不等 GPU",       1, 0, 30, PACE_ARM_FRAMES, 3 },
+    };
+    const int NARM = (int)(sizeof ARMS / sizeof *ARMS);
+    static pace_run R;                 // 放静态：回调要活到 Stop 之后，不能是正在退栈的局部量
+    pace_res res[5];
+    memset(res, 0, sizeof res);
+
+    for (int i = 0; i < NARM; i++) {
+        OS_EMIT(em, "");
+        fails += pace_one_arm(em, &o, &ARMS[i], &R, &res[i]);
     }
 
     os_teardown(&o);
-    EMIT9("");
-    EMIT9("===== 3.3-A %s：失败 %d 项（总耗时 %llums）=====",
-          fails ? "未全通过" : "全部通过", fails, (unsigned long long)(ms_now() - t0));
-    if (!fails) EMIT9("结论：XComponent → VkSurfaceKHR → swapchain → present 这条链通了；屏幕上应能看到三角形");
-    *p = 0;
-    #undef EMIT9
+
+    // ---- 三个判据：每条都要能一眼看出成没成 ----
+    OS_EMIT(em, "");
+    OS_EMIT(em, "===== 判据 =====");
+    {
+        const double MS60 = 1000.0 / 60.0;
+
+        // ① 系统报时成立：60 Hz 组的时间戳间隔应 ≈16.67 ms（±20% 宽容，vsync 抖动是常态）
+        if (res[2].ts_avg_ms <= 0)
+            OS_EMIT(em, "① ❌ 一次回调都没收到（或压根没跑起来）—— 报时这条路不通，要看 hilog");
+        else if (res[2].ts_avg_ms > MS60 * 0.8 && res[2].ts_avg_ms < MS60 * 1.2)
+            OS_EMIT(em, "① ✅ 系统报时成立：60Hz 组回调间隔平均 %.2f ms ≈ 16.67 ms", res[2].ts_avg_ms);
+        else
+            OS_EMIT(em, "① ⚠ 60Hz 组回调间隔平均 %.2f ms，与 16.67 ms 差得远 —— 如实记录，别当成通过",
+                    res[2].ts_avg_ms);
+
+        // ② 可变帧率生效：30 Hz 组的间隔应是 60 Hz 组的约两倍
+        if (res[2].ts_avg_ms > 0 && res[4].ts_avg_ms > 0) {
+            double k = res[4].ts_avg_ms / res[2].ts_avg_ms;
+            if (k > 1.7 && k < 2.3)
+                OS_EMIT(em, "② ✅ 可变帧率生效：设 30fps 后间隔从 %.2f ms 变成 %.2f ms（×%.2f，≈33.3 ms）",
+                        res[2].ts_avg_ms, res[4].ts_avg_ms, k);
+            else
+                OS_EMIT(em, "② ⚠ 设 30fps 后间隔是 %.2f ms（与 60Hz 的 %.2f ms 之比 ×%.2f，预期 ×2）—— 如实记录",
+                        res[4].ts_avg_ms, res[2].ts_avg_ms, k);
+        } else OS_EMIT(em, "② ⚠ 30Hz 组没收到拍，可变帧率这一条没验成");
+
+        // ③ 回调里能不能阻塞：④ 与 ③ 同一段代码，只差"present 后等不等 GPU"
+        if (res[2].ts_avg_ms > 0 && res[3].ts_avg_ms > 0) {
+            double k = res[3].ts_avg_ms / res[2].ts_avg_ms;
+            if (k > 1.3)
+                OS_EMIT(em, "③ ⚠ 回调里等 GPU 会拖垮节拍：间隔从 %.2f ms 涨到 %.2f ms（×%.2f）⇒ 生产不该在回调里等",
+                        res[2].ts_avg_ms, res[3].ts_avg_ms, k);
+            else
+                OS_EMIT(em, "③ ✅ 回调里等 GPU 也扛住了（间隔 %.2f ms vs %.2f ms，×%.2f）—— 但不代表生产该等",
+                        res[3].ts_avg_ms, res[2].ts_avg_ms, k);
+        } else OS_EMIT(em, "③ ⚠ 两组没同时收到拍，这一条没比成");
+
+        // 附带信息：两种节拍谁更整齐（最大间隔 / 平均间隔，越接近 1 越好）
+        OS_EMIT(em, "（参考）抖动比 = 最大间隔/平均间隔：裸 present 不等 GPU %.2f ／ DisplaySoloist 60Hz %.2f",
+                res[1].jitter, res[2].jitter);
+    }
+
+    OS_EMIT(em, "");
+    OS_EMIT(em, "===== 3.3-B %s：失败 %d 项（总耗时 %llums）=====",
+            fails ? "未全通过" : "全部通过", fails, (unsigned long long)(ms_now() - t0));
+    if (!fails) OS_EMIT(em, "结论：系统报时可用（回调另起线程、间隔 ≈16.7ms），且帧率可设 ⇒ 回放层可以用它当节拍源");
+    *em.p = 0;
     return fails;
 }
+

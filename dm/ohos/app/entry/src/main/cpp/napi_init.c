@@ -35,6 +35,7 @@ static void DispatchTouchEventCB(OH_NativeXComponent *component, void *window) {
 #define VKPROBE_BUF  32768   // Vulkan 报告比实验报告长（要列扩展/格式/上限/特性），给大一点
 #define TEST_BUF     65536   // 单测的报告 + 失败时的诊断行，给足
 #define VKSMOKE_BUF  16384   // Vulkan 冒烟报告（设备名 + 逐项结论）
+#define VKPACE_BUF   32768   // 节拍报告：5 组对照 + 判据，比冒烟长得多
 
 // 共用一个"跑一个探针，把报告字符串返回"的骨架，几种探针只差调哪个函数、缓冲区多大。
 // Shared skeleton: run a probe and return its report as a string; the probes differ only in which
@@ -237,6 +238,19 @@ static napi_value RunVkOnScreen(napi_env env, napi_callback_info info) {
     return ret;
 }
 
+static napi_value RunVkPace(napi_env env, napi_callback_info info) {
+    // 阶段 4（3.3-B）：可变帧率节拍 —— OH_DisplaySoloist 当报时员，5 组对照（含裸 present 基线）。
+    char files_dir[1024];
+    Arg0String(env, info, files_dir, sizeof files_dir);
+    napi_value ret = NULL;
+    char *buf = (char *)malloc(VKPACE_BUF);
+    if (!buf) { napi_create_string_utf8(env, "内存不足", NAPI_AUTO_LENGTH, &ret); return ret; }
+    vk_backend_pace(buf, VKPACE_BUF);
+    napi_create_string_utf8(env, buf, NAPI_AUTO_LENGTH, &ret);
+    free(buf);
+    return ret;
+}
+
 static napi_value Init(napi_env env, napi_value exports) {
     // 取 ArkUI 传进来的 XComponent 实例并注册回调（照 dm/ohos/front_ohos.c 的写法）
     napi_value exportInstance = NULL;
@@ -265,6 +279,7 @@ static napi_value Init(napi_env env, napi_value exports) {
         { "runVkReplay",    NULL, RunVkReplay,    NULL, NULL, NULL, napi_default, NULL },
         { "runVkPsoCache",  NULL, RunVkPsoCache,  NULL, NULL, NULL, napi_default, NULL },
         { "runVkOnScreen",  NULL, RunVkOnScreen,  NULL, NULL, NULL, napi_default, NULL },
+        { "runVkPace",      NULL, RunVkPace,      NULL, NULL, NULL, napi_default, NULL },
     };
     napi_define_properties(env, exports, sizeof desc / sizeof desc[0], desc);
     return exports;

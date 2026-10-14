@@ -48,7 +48,10 @@ target_include_directories(dmprobe PRIVATE
 # 官方要求：用 NAPI 要链 libace_napi.z.so；打 hilog 要链 libhilog_ndk.z.so；
 # 图形层能力探测要链 libvulkan.so（NDK sysroot 里就有）。
 # XComponent（出图那一步要拿 OHNativeWindow）在 libace_ndk.z.so 里。
-target_link_libraries(dmprobe PUBLIC libace_napi.z.so libace_ndk.z.so libhilog_ndk.z.so libvulkan.so)
+# libnative_display_soloist.so 是 3.3-B 的报时员（OH_DisplaySoloist，头文件 native_display_soloist/）：
+# 系统每拍 VSync 调一次回调，用来量真实帧间隔、设期望帧率。
+target_link_libraries(dmprobe PUBLIC libace_napi.z.so libace_ndk.z.so libhilog_ndk.z.so libvulkan.so
+    libnative_display_soloist.so)
 
 # ---- 宿主单测：每个单测一个 .so（由 tools/gen_host_tests.py 从上游 Makefile 生成）----
 # 结构照上游"每个单测一个可执行文件"。跑测框架按名字 dlopen 它们、取各自的 main 来调。

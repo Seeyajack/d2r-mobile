@@ -102,3 +102,12 @@ int     vk_backend_psocache(const char *dir, char *out, size_t cap);
 // → 画 → present。这是"离屏验证"与"真上屏"的分界线：前面所有判据都是读回像素，这里第一次让画面
 // 出现在屏幕上。判据：表面能力/格式/呈现模式逐个报出 + 60 帧 present 间隔统计；画面用截图确认。
 int     vk_backend_onscreen(char *out, size_t cap);
+
+// 阶段 4（3.3-B）：**可变帧率节拍** —— 官方的 OH_DisplaySoloist 当报时员：系统每拍 VSync 调一次
+// 回调（跑在系统给的线程上），回调里出一帧。同一轮里跑 5 组，自带"裸 present"对照（跨轮次比读数会漂）：
+//   ① 裸 present·等 GPU（3.3-A 老基线）  ② 裸 present·不等 GPU（上游语义）
+//   ③ DisplaySoloist 60Hz·不等 GPU（主判据）④ 同 60Hz·等 GPU（回答"回调里阻塞会怎样"）
+//   ⑤ DisplaySoloist 30Hz·不等 GPU（验可变帧率：间隔应翻倍到 ≈33.3 ms）
+// 三个判据：回调间隔 ≈16.67 ms ／ 设 30fps 后间隔翻倍 ／ 回调里等 GPU 是否拖垮节拍。
+// 顺带量回调线程 id、回调单次耗时 —— 这三项决定生产形态（回放层怎么接它）。
+int     vk_backend_pace(char *out, size_t cap);
