@@ -35,11 +35,11 @@ Switch Maxwell 机器码 → (Ryujinx 翻译库，C# 工具) → SPIR-V → spir
 
 | 阶段 | 内容 | 交付物（怎么算完成） | 依赖 |
 |---|---|---|---|
-| **1. Vulkan 冒烟（无窗口离屏）** | 照 `mtl_backend.h` 的六个函数做一个 `vk_backend`：init / shutdown / target / clear / triangle / **readback**；用 NDK 的 `libvulkan.so` | 探针 App 加"Vulkan 冒烟"按钮：清屏→画三角形→**读回像素**验证颜色正确。**不依赖游戏文件、不依赖窗口** | 已有（vk_probe 已证明设备能初始化 Vulkan） |
-| 2. SPIR-V 直通 | 在 vk_backend 里加载一个 SPIR-V 着色器画同一个三角形 | 同上，但三角形是**游戏着色器同源的语言**画的 ⇒ 证明"游戏着色器不经翻译直接进 Vulkan" | 阶段 1 |
-| 3. 回放层 `nvn_vk.c`（大头） | 按 `nvn_obj.h` 的记录格式回放成 Vulkan。分小步：内存池零拷贝（**统一内存已实测**）→ 管线/PSO 哈希缓存 → 绘制 → 同步对象/事件/计数器 → 贴图上传（含 **BC→ASTC**，解码用上游自带的 `tex/nvn_bcdec.c`） | 每小步配一条真机可验证的检查；最终目标：`dm/gfx/tests/` 的测试在真机通过 | 阶段 2 |
-| 4. 出图与节拍 | XComponent surface + swapchain（或离屏 blit）；`nvn_pace.h` 节拍器的鸿蒙等价物 | 屏幕上出图 | 阶段 3 |
-| 5. 接真游戏 | L3 | 游戏跑起来 | 游戏文件 |
+| **✅ 1. Vulkan 冒烟（无窗口离屏）**——真机全通过（清屏+读回逐像素验证） | 照 `mtl_backend.h` 的六个函数做一个 `vk_backend`：init / shutdown / target / clear / triangle / **readback**；用 NDK 的 `libvulkan.so` | 探针 App 加"Vulkan 冒烟"按钮：清屏→画三角形→**读回像素**验证颜色正确。**不依赖游戏文件、不依赖窗口** | 已有（vk_probe 已证明设备能初始化 Vulkan） |
+| **✅ 2. SPIR-V 直通**——真机全通过（glslang 产物画三角形，75ms；手写 SPIR-V 会让驱动崩渲染服务，见下） | 在 vk_backend 里加载一个 SPIR-V 着色器画同一个三角形 | 同上，但三角形是**游戏着色器同源的语言**画的 ⇒ 证明"游戏着色器不经翻译直接进 Vulkan" | 阶段 1 |
+| **⬜ 3. 回放层 `nvn_vk.c`（大头，当前任务）** | 按 `nvn_obj.h` 的记录格式回放成 Vulkan。分小步：内存池零拷贝（**统一内存已实测**）→ 管线/PSO 哈希缓存 → 绘制 → 同步对象/事件/计数器 → 贴图上传（含 **BC→ASTC**，解码用上游自带的 `tex/nvn_bcdec.c`） | 每小步配一条真机可验证的检查；最终目标：`dm/gfx/tests/` 的测试在真机通过 | 阶段 2 |
+| ⬜ 4. 出图与节拍 | XComponent surface + swapchain（或离屏 blit）；`nvn_pace.h` 节拍器的鸿蒙等价物 | 屏幕上出图 | 阶段 3 |
+| ⬜ 5. 接真游戏 | L3 | 游戏跑起来 | 游戏文件 |
 
 ## 四、鸿蒙 NEXT 特有游戏机制的接入点（按阶段落位）
 
