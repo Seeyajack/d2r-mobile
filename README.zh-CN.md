@@ -195,7 +195,8 @@ flowchart LR
 |---|---|---|---|
 | **iPhone / iPad，A17 Pro 及以后**（iPhone 15 Pro 起、iPhone 16 起、M 系列芯片的 iPad） | 直接玩 | iOS 26 及以上用缺省的壳 / 缺省构建；iOS 18 – 25 用 iOS 18 的壳 / [老接口版](docs/OLDER_SYSTEMS.zh-CN.md) | 主力机型，日常在玩 |
 | **iPhone / iPad，A16 及更早**（iPhone 14 全系、iPhone 15 / 15 Plus、iPhone 13 系列等） | 可以玩，多一步 | 按 [docs/LEGACY_DEVICES.zh-CN.md](docs/LEGACY_DEVICES.zh-CN.md) 用自己的游戏文件做一份老机型补充包，做安装包时带上它；系统同上一行分 iOS 26 / iOS 18 – 25 | 已有玩家实测：iPhone 14 Pro Max（A16，6 GB）60 帧；iPhone 13 Pro Max（A15，6 GB）30 帧档 |
-| **比 A15 更老的芯片、4 GB 内存的设备** | 尚无报告 | 同上一行 | 欢迎试过的人开 Issue 告诉我们结果 |
+| **4 GB 内存的设备**（如 iPad Air 第 4 代） | 暂不支持（在优化内存，有进展更新） | — | 已有玩家实测：iPad Air 4（A14，4 GB）带上老机型补充包后，启动几秒即因整机内存不足被系统结束 |
+| **比 A15 更老的芯片、6 GB 及以上内存** | 尚无报告 | 同 A16 及更早那一行 | 欢迎试过的人开 Issue 告诉我们结果 |
 | **Mac，Apple 芯片** | 直接玩（原生 macOS App） | macOS 26 及以上用缺省出法；macOS 15 – 25 用[老接口出法](docs/OLDER_SYSTEMS.zh-CN.md)。键盘、鼠标、手柄都能玩，各自能做什么见 [docs/MAC.zh-CN.md](docs/MAC.zh-CN.md) | 已有玩家在 macOS 15.7.7 上实际玩过老接口版 |
 | **Intel 芯片的 Mac** | 不支持 | — | — |
 
@@ -320,6 +321,20 @@ DM_MAC_M3=1 dm/tools/mac_app.sh      # macOS 15 – 25：产出 D2R Mobile M3.ap
 ## 声明
 
 **你必须拥有正版游戏，包括「术士君临」资料片。** 这是一个独立的非商业项目，与暴雪娱乐、任天堂没有关联，也未获其认可或赞助。Diablo 与 Blizzard Entertainment 是暴雪娱乐的商标，Nintendo Switch 是任天堂的商标。请只配合你自己拥有的游戏使用。
+
+## 致谢
+
+这个项目建立在下面这些开源工作之上，谢谢各位作者和维护者。
+
+- **Ryujinx**（Ryubing 1.3.2，MIT）：`dm/third_party/ryujinx` 原样内置了它的着色器翻译库（Ryujinx.Graphics.Shader、Spv.Generator、Ryujinx.Common 三个项目，未修改），用来把 Switch 原版着色器翻译成 SPIR-V。开发过程中，我们还用打了补丁的 Ryujinx 跑原版游戏，作为画面和游戏状态的对照参考（做法见 [dm/verify/README.zh-CN.md](dm/verify/README.zh-CN.md)；构建和驱动它的脚本不在本仓库里）。
+- **deko3d**（devkitPro，zlib）：`dm/gfx/nvn/nvn_tex.c` 里的贴图排布尺寸算法移植自它。
+- **nvn.h**（h1k421，MIT）：图形接口声明 `dm/gfx/nvn/include/nvn.h`。
+- **libdeflate**（Eric Biggers，MIT）：解压游戏数据。
+- **bcdec**（iOrange，MIT 或 Unlicense）：在不支持 BC 贴图格式的设备上解压 BC 贴图。
+- **FLIP**（NVIDIA，BSD 3-Clause）：画质验证里的画面差异度量。
+- **离线修复补丁**（LFS Mod Offline Fix）：`dm/tools/patch_nso.py` 里让游戏离线运行的 7 处改写取自这个社区补丁。它的首发处和作者我们没有确切记录，知道的请开 Issue 告诉我们。
+- 构建与验证用到的工具：SPIRV-Cross（把 SPIR-V 转成 Metal 着色语言）、XcodeGen、.NET、Capstone 和 Unicorn（改写前后的反汇编与等价核对）、Pillow、numpy、lz4、astcenc（老机型补充包）、hactool（从游戏包取文件）、libimobiledevice、LLVM。版本和地址见 [docs/DEPENDENCIES.zh-CN.md](docs/DEPENDENCIES.zh-CN.md)。
+- 社区贡献：Joe Hu 报告并定位了多处秘境问题，还提出了验证矩阵；seedds 在另一款游戏的移植中发现并定位了渲染目标视图格式的问题（#36）。他们在相应提交里署名为共同作者。
 
 ## 许可证
 
