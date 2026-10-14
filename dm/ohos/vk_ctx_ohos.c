@@ -24,6 +24,7 @@ typedef struct {
     VkDeviceMemory   heap_mem;
     void            *heap;
     uint64_t         heap_size;
+    uint32_t         heap_mt;        // 客体堆用的内存类型序号
 } vk_ctx_ohos_t;
 
 static vk_ctx_ohos_t g_ctx;
@@ -156,6 +157,7 @@ void *dm_ohos_heap_reserve(uint64_t size) {
         return NULL;
     }
     g_ctx.heap_size = size;
+    g_ctx.heap_mt = (uint32_t)mt;
     LOG("客体堆预留成功：%llu MiB，CPU 映射 %p（内存类型 %d）",
         (unsigned long long)(size >> 20), g_ctx.heap, mt);
     return g_ctx.heap;
@@ -165,8 +167,10 @@ void dm_ohos_heap_release(void) {
     if (g_ctx.heap) { vkUnmapMemory(g_ctx.dev, g_ctx.heap_mem); g_ctx.heap = NULL; }
     if (g_ctx.heap_mem) { vkFreeMemory(g_ctx.dev, g_ctx.heap_mem, NULL); g_ctx.heap_mem = NULL; }
     g_ctx.heap_size = 0;
+    g_ctx.heap_mt = 0;
 }
 
 VkDeviceMemory dm_ohos_heap_memory(void) { return g_ctx.heap_mem; }
 void          *dm_ohos_heap_base(void)   { return g_ctx.heap; }
 uint64_t       dm_ohos_heap_size(void)   { return g_ctx.heap_size; }
+uint32_t       dm_ohos_heap_mem_type(void) { return g_ctx.heap_mt; }

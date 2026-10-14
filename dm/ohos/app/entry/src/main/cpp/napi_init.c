@@ -163,6 +163,19 @@ static napi_value RunVkHeapReserve(napi_env env, napi_callback_info info) {
     return ret;
 }
 
+static napi_value RunVkPoolMod(napi_env env, napi_callback_info info) {
+    // 阶段 3 第一步（3.1-C）：池模块（nvn_vk.c）—— 登记 / 地址反查 / GPU 搬运 / 负向判据。
+    char files_dir[1024];
+    Arg0String(env, info, files_dir, sizeof files_dir);
+    napi_value ret = NULL;
+    char *buf = (char *)malloc(VKSMOKE_BUF);
+    if (!buf) { napi_create_string_utf8(env, "内存不足", NAPI_AUTO_LENGTH, &ret); return ret; }
+    vk_backend_poolmod(buf, VKSMOKE_BUF);
+    napi_create_string_utf8(env, buf, NAPI_AUTO_LENGTH, &ret);
+    free(buf);
+    return ret;
+}
+
 static napi_value Init(napi_env env, napi_value exports) {
     napi_property_descriptor desc[] = {
         { "runProbes",      NULL, RunProbes,      NULL, NULL, NULL, napi_default, NULL },
@@ -173,6 +186,7 @@ static napi_value Init(napi_env env, napi_value exports) {
         { "runVkMemProbe",  NULL, RunVkMemProbe,  NULL, NULL, NULL, napi_default, NULL },
         { "runVkPoolProto", NULL, RunVkPoolProto, NULL, NULL, NULL, napi_default, NULL },
         { "runVkHeapReserve", NULL, RunVkHeapReserve, NULL, NULL, NULL, napi_default, NULL },
+        { "runVkPoolMod",   NULL, RunVkPoolMod,   NULL, NULL, NULL, napi_default, NULL },
     };
     napi_define_properties(env, exports, sizeof desc / sizeof desc[0], desc);
     return exports;

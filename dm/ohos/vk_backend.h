@@ -76,3 +76,10 @@ int     vk_backend_poolproto(char *out, size_t cap);
 // Phase 3 step 1 (3.1-B): reserve the guest heap at its real size through the shared context and
 // verify that pools carved out of it are really readable/writable by the GPU.
 int     vk_backend_heapreserve(char *out, size_t cap);
+
+// 阶段 3 第一步（3.1-C）：**池模块**（`dm/gfx/nvn/nvn_vk.c`，对标 `nvn_mtl.m` 的池那部分）。
+// 在已预留的客体堆上登记两个池，然后用 `nvn_vk_addr` / `nvn_vk_gpu_addr` 反查地址、
+// 让 GPU 按反查结果搬运并逐字节比对；另含一条负向判据（池不在堆里必须失败）。
+// Phase 3 step 1 (3.1-C): the pool module -- register pools, look addresses back up, verify the GPU
+// can actually move data through them, plus one negative case.
+int     vk_backend_poolmod(char *out, size_t cap);

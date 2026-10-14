@@ -23,6 +23,8 @@ add_library(dmprobe SHARED
     ${DM_DIR}/ohos/vk_backend.c
     # 阶段 3 的共享 Vulkan 上下文 + 客体堆预留（零拷贝的地基；见 vk_ctx_ohos.h 顶部的理由）
     ${DM_DIR}/ohos/vk_ctx_ohos.c
+    # 阶段 3 第一步的池模块：鸿蒙侧回放层的第一个文件（对标 nvn_mtl.m 的池那部分）
+    ${DM_DIR}/gfx/nvn/nvn_vk.c
     # 宿主单测跑测框架 + 统一日志（框架靠 dlopen 去载入各单测 .so，所以它自己很薄）
     ${DM_DIR}/ohos/host_tests.c
     ${DM_DIR}/ohos/host_tests_gen.c   # 生成：单测清单（哪些 .so、叫什么名字）
@@ -36,7 +38,8 @@ add_library(dmprobe SHARED
 
 target_include_directories(dmprobe PRIVATE
     ${DM_DIR}/host     # dm.h（module_t）
-    ${DM_DIR}/ohos     # map_image_ohos.h、host_tests.h、dm_log.h
+    ${DM_DIR}/ohos     # map_image_ohos.h、host_tests.h、dm_log.h、vk_ctx_ohos.h
+    ${DM_DIR}/gfx/nvn  # nvn_vk.h（鸿蒙侧回放层的池模块）
 )
 
 # 官方要求：用 NAPI 要链 libace_napi.z.so；打 hilog 要链 libhilog_ndk.z.so；

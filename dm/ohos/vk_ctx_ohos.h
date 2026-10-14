@@ -50,6 +50,7 @@ void  dm_ohos_heap_release(void);
 VkDeviceMemory dm_ohos_heap_memory(void);
 void          *dm_ohos_heap_base(void);
 uint64_t       dm_ohos_heap_size(void);
+uint32_t       dm_ohos_heap_mem_type(void);   // 客体堆用的内存类型序号（池缓冲要校验它）
 
 #ifdef __cplusplus
 }

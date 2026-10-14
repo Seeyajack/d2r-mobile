@@ -133,6 +133,17 @@ struct Index {
           }
         })
 
+      Button('池模块（3.1-C：登记+反查+搬运）')
+        .width('100%')
+        .onClick(() => {
+          try {
+            const ctx = getContext(this) as common.UIAbilityContext;
+            this.result = dmprobe.runVkPoolMod(ctx.filesDir);
+          } catch (err) {
+            this.result = '调用原生模块失败：' + JSON.stringify(err);
+          }
+        })
+
       TextInput({ text: this.testFilter, placeholder: '单测筛选：留空=续跑，*=重头跑，或填单测名' })
         .width('100%')
         .onChange((v: string) => { this.testFilter = v; })

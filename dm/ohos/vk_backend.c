@@ -8,6 +8,7 @@
 #include "vk_backend.h"
 
 #include "dm_log.h"
+#include "nvn_vk.h"
 #include "tri_shaders.h"
 #include "vk_ctx_ohos.h"
 
@@ -1070,5 +1071,131 @@ int vk_backend_heapreserve(char *out, size_t cap) {
         EMIT5("结论：真实尺寸的客体堆预留成立，池切片可被 GPU 读写 ⇒ hle_svc.c 的分叉可照此接线");
     *p = 0;
     #undef EMIT5
+    return fails;
+}
+
+// ================= 阶段 3 第一步（3.1-C）：池模块 =================
+// dm/gfx/nvn/nvn_vk.c（对标 nvn_mtl.m 的池那部分）在真机上验：
+//   ① 池登记：从客体堆里切两个池，各建一个 VkBuffer 绑到池偏移上；
+//   ② 地址反查：nvn_vk_addr / nvn_vk_gpu_addr 把"游戏给的地址"翻成"缓冲 + 偏移 + 设备地址"；
+//   ③ 真搬运：按反查结果让 GPU 把池 A 的一段搬到池 B 的一段，逐字节比对；
+//   ④ 负向判据：**池不在客体堆里时必须失败**（否则"零拷贝"是假的，会悄悄退化成不可用内存）。
+typedef struct { VkBuffer a, b; VkDeviceSize so, dsto, n; } poolcopy_pack;
+
+static void rec_copy_pool(VkCommandBuffer cb, void *ud) {
+    poolcopy_pack *d = (poolcopy_pack *)ud;
+    VkBufferCopy c = { d->so, d->dsto, d->n };
+    vkCmdCopyBuffer(cb, d->a, d->b, 1, &c);
+}
+
+int vk_backend_poolmod(char *out, size_t cap) {
+    if (!out || cap < 256) return -1;
+    char *p = out, *end = out + cap - 1;
+    int fails = 0;
+    uint64_t t0 = ms_now();
+    #define EMIT6(...) do { int _n = snprintf(p, (size_t)(end - p) + 1, __VA_ARGS__); \
+                            if (_n > 0) { p += _n; if (p > end) p = end; } \
+                            dm_log_printf(__VA_ARGS__); } while (0)
+
+    EMIT6("=== 阶段 3 第一步（3.1-C）：池模块（nvn_vk.c）===");
+    EMIT6("池登记 → 地址反查 → GPU 真搬运 → 负向判据（池不在堆里必须失败）");
+
+    const uint64_t HEAP = 4ull << 30;
+    uint8_t *heap = (uint8_t *)dm_ohos_heap_reserve(HEAP);
+    if (!heap) {
+        EMIT6("❌ 客体堆预留失败：%s", dm_ohos_vk_err());
+        EMIT6("===== 失败 ====="); *p = 0; return 1;
+    }
+    EMIT6("客体堆：%llu MiB，基址 %p（设备 %s）",
+          (unsigned long long)(HEAP >> 20), heap, dm_ohos_vk_devname());
+
+    // ① 两个池（模拟游戏从堆中间切出两块）
+    const uint64_t POOL_SZ = 8ull << 20;
+    uint8_t *pa = heap + (1ull << 30);
+    uint8_t *pb = heap + (1ull << 30) + (64ull << 20);
+    EMIT6("① 池登记");
+    int ra = nvn_vk_pool_add(pa, POOL_SZ);
+    EMIT6("  %s 池A @ %p+%llu MiB：%s", ra ? "❌" : "✅", pa, (unsigned long long)(POOL_SZ >> 20),
+          ra ? nvn_vk_last_error() : "登记成功");
+    if (ra) fails++;
+    int rb = nvn_vk_pool_add(pb, POOL_SZ);
+    EMIT6("  %s 池B @ %p+%llu MiB：%s", rb ? "❌" : "✅", pb, (unsigned long long)(POOL_SZ >> 20),
+          rb ? nvn_vk_last_error() : "登记成功");
+    if (rb) fails++;
+    EMIT6("  当前已登记池数：%d", nvn_vk_pool_count());
+
+    // ② 地址反查
+    EMIT6("② 地址反查（游戏给的地址 → 缓冲 + 偏移 + 设备地址）");
+    VkBuffer ba = VK_NULL_HANDLE, bb = VK_NULL_HANDLE;
+    uint64_t oa = 0, ob = 0, ga = 0, gb = 0;
+    const uint64_t IN_A = 4096, IN_B = 8192, N = 1u << 20;
+    if (!ra) {
+        uint64_t addr = (uint64_t)(uintptr_t)(pa + IN_A);
+        int hit = nvn_vk_gpu_addr(addr, N, &ba, &oa, &ga);
+        EMIT6("  %s 池A+%llu：命中=%d 偏移=%llu 设备地址=%#llx",
+              (hit && oa == IN_A) ? "✅" : "❌", (unsigned long long)IN_A, hit,
+              (unsigned long long)oa, (unsigned long long)ga);
+        if (!hit || oa != IN_A) fails++;
+    }
+    if (!rb) {
+        uint64_t addr = (uint64_t)(uintptr_t)(pb + IN_B);
+        int hit = nvn_vk_gpu_addr(addr, N, &bb, &ob, &gb);
+        EMIT6("  %s 池B+%llu：命中=%d 偏移=%llu 设备地址=%#llx",
+              (hit && ob == IN_B) ? "✅" : "❌", (unsigned long long)IN_B, hit,
+              (unsigned long long)ob, (unsigned long long)gb);
+        if (!hit || ob != IN_B) fails++;
+    }
+    // 越界/未登记区间必须不命中
+    {
+        VkBuffer x = VK_NULL_HANDLE; uint64_t xo = 0;
+        int hit = nvn_vk_addr((uint64_t)(uintptr_t)heap, 4096, &x, &xo);   // 堆头部没登记成池
+        EMIT6("  %s 堆头部（未登记）：命中=%d（应为 0）", hit ? "❌" : "✅", hit);
+        if (hit) fails++;
+    }
+
+    // ③ GPU 真搬运
+    EMIT6("③ 按反查结果搬运：CPU 写池 A → vkCmdCopyBuffer(A+%llu → B+%llu) → CPU 读池 B",
+          (unsigned long long)IN_A, (unsigned long long)IN_B);
+    if (ba && bb) {
+        uint8_t *src = pa + IN_A, *dst = pb + IN_B;
+        for (uint64_t i = 0; i < N; i++) src[i] = (uint8_t)(i * 43u + 17u);
+        poolcopy_pack pk = { ba, bb, IN_A, IN_B, N };
+        uint64_t t2 = ms_now();
+        if (dm_ohos_vk_oneshot(rec_copy_pool, &pk) != 0) { EMIT6("  ❌ copy 提交失败"); fails++; }
+        else {
+            uint64_t bad = 0, first = (uint64_t)-1;
+            for (uint64_t i = 0; i < N; i++)
+                if (dst[i] != (uint8_t)(i * 43u + 17u)) { if (first == (uint64_t)-1) first = i; bad++; }
+            if (bad) { EMIT6("  ❌ %llu 字节里 %llu 个不符（首个 %llu）",
+                             (unsigned long long)N, (unsigned long long)bad, (unsigned long long)first); fails++; }
+            else EMIT6("  ✅ %llu 字节全部一致（%llums）—— 反查结果能被 GPU 直接用来搬运",
+                       (unsigned long long)N, (unsigned long long)(ms_now() - t2));
+        }
+    } else { EMIT6("  ⚠ 有池没登记成功，跳过"); fails++; }
+
+    // ④ 负向判据
+    EMIT6("④ 负向判据：池不在客体堆里必须登记失败");
+    {
+        static uint8_t outside[1 << 16];
+        int r = nvn_vk_pool_add(outside, sizeof outside);
+        EMIT6("  %s 堆外的内存：%s", r ? "✅" : "❌",
+              r ? "按预期被拒（不会悄悄退化成不可用内存）" : "**居然成功了——零拷贝是假的**");
+        if (!r) fails++;
+    }
+
+    // 收尾：注销两个池
+    nvn_vk_pool_del(pa);
+    nvn_vk_pool_del(pb);
+    EMIT6("⑤ 注销后池数：%d（应为 0）", nvn_vk_pool_count());
+    if (nvn_vk_pool_count() != 0) fails++;
+    dm_ohos_heap_release();
+
+    EMIT6("");
+    EMIT6("===== 3.1-C %s：失败 %d 项（总耗时 %llums）=====",
+          fails ? "未全通过" : "全部通过", fails, (unsigned long long)(ms_now() - t0));
+    if (!fails)
+        EMIT6("结论：池登记 / 地址反查 / GPU 搬运 / 负向判据全部成立 ⇒ 回放层的池这一层可用");
+    *p = 0;
+    #undef EMIT6
     return fails;
 }
