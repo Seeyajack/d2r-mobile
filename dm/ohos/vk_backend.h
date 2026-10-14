@@ -97,3 +97,8 @@ int     vk_backend_replay(char *out, size_t cap);
 // 硬判据：热启动能从盘上载入缓存；软判据：建管线耗时"热 < 冷"（未观察到收益也如实报出）。
 // dir = 应用数据目录（缓存文件放它下面）。
 int     vk_backend_psocache(const char *dir, char *out, size_t cap);
+
+// 阶段 4（3.3-A）：**出图** —— ArkUI 的 XComponent 给出 OHNativeWindow → VkSurfaceKHR → swapchain
+// → 画 → present。这是"离屏验证"与"真上屏"的分界线：前面所有判据都是读回像素，这里第一次让画面
+// 出现在屏幕上。判据：表面能力/格式/呈现模式逐个报出 + 60 帧 present 间隔统计；画面用截图确认。
+int     vk_backend_onscreen(char *out, size_t cap);

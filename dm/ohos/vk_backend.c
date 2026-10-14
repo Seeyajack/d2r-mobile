@@ -12,6 +12,7 @@
 #include "nvn_vk.h"
 #include "tri_shaders.h"
 #include "vk_ctx_ohos.h"
+#include "vk_surface_ohos.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -1542,5 +1543,357 @@ int vk_backend_psocache(const char *dir, char *out, size_t cap) {
           fails ? "未全通过" : "全部通过", fails, (unsigned long long)(ms_now() - t0));
     *p = 0;
     #undef EMIT8
+    return fails;
+}
+
+// ================= 阶段 4（3.3-A）：出图 —— 屏幕上出画面 =================
+// ArkUI 的 XComponent 给出 OHNativeWindow → VkSurfaceKHR → swapchain → 画 → present。
+// 这是"离屏验证"与"真上屏"的分界线：前面所有判据都是读回像素，这里第一次让画面**出现在屏幕上**。
+//
+// 判据：① 表面能力 / 格式 / 呈现模式逐个报出（不猜）；② 60 帧 present 间隔统计（节拍稳不稳）。
+// 画面本身用截图做视觉确认（真机上肉眼可辨）。
+typedef struct {
+    VkSurfaceKHR   surface;
+    VkSwapchainKHR sc;
+    VkFormat       fmt; VkColorSpaceKHR cs; VkExtent2D ext;
+    uint32_t       nimg; VkImage img[8]; VkImageView view[8]; VkFramebuffer fb[8];
+    VkRenderPass   rp; VkPipeline pl; VkPipelineLayout lay;
+    VkBuffer       vb; VkDeviceMemory vbm;
+    VkSemaphore    sem_avail, sem_done;
+    VkQueue        qpresent;          // 负责 present 的队列（真机：图形族不支持）
+} os_ctx;
+
+static void os_teardown(os_ctx *o) {
+    VkDevice dev = dm_ohos_vk_device();
+    if (!dev) return;
+    if (o->sem_avail) vkDestroySemaphore(dev, o->sem_avail, NULL);
+    if (o->sem_done) vkDestroySemaphore(dev, o->sem_done, NULL);
+    if (o->vb) vkDestroyBuffer(dev, o->vb, NULL);
+    if (o->vbm) vkFreeMemory(dev, o->vbm, NULL);
+    if (o->pl) vkDestroyPipeline(dev, o->pl, NULL);
+    if (o->lay) vkDestroyPipelineLayout(dev, o->lay, NULL);
+    if (o->rp) vkDestroyRenderPass(dev, o->rp, NULL);
+    for (uint32_t i = 0; i < o->nimg; i++) {
+        if (o->fb[i]) vkDestroyFramebuffer(dev, o->fb[i], NULL);
+        if (o->view[i]) vkDestroyImageView(dev, o->view[i], NULL);
+    }
+    if (o->sc) vkDestroySwapchainKHR(dev, o->sc, NULL);
+    if (o->surface) vkDestroySurfaceKHR(dm_ohos_vk_instance(), o->surface, NULL);
+}
+
+static uint64_t ns_now2(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
+// 录一帧：清屏 → 画三角形（顶点缓冲走探针自己建的小缓冲）
+static void rec_os_draw(VkCommandBuffer cb, void *ud) {
+    os_ctx *o = (os_ctx *)ud;
+    VkClearValue cv; memset(&cv, 0, sizeof cv);
+    cv.color.float32[0] = 1.f; cv.color.float32[3] = 1.f;      // 清成红
+    VkRenderPassBeginInfo bi = { VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
+    bi.renderPass = o->rp; bi.framebuffer = o->fb[0];
+    bi.renderArea.extent = o->ext;
+    bi.clearValueCount = 1; bi.pClearValues = &cv;
+    vkCmdBeginRenderPass(cb, &bi, VK_SUBPASS_CONTENTS_INLINE);
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, o->pl);
+    VkViewport vp = { 0.f, 0.f, (float)o->ext.width, (float)o->ext.height, 0.f, 1.f };
+    VkRect2D sc = { { 0, 0 }, o->ext };
+    vkCmdSetViewport(cb, 0, 1, &vp);
+    vkCmdSetScissor(cb, 0, 1, &sc);
+    VkDeviceSize off = 0;
+    vkCmdBindVertexBuffers(cb, 0, 1, &o->vb, &off);
+    vkCmdDraw(cb, 3, 1, 0, 0);
+    vkCmdEndRenderPass(cb);
+}
+
+int vk_backend_onscreen(char *out, size_t cap) {
+    if (!out || cap < 256) return -1;
+    char *p = out, *end = out + cap - 1;
+    int fails = 0;
+    uint64_t t0 = ms_now();
+    os_ctx o; memset(&o, 0, sizeof o);
+    #define EMIT9(...) do { int _n = snprintf(p, (size_t)(end - p) + 1, __VA_ARGS__); \
+                            if (_n > 0) { p += _n; if (p > end) p = end; } \
+                            dm_log_printf(__VA_ARGS__); } while (0)
+
+    EMIT9("=== 阶段 4（3.3-A）：出图 —— 屏幕上出画面 ===");
+    EMIT9("XComponent 窗口 → VkSurfaceKHR → swapchain → 画 → present");
+
+    char err[256] = "";
+    uint32_t win_w = 0, win_h = 0;
+    if (!dm_ohos_surface_window() || dm_ohos_surface_size(&win_w, &win_h) != 0) {
+        EMIT9("❌ 还没拿到 XComponent 窗口（页面里要有 XComponent，且 surface 回调已到）");
+        EMIT9("===== 失败 ====="); *p = 0; return 1;
+    }
+    EMIT9("XComponent 窗口：%ux%u", win_w, win_h);
+
+    if (dm_ohos_surface_create(&o.surface, err, sizeof err) != 0) {
+        EMIT9("❌ %s", err); EMIT9("===== 失败 ====="); *p = 0; return 1;
+    }
+    VkDevice dev = dm_ohos_vk_device();
+    VkPhysicalDevice pd = dm_ohos_vk_phys();
+
+    // **逐个族问"支不支持 present"**：这台设备真机实测"图形族不支持"，得换一个族提交 present。
+    // 渲染仍用主（图形）队列——命令缓冲的命令池属于图形族，不能跨族提交。
+    uint32_t qf = 0xFFFFFFFFu;
+    {
+        uint32_t n = dm_ohos_vk_qfam_count(), qn = 0;
+        vkGetPhysicalDeviceQueueFamilyProperties(pd, &qn, NULL);
+        VkQueueFamilyProperties *qsr = calloc(qn ? qn : 1, sizeof *qsr);
+        if (qn) vkGetPhysicalDeviceQueueFamilyProperties(pd, &qn, qsr);
+        for (uint32_t k = 0; k < n; k++) {
+            uint32_t f = dm_ohos_vk_qfam_at(k);
+            if (f >= qn) continue;
+            VkBool32 pres = VK_FALSE;
+            vkGetPhysicalDeviceSurfaceSupportKHR(pd, f, o.surface, &pres);
+            const char *what = (qsr[f].queueFlags & VK_QUEUE_GRAPHICS_BIT) ? "图形" :
+                               (qsr[f].queueFlags & VK_QUEUE_COMPUTE_BIT) ? "计算" : "传输";
+            EMIT9("  队列族 %u：%s，队列数 %u，present %s", f, what, qsr[f].queueCount, pres ? "支持" : "不支持");
+            if (pres && qf == 0xFFFFFFFFu) qf = f;
+        }
+        free(qsr);
+    }
+    if (qf == 0xFFFFFFFFu) {
+        EMIT9("❌ 没有一个队列族支持 present —— 出图这条路走不通（要查 VK_OHOS_surface / 窗口是否有效）");
+        fails++; EMIT9("===== 失败 ====="); os_teardown(&o); *p = 0; return fails;
+    }
+    for (uint32_t k = 0; k < dm_ohos_vk_qfam_count(); k++)
+        if (dm_ohos_vk_qfam_at(k) == qf) o.qpresent = dm_ohos_vk_queue_at(k);
+    EMIT9("✅ 提交族 %u（渲染仍走主队列，命令缓冲跨族提交是非法的）", qf);
+    if (!o.qpresent) { EMIT9("❌ 拿不到提交族的队列"); fails++; }
+    if (fails) { EMIT9("===== 失败 ====="); os_teardown(&o); *p = 0; return fails; }
+
+    // ---- 表面能力 / 格式 / 呈现模式：逐个报出，不猜 ----
+    VkSurfaceCapabilitiesKHR caps; memset(&caps, 0, sizeof caps);
+    vkGetPhysicalDeviceSurfaceCapabilitiesKHR(pd, o.surface, &caps);
+    uint32_t nf = 0;
+    vkGetPhysicalDeviceSurfaceFormatsKHR(pd, o.surface, &nf, NULL);
+    VkSurfaceFormatKHR *fmts = calloc(nf ? nf : 1, sizeof *fmts);
+    vkGetPhysicalDeviceSurfaceFormatsKHR(pd, o.surface, &nf, fmts);
+    uint32_t npm = 0;
+    vkGetPhysicalDeviceSurfacePresentModesKHR(pd, o.surface, &npm, NULL);
+    VkPresentModeKHR *pms = calloc(npm ? npm : 1, sizeof *pms);
+    vkGetPhysicalDeviceSurfacePresentModesKHR(pd, o.surface, &npm, pms);
+    EMIT9("表面：图像数 %u..%u，当前范围 %ux%u，变换 %#x，支持的用法 %#x",
+          caps.minImageCount, caps.maxImageCount, caps.currentExtent.width, caps.currentExtent.height,
+          (unsigned)caps.supportedTransforms, (unsigned)caps.supportedUsageFlags);
+    for (uint32_t i = 0; i < nf && i < 6; i++)
+        EMIT9("  格式 %u：VkFormat %d / 色彩空间 %d", i, (int)fmts[i].format, (int)fmts[i].colorSpace);
+    for (uint32_t i = 0; i < npm && i < 6; i++)
+        EMIT9("  呈现模式 %u：%d（0=立即 1=信箱 2=队列 3=三重缓冲）", i, (int)pms[i]);
+
+    // 选：优先 RGBA8/BGRA8 非 sRGB，否则用第一个；呈现模式优先 FIFO（稳定 vsync）
+    o.fmt = VK_FORMAT_UNDEFINED; o.cs = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+    for (uint32_t i = 0; i < nf; i++)
+        if (fmts[i].format == VK_FORMAT_R8G8B8A8_UNORM || fmts[i].format == VK_FORMAT_B8G8R8A8_UNORM) {
+            o.fmt = fmts[i].format; o.cs = fmts[i].colorSpace; break;
+        }
+    if (o.fmt == VK_FORMAT_UNDEFINED && nf) { o.fmt = fmts[0].format; o.cs = fmts[0].colorSpace; }
+    VkPresentModeKHR pm = VK_PRESENT_MODE_FIFO_KHR;
+    for (uint32_t i = 0; i < npm; i++) if (pms[i] == VK_PRESENT_MODE_FIFO_KHR) { pm = pms[i]; break; }
+    if (nf == 0 || npm == 0) { EMIT9("❌ 表面没报格式或呈现模式"); fails++; }
+    free(fmts); free(pms);
+    if (fails) { EMIT9("===== 失败 ====="); os_teardown(&o); *p = 0; return fails; }
+
+    o.ext.width = caps.currentExtent.width;
+    o.ext.height = caps.currentExtent.height;
+    if (o.ext.width == 0xFFFFFFFFu || !o.ext.width) o.ext.width = win_w;
+    if (o.ext.height == 0xFFFFFFFFu || !o.ext.height) o.ext.height = win_h;
+    EMIT9("选用：VkFormat %d，呈现模式 %d，交换链 %ux%u", (int)o.fmt, (int)pm, o.ext.width, o.ext.height);
+
+    // ---- swapchain ----
+    uint32_t want = caps.minImageCount + 1;
+    if (caps.maxImageCount && want > caps.maxImageCount) want = caps.maxImageCount;
+    {
+        VkSwapchainCreateInfoKHR ci = { VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR };
+        ci.surface = o.surface; ci.minImageCount = want; ci.imageFormat = o.fmt; ci.imageColorSpace = o.cs;
+        ci.imageExtent = o.ext; ci.imageArrayLayers = 1;
+        ci.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+        ci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        ci.preTransform = caps.currentTransform;
+        ci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+        ci.presentMode = pm; ci.clipped = VK_TRUE; ci.oldSwapchain = VK_NULL_HANDLE;
+        VkResult r = vkCreateSwapchainKHR(dev, &ci, NULL, &o.sc);
+        if (r != VK_SUCCESS) { EMIT9("❌ vkCreateSwapchainKHR 失败 VkResult=%d", (int)r); fails++; }
+    }
+    if (fails) { EMIT9("===== 失败 ====="); os_teardown(&o); *p = 0; return fails; }
+    o.nimg = 0;
+    vkGetSwapchainImagesKHR(dev, o.sc, &o.nimg, NULL);
+    if (o.nimg > 8) o.nimg = 8;
+    vkGetSwapchainImagesKHR(dev, o.sc, &o.nimg, o.img);
+    EMIT9("交换链：%u 张图像", o.nimg);
+
+    // ---- 通道：结束布局 = PRESENT_SRC（可以直接 present）----
+    {
+        VkAttachmentDescription att; memset(&att, 0, sizeof att);
+        att.format = o.fmt; att.samples = VK_SAMPLE_COUNT_1_BIT;
+        att.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR; att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        att.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        att.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        att.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED; att.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+        VkAttachmentReference ref = { 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
+        VkSubpassDescription sp; memset(&sp, 0, sizeof sp);
+        sp.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+        sp.colorAttachmentCount = 1; sp.pColorAttachments = &ref;
+        VkRenderPassCreateInfo rp = { VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO };
+        rp.attachmentCount = 1; rp.pAttachments = &att;
+        rp.subpassCount = 1; rp.pSubpasses = &sp;
+        if (vkCreateRenderPass(dev, &rp, NULL, &o.rp) != VK_SUCCESS) { EMIT9("❌ vkCreateRenderPass 失败"); fails++; }
+    }
+    for (uint32_t i = 0; i < o.nimg && !fails; i++) {
+        VkImageViewCreateInfo vi = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+        vi.image = o.img[i]; vi.viewType = VK_IMAGE_VIEW_TYPE_2D; vi.format = o.fmt;
+        vi.subresourceRange = (VkImageSubresourceRange){ VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+        if (vkCreateImageView(dev, &vi, NULL, &o.view[i]) != VK_SUCCESS) { EMIT9("❌ 建图像视图 %u 失败", i); fails++; break; }
+        VkFramebufferCreateInfo fi = { VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
+        fi.renderPass = o.rp; fi.attachmentCount = 1; fi.pAttachments = &o.view[i];
+        fi.width = o.ext.width; fi.height = o.ext.height; fi.layers = 1;
+        if (vkCreateFramebuffer(dev, &fi, NULL, &o.fb[i]) != VK_SUCCESS) { EMIT9("❌ 建帧缓冲 %u 失败", i); fails++; break; }
+    }
+    if (fails) { EMIT9("===== 失败 ====="); os_teardown(&o); *p = 0; return fails; }
+
+    // ---- 管线（用阶段 2 那两条 SPIR-V）----
+    {
+        VkShaderModule vm = make_module(dev, dm_spv_vert, dm_spv_vert_n, err, sizeof err);
+        VkShaderModule fm = vm ? make_module(dev, dm_spv_frag, dm_spv_frag_n, err, sizeof err) : NULL;
+        if (!vm || !fm) { EMIT9("❌ 建着色器模块失败：%s", err); fails++; }
+        else {
+            VkPipelineShaderStageCreateInfo st[2] = {
+                { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_VERTEX_BIT, vm, "main", NULL },
+                { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_FRAGMENT_BIT, fm, "main", NULL },
+            };
+            VkVertexInputBindingDescription bind = { 0, 8, VK_VERTEX_INPUT_RATE_VERTEX };
+            VkVertexInputAttributeDescription attr = { 0, 0, VK_FORMAT_R32G32_SFLOAT, 0 };
+            VkPipelineVertexInputStateCreateInfo vi = { VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
+            vi.vertexBindingDescriptionCount = 1; vi.pVertexBindingDescriptions = &bind;
+            vi.vertexAttributeDescriptionCount = 1; vi.pVertexAttributeDescriptions = &attr;
+            VkPipelineInputAssemblyStateCreateInfo ia = { VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
+            ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+            VkPipelineViewportStateCreateInfo vps = { VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO };
+            vps.viewportCount = 1; vps.scissorCount = 1;
+            VkPipelineRasterizationStateCreateInfo rs = { VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
+            rs.polygonMode = VK_POLYGON_MODE_FILL; rs.cullMode = VK_CULL_MODE_NONE;
+            rs.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE; rs.lineWidth = 1.f;
+            VkPipelineMultisampleStateCreateInfo ms = { VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO };
+            ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+            VkPipelineDepthStencilStateCreateInfo dss = { VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO };
+            dss.depthTestEnable = VK_FALSE; dss.stencilTestEnable = VK_FALSE;   // 不留 NULL（真机崩过）
+            VkPipelineColorBlendAttachmentState at = { 0 };
+            at.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                                VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+            VkPipelineColorBlendStateCreateInfo cb = { VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
+            cb.attachmentCount = 1; cb.pAttachments = &at;
+            VkDynamicState dyn[2] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+            VkPipelineDynamicStateCreateInfo ds = { VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO };
+            ds.dynamicStateCount = 2; ds.pDynamicStates = dyn;
+            VkPipelineLayoutCreateInfo li = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+            if (vkCreatePipelineLayout(dev, &li, NULL, &o.lay) != VK_SUCCESS) { EMIT9("❌ 建管线布局失败"); fails++; }
+            else {
+                VkGraphicsPipelineCreateInfo gi = { VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
+                gi.stageCount = 2; gi.pStages = st;
+                gi.pVertexInputState = &vi; gi.pInputAssemblyState = &ia;
+                gi.pViewportState = &vps; gi.pRasterizationState = &rs; gi.pMultisampleState = &ms;
+                gi.pDepthStencilState = &dss; gi.pColorBlendState = &cb; gi.pDynamicState = &ds;
+                gi.layout = o.lay; gi.renderPass = o.rp;
+                if (vkCreateGraphicsPipelines(dev, NULL, 1, &gi, NULL, &o.pl) != VK_SUCCESS) {
+                    EMIT9("❌ vkCreateGraphicsPipelines 失败"); fails++;
+                }
+            }
+            vkDestroyShaderModule(dev, vm, NULL);
+            vkDestroyShaderModule(dev, fm, NULL);
+        }
+    }
+
+    // ---- 顶点缓冲 + 信号量 ----
+    if (!fails) {
+        const float verts[6] = { -1.f, -1.f,  1.f, -1.f,  0.f, 1.f };
+        VkBufferCreateInfo bi = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+        bi.size = sizeof verts; bi.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+        if (vkCreateBuffer(dev, &bi, NULL, &o.vb) != VK_SUCCESS) { EMIT9("❌ 建顶点缓冲失败"); fails++; }
+        else {
+            VkMemoryRequirements mr; vkGetBufferMemoryRequirements(dev, o.vb, &mr);
+            VkMemoryAllocateInfo mi = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+            mi.allocationSize = mr.size; mi.memoryTypeIndex = dm_ohos_heap_mem_type();
+            void *mp = NULL;
+            if (!(mr.memoryTypeBits & (1u << dm_ohos_heap_mem_type()))) { EMIT9("❌ 顶点缓冲的 memoryTypeBits 不含统一内存类型"); fails++; }
+            else if (vkAllocateMemory(dev, &mi, NULL, &o.vbm) != VK_SUCCESS) { EMIT9("❌ 分配顶点缓冲内存失败"); fails++; }
+            else if (vkBindBufferMemory(dev, o.vb, o.vbm, 0) != VK_SUCCESS) { EMIT9("❌ 绑定顶点缓冲失败"); fails++; }
+            else if (vkMapMemory(dev, o.vbm, 0, sizeof verts, 0, &mp) != VK_SUCCESS) { EMIT9("❌ 映射顶点缓冲失败"); fails++; }
+            else { memcpy(mp, verts, sizeof verts); vkUnmapMemory(dev, o.vbm); }
+        }
+    }
+    if (!fails) {
+        VkSemaphoreCreateInfo si = { VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
+        if (vkCreateSemaphore(dev, &si, NULL, &o.sem_avail) != VK_SUCCESS ||
+            vkCreateSemaphore(dev, &si, NULL, &o.sem_done) != VK_SUCCESS) {
+            EMIT9("❌ 建信号量失败"); fails++;
+        }
+    }
+    if (fails) { EMIT9("===== 失败 ====="); os_teardown(&o); *p = 0; return fails; }
+
+    // ---- 出 60 帧，量 present 间隔 ----
+    {
+        const int FRAMES = 60;
+        uint64_t best = ~0ull, worst = 0, sum = 0; int got = 0; uint64_t prev = 0;
+        VkQueue q = dm_ohos_vk_queue();
+        VkCommandPool pool = dm_ohos_vk_pool();
+        for (int f = 0; f < FRAMES && !fails; f++) {
+            uint32_t idx = 0;
+            VkResult r = vkAcquireNextImageKHR(dev, o.sc, UINT64_MAX, o.sem_avail, VK_NULL_HANDLE, &idx);
+            if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) { EMIT9("❌ 第 %d 帧取图失败 VkResult=%d", f, (int)r); fails++; break; }
+            if (idx > 7) idx = 0;
+            VkCommandBuffer cb = VK_NULL_HANDLE;
+            VkCommandBufferAllocateInfo ai = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+            ai.commandPool = pool; ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY; ai.commandBufferCount = 1;
+            if (vkAllocateCommandBuffers(dev, &ai, &cb) != VK_SUCCESS) { EMIT9("❌ 取命令缓冲失败"); fails++; break; }
+            VkCommandBufferBeginInfo bi = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+            bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+            vkBeginCommandBuffer(cb, &bi);
+            {
+                os_ctx tmp = o; tmp.fb[0] = o.fb[idx];     // 本帧用第 idx 张
+                rec_os_draw(cb, &tmp);
+            }
+            vkEndCommandBuffer(cb);
+            VkPipelineStageFlags wait = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+            VkSubmitInfo si = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
+            si.waitSemaphoreCount = 1; si.pWaitSemaphores = &o.sem_avail; si.pWaitDstStageMask = &wait;
+            si.commandBufferCount = 1; si.pCommandBuffers = &cb;
+            si.signalSemaphoreCount = 1; si.pSignalSemaphores = &o.sem_done;
+            if (vkQueueSubmit(q, 1, &si, NULL) != VK_SUCCESS) { EMIT9("❌ 第 %d 帧提交失败", f); fails++; break; }
+            VkPresentInfoKHR pi = { VK_STRUCTURE_TYPE_PRESENT_INFO_KHR };
+            pi.waitSemaphoreCount = 1; pi.pWaitSemaphores = &o.sem_done;
+            pi.swapchainCount = 1; pi.pSwapchains = &o.sc; pi.pImageIndices = &idx;
+            uint64_t ts = ns_now2();
+            r = vkQueuePresentKHR(o.qpresent, &pi);
+            vkQueueWaitIdle(q);                            // 探针：每帧等干净，测的是"节拍上限"
+            vkFreeCommandBuffers(dev, pool, 1, &cb);
+            if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) { EMIT9("❌ 第 %d 帧 present 失败 VkResult=%d", f, (int)r); fails++; break; }
+            if (prev) {
+                uint64_t dt = ts - prev;
+                if (dt < best) best = dt;
+                if (dt > worst) worst = dt;
+                sum += dt; got++;
+            }
+            prev = ts;
+        }
+        if (got) {
+            double avg = (double)sum / (double)got;
+            EMIT9("present %d 帧：间隔 最小 %.2f ms / 平均 %.2f ms / 最大 %.2f ms（约 %.1f fps）",
+                  got, (double)best / 1e6, avg / 1e6, (double)worst / 1e6, 1e9 / avg);
+            if (avg > 0 && (double)worst > avg * 2.0)
+                EMIT9("⚠ 最大间隔是平均的两倍以上 —— 节拍有抖动（下一步接 OH_DisplaySoloist 再看）");
+            else EMIT9("✅ 节拍稳定（最大间隔未超平均两倍）");
+        } else { EMIT9("❌ 一帧都没出成"); fails++; }
+    }
+
+    os_teardown(&o);
+    EMIT9("");
+    EMIT9("===== 3.3-A %s：失败 %d 项（总耗时 %llums）=====",
+          fails ? "未全通过" : "全部通过", fails, (unsigned long long)(ms_now() - t0));
+    if (!fails) EMIT9("结论：XComponent → VkSurfaceKHR → swapchain → present 这条链通了；屏幕上应能看到三角形");
+    *p = 0;
+    #undef EMIT9
     return fails;
 }

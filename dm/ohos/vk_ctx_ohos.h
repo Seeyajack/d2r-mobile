@@ -32,6 +32,11 @@ VkDevice         dm_ohos_vk_device(void);
 uint32_t         dm_ohos_vk_qfam(void);
 VkQueue          dm_ohos_vk_queue(void);
 VkCommandPool    dm_ohos_vk_pool(void);       // 共享命令池（回放层要自己录一段多命令的缓冲）
+
+// 有队列的族（真机实测：**图形族不支持 present**，得用另一个族来提交出图）
+uint32_t         dm_ohos_vk_qfam_count(void);
+uint32_t         dm_ohos_vk_qfam_at(uint32_t i);      // 第 i 个族的族号
+VkQueue          dm_ohos_vk_queue_at(uint32_t i);     // 第 i 个族的队列
 const char      *dm_ohos_vk_err(void);        // 创建失败的原因（没失败就是空串）
 const char      *dm_ohos_vk_devname(void);
 

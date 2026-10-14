@@ -54,6 +54,12 @@ struct Index {
         .fontSize(16)
         .fontWeight(FontWeight.Bold)
 
+      // 出图用的表面（阶段 4）：ArkUI 把 OHNativeWindow 交给 libdmprobe，原生侧再建 VkSurfaceKHR。
+      // 不点"出图"按钮时它只是一块空白区域。
+      XComponent({ id: 'dmvk', type: XComponentType.SURFACE, libraryname: 'dmprobe' })
+        .width('100%')
+        .height(220)
+
       // ---- 按钮区（可滚动）----
       Scroll() {
         Column({ space: 8 }) {
@@ -168,6 +174,17 @@ struct Index {
               try {
                 const ctx = getContext(this) as common.UIAbilityContext;
                 this.result = dmprobe.runVkPsoCache(ctx.filesDir);
+              } catch (err) {
+                this.result = '调用原生模块失败：' + JSON.stringify(err);
+              }
+            })
+
+          Button('出图（3.3-A：XComponent→swapchain→上屏）')
+            .width('100%')
+            .onClick(() => {
+              try {
+                const ctx = getContext(this) as common.UIAbilityContext;
+                this.result = dmprobe.runVkOnScreen(ctx.filesDir);
               } catch (err) {
                 this.result = '调用原生模块失败：' + JSON.stringify(err);
               }

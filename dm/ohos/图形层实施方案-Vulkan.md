@@ -219,6 +219,35 @@ Vulkan 版）+ 渲染通道（传统 renderPass）+ 绘制（顶点缓冲走 3.1
 
 **回归**：Vulkan 冒烟 / 3.1-C / 3.2 各 0 败（并**按之前出错的顺序**复跑，确认顺序无关）。
 
+#### 3.3-A 出图 —— 真机通过（2026-10-15 凌晨）
+
+`vk_backend_onscreen`（按钮「出图（3.3-A：XComponent→swapchain→上屏）」）：ArkUI 的 XComponent
+给出 `OHNativeWindow` → `vkCreateSurfaceOHOS` → swapchain → 画 → present，**0 项失败、650 ms**：
+
+| 项 | 读数 |
+|---|---|
+| XComponent 窗口 | 1232×770 |
+| 选用格式 / 呈现模式 | `VK_FORMAT_R8G8B8A8_UNORM`（37）/ `FIFO`（2） |
+| 交换链 | 4 张图像 |
+| present 间隔 | **节拍稳定**（最大间隔未超平均两倍） |
+
+**⭐ 踩到并修掉的一个真坑（值得记）**：首跑时 `vkGetPhysicalDeviceSurfaceSupportKHR` 对**所有**
+队列族都返回"不支持 present"。根因是**实例只开了 `VK_OHOS_surface`、没开它依赖的 `VK_KHR_surface`**——
+`vkCreateSurfaceOHOS` 照样成功，但 surface 相关查询全是未定义行为（真机表现：一律"不支持"）。
+**两个实例扩展都要开**。这是铁律"先验平台能力再推理"的又一次兑现：不是设备缺能力，是我们少开了一个开关。
+
+**顺带的结构性改动**：共享上下文现在**给每个有队列的族都建一条队列**（原先只建图形族那条）。
+这台设备只有一个族（修好上面的坑后它就支持 present 了），但"图形族不支持 present"在别的设备上是常态，
+回放层将来要用图形族渲染、另一个族 present——这个结构现在就铺好。
+
+**新增**：`dm/ohos/vk_surface_ohos.{c,h}`（对标苹果侧的 `front_metal_layer`）；探针页面加
+`XComponent`（SURFACE 型，`libraryname: 'dmprobe'`）。
+**注意**：`vulkan.h` 只有在定义了 `VK_USE_PLATFORM_OHOS` 之后才引入 `vulkan_ohos.h`——
+忘了这个宏，`VkSurfaceCreateInfoOHOS` / `vkCreateSurfaceOHOS` 都看不见。
+
+**本步未做**：`OH_DisplaySoloist` 可变帧率节拍（下一步 3.3-B）；与回放层合流
+（现在出图走的是探针自己的最小管线，没走 `nvn_vk_exec`）。
+
 ## 四、鸿蒙 NEXT 特有游戏机制的接入点（按阶段落位）
 
 | 机制 | 是什么 | 落在哪个阶段 |

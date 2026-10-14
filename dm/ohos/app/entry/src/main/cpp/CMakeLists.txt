@@ -23,6 +23,8 @@ add_library(dmprobe SHARED
     ${DM_DIR}/ohos/vk_backend.c
     # 阶段 3 的共享 Vulkan 上下文 + 客体堆预留（零拷贝的地基；见 vk_ctx_ohos.h 顶部的理由）
     ${DM_DIR}/ohos/vk_ctx_ohos.c
+    # 阶段 4 的出图地基：XComponent 的 OHNativeWindow → VkSurfaceKHR
+    ${DM_DIR}/ohos/vk_surface_ohos.c
     # 阶段 3 第一步的池模块：鸿蒙侧回放层的第一个文件（对标 nvn_mtl.m 的池那部分）
     ${DM_DIR}/gfx/nvn/nvn_vk.c
     # 宿主单测跑测框架 + 统一日志（框架靠 dlopen 去载入各单测 .so，所以它自己很薄）
@@ -45,7 +47,8 @@ target_include_directories(dmprobe PRIVATE
 
 # 官方要求：用 NAPI 要链 libace_napi.z.so；打 hilog 要链 libhilog_ndk.z.so；
 # 图形层能力探测要链 libvulkan.so（NDK sysroot 里就有）。
-target_link_libraries(dmprobe PUBLIC libace_napi.z.so libhilog_ndk.z.so libvulkan.so)
+# XComponent（出图那一步要拿 OHNativeWindow）在 libace_ndk.z.so 里。
+target_link_libraries(dmprobe PUBLIC libace_napi.z.so libace_ndk.z.so libhilog_ndk.z.so libvulkan.so)
 
 # ---- 宿主单测：每个单测一个 .so（由 tools/gen_host_tests.py 从上游 Makefile 生成）----
 # 结构照上游"每个单测一个可执行文件"。跑测框架按名字 dlopen 它们、取各自的 main 来调。
