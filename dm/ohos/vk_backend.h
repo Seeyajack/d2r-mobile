@@ -69,3 +69,10 @@ int     vk_backend_memprobe(char *out, size_t cap);
 // 全部在探针内，不动任何上游文件。返回 0 = 全过。
 // Phase 3 step 1 prototype: the pool zero-copy path, entirely inside the probe (no upstream changes).
 int     vk_backend_poolproto(char *out, size_t cap);
+
+// 阶段 3 第一步（3.1-B）：**客体堆预留（真实尺寸）**。走 `dm/ohos/vk_ctx_ohos.c` 的共享上下文 +
+// `dm_ohos_heap_reserve()`（也就是 `hle_svc.c` 的 `mem_init` 在 `DM_VK_HEAP=1` 时会走的那条路）：
+// 按客体堆的实际规模（4 GB）预留，再从预留里切两个池、绑 `VkBuffer`、让 GPU 搬运并逐字节比对。
+// Phase 3 step 1 (3.1-B): reserve the guest heap at its real size through the shared context and
+// verify that pools carved out of it are really readable/writable by the GPU.
+int     vk_backend_heapreserve(char *out, size_t cap);

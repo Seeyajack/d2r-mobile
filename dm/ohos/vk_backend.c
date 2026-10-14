@@ -9,6 +9,7 @@
 
 #include "dm_log.h"
 #include "tri_shaders.h"
+#include "vk_ctx_ohos.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -939,5 +940,135 @@ int vk_backend_poolproto(char *out, size_t cap) {
         EMIT4("结论：池切片（VkBuffer 绑非零偏移）+ 线性设备地址 + GPU 读写全部成立 ⇒ 3.1-B/C 可照此实现");
     *p = 0;
     #undef EMIT4
+    return fails;
+}
+
+// ================= 阶段 3 第一步（3.1-B）：客体堆 = Vulkan 内存 =================
+// 3.1-A 在「模拟客体堆」上验了机制；这一步验**真实尺寸**：按客体堆的实际规模（4 GB）预留，
+// 再从预留里切两个池、绑 VkBuffer、让 GPU 搬运并逐字节比对。
+// 走的是 dm/ohos/vk_ctx_ohos.c 的**共享上下文 + dm_ohos_heap_reserve()**——
+// 也就是 hle_svc.c 的 mem_init 在 DM_VK_HEAP=1 时会走的那条路（同一份代码，不是复制品）。
+// 3.1-A verified the mechanism on a simulated heap; this verifies the real size, through the very code
+// path hle_svc.c takes when DM_VK_HEAP=1.
+int vk_backend_heapreserve(char *out, size_t cap) {
+    if (!out || cap < 256) return -1;
+    char *p = out, *end = out + cap - 1;
+    int fails = 0;
+    uint64_t t0 = ms_now();
+    #define EMIT5(...) do { int _n = snprintf(p, (size_t)(end - p) + 1, __VA_ARGS__); \
+                            if (_n > 0) { p += _n; if (p > end) p = end; } \
+                            dm_log_printf(__VA_ARGS__); } while (0)
+
+    EMIT5("=== 阶段 3 第一步（3.1-B）：客体堆预留（真实尺寸）===");
+    EMIT5("走共享上下文 + dm_ohos_heap_reserve()——就是 hle_svc.c 在 DM_VK_HEAP=1 时走的那条路");
+
+    const uint64_t HEAP = 4ull << 30;      // 与 hle_svc.c 的 g_heap_cap（RESERVE − 1 GB）一致
+    uint64_t t1 = ms_now();
+    void *heap = dm_ohos_heap_reserve(HEAP);
+    if (!heap) {
+        EMIT5("❌ 预留失败：%s", dm_ohos_vk_err());
+        EMIT5("===== 失败 ====="); *p = 0; return 1;
+    }
+    EMIT5("设备：%s", dm_ohos_vk_devname());
+    EMIT5("① 客体堆预留：%llu MiB，CPU 映射地址 %p，耗时 %llums",
+          (unsigned long long)(HEAP >> 20), heap, (unsigned long long)(ms_now() - t1));
+
+    VkDevice dev = dm_ohos_vk_device();
+    VkDeviceMemory hm = dm_ohos_heap_memory();
+    if (!dev || !hm) {
+        EMIT5("❌ 共享上下文没给出设备/内存"); EMIT5("===== 失败 ====="); *p = 0; return 1;
+    }
+
+    // 池：模拟游戏从堆的中间切出两块（偏移 1 GiB 与 1 GiB + 64 MiB）
+    typedef struct { const char *name; VkDeviceSize off, sz; VkBuffer buf; uint64_t gpu, delta; } pool_ent_;
+    pool_ent_ pool[2] = {
+        { "池A", 1ull << 30,                   4ull << 20, NULL, 0, 0 },
+        { "池B", (1ull << 30) + (64ull << 20), 4ull << 20, NULL, 0, 0 },
+    };
+    PFN_vkGetBufferDeviceAddress pGetBDA =
+        (PFN_vkGetBufferDeviceAddress)vkGetDeviceProcAddr(dev, "vkGetBufferDeviceAddress");
+
+    EMIT5("② 从预留里切两个池（偏移 1 GiB / 1 GiB+64 MiB），各绑一个 VkBuffer");
+    for (int i = 0; i < 2; i++) {
+        VkBufferCreateInfo bi = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+        bi.size = pool[i].sz;
+        bi.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                   VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+        if (vkCreateBuffer(dev, &bi, NULL, &pool[i].buf) != VK_SUCCESS) {
+            EMIT5("  ❌ %s：建缓冲失败", pool[i].name); fails++; continue;
+        }
+        VkMemoryRequirements mr;
+        vkGetBufferMemoryRequirements(dev, pool[i].buf, &mr);
+        if (pool[i].off % mr.alignment) {
+            EMIT5("  ❌ %s：偏移 %llu 不是 alignment %llu 的整数倍",
+                  pool[i].name, (unsigned long long)pool[i].off, (unsigned long long)mr.alignment);
+            fails++; continue;
+        }
+        VkResult r = vkBindBufferMemory(dev, pool[i].buf, hm, pool[i].off);
+        if (r != VK_SUCCESS) {
+            EMIT5("  ❌ %s：绑到预留偏移 %llu 失败（VkResult=%d）",
+                  pool[i].name, (unsigned long long)pool[i].off, (int)r);
+            fails++; continue;
+        }
+        uint64_t cpu = (uint64_t)(uintptr_t)heap + pool[i].off;
+        if (pGetBDA) {
+            VkBufferDeviceAddressInfo ai = { VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO };
+            ai.buffer = pool[i].buf;
+            pool[i].gpu = pGetBDA(dev, &ai);
+            pool[i].delta = (uint64_t)((int64_t)pool[i].gpu - (int64_t)cpu);
+        }
+        EMIT5("  ✅ %s：偏移 %llu，CPU %p，GPU %#llx，GPU−CPU = %lld",
+              pool[i].name, (unsigned long long)pool[i].off, (void *)(uintptr_t)cpu,
+              (unsigned long long)pool[i].gpu, (long long)(int64_t)pool[i].delta);
+    }
+
+    EMIT5("③ 线性不变式");
+    if (pool[0].buf && pool[1].buf) {
+        if (pool[0].delta == pool[1].delta)
+            EMIT5("  ✅ 两池 GPU−CPU 差相同（%lld）", (long long)(int64_t)pool[0].delta);
+        else {
+            EMIT5("  ❌ 两池 GPU−CPU 差不同（%lld vs %lld）",
+                  (long long)(int64_t)pool[0].delta, (long long)(int64_t)pool[1].delta);
+            fails++;
+        }
+    } else { EMIT5("  ⚠ 有池没建起来"); fails++; }
+
+    EMIT5("④ CPU 写池 A → GPU copy → CPU 读池 B 逐字节比对");
+    if (pool[0].buf && pool[1].buf) {
+        const VkDeviceSize N = 1u << 20;
+        uint8_t *a = (uint8_t *)heap + pool[0].off;
+        uint8_t *b = (uint8_t *)heap + pool[1].off;
+        for (VkDeviceSize i = 0; i < N; i++) a[i] = (uint8_t)(i * 31u + 5u);
+        memb_copy_pack pk = { pool[0].buf, pool[1].buf, N };
+        uint64_t t2 = ms_now();
+        if (dm_ohos_vk_oneshot(rec_copy_buf, &pk) != 0) { EMIT5("  ❌ copy 提交失败"); fails++; }
+        else {
+            VkDeviceSize bad = 0, first = (VkDeviceSize)-1;
+            for (VkDeviceSize i = 0; i < N; i++)
+                if (b[i] != (uint8_t)(i * 31u + 5u)) {
+                    if (first == (VkDeviceSize)-1) first = i;
+                    bad++;
+                }
+            if (bad) {
+                EMIT5("  ❌ %llu 字节里 %llu 个不符（首个在偏移 %llu）",
+                      (unsigned long long)N, (unsigned long long)bad, (unsigned long long)first);
+                fails++;
+            } else {
+                EMIT5("  ✅ %llu 字节全部一致（%llums）", (unsigned long long)N,
+                      (unsigned long long)(ms_now() - t2));
+            }
+        }
+    }
+
+    for (int i = 0; i < 2; i++) if (pool[i].buf) vkDestroyBuffer(dev, pool[i].buf, NULL);
+    dm_ohos_heap_release();
+
+    EMIT5("");
+    EMIT5("===== 3.1-B %s：失败 %d 项（总耗时 %llums）=====",
+          fails ? "未全通过" : "全部通过", fails, (unsigned long long)(ms_now() - t0));
+    if (!fails)
+        EMIT5("结论：真实尺寸的客体堆预留成立，池切片可被 GPU 读写 ⇒ hle_svc.c 的分叉可照此接线");
+    *p = 0;
+    #undef EMIT5
     return fails;
 }

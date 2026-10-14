@@ -23,6 +23,23 @@
 // (read on a real device: 6 GB succeeds, 7 GB fails), so it cannot be made any wider --
 // with an 8 GB reservation, builds from developer accounts that cannot sign that entitlement (free accounts) would exit at this step.
 #define RESERVE (5ull << 30)
+// 鸿蒙：客体堆可以改成 **Vulkan 分配的内存**（图形层零拷贝的前提，见 dm/ohos/图形层实施方案-Vulkan.md
+// 阶段 3）。那时堆不再落在预留块内——预留块只剩「前缀 256 MB + 别名 512 MB + 栈 256 MB」= 1 GB，
+// 堆有它自己的地址（由 Vulkan 给，`I_HeapAddr` / `SetHeapSize` 照常报给游戏）。
+// **缺省关闭**（`DM_VK_HEAP=1` 才开）：宿主还没能整批链接进 App，这条路没法在真机上验证，
+// 所以先让它默认走原路——改错了也影响不到现有行为。苹果侧逐字符不变（g_heap_vk 恒为 0）。
+// On HarmonyOS the guest heap may be Vulkan-allocated (the zero-copy prerequisite of the graphics
+// layer). It then lives outside the reservation, which shrinks to 1 GB, and gets its own address from
+// Vulkan. Off by default (DM_VK_HEAP=1 enables it): the host is not linked into the app yet, so this
+// path cannot be verified on a device -- defaulting to the old path leaves existing behaviour intact.
+// The Apple side is byte-for-byte unchanged (g_heap_vk is always 0 there).
+static int g_heap_vk;              // 客体堆是否来自 Vulkan（0 = 原路：预留块内的匿名内存） | heap from Vulkan? (0 = the old path)
+static size_t as_reserve(void) { return g_heap_vk ? (RESERVE - 0x40000000) : RESERVE; }
+#if defined(__OHOS__)
+// 鸿蒙侧的客体堆预留（dm/ohos/vk_ctx_ohos.c）：Vulkan 分配 + 映射，返回 CPU 地址。
+// 这里只声明，不包含它的头——上游文件不该依赖平台头（苹果构建也编得到这一行之外的代码）。
+void *dm_ohos_heap_reserve(uint64_t size);
+#endif
 static uint8_t *g_as;              // ASLR 区基址 = 整块 | ASLR region base = the whole block
 static uint8_t *g_heap; static size_t g_heap_cur, g_heap_cap; static int g_heap_rejects;
 // 地址段整个落在客体堆当前已开放（可读写）的范围内：这种读不用陷内核核对，直接 memcpy（diag.c tk_rd 等每拍读客体内存的地方用）
@@ -39,6 +56,19 @@ static void mem_init(void) {
     // Fixed partition (all inside the reserved block): alias 512MB, stack 256MB, heap the rest starting at 2GB
     g_alias = g_as + 0x10000000; g_alias_cap = 0x20000000;
     g_stack = g_as + 0x30000000; g_stack_cap = 0x10000000;
+#if defined(__OHOS__)
+    // DM_VK_HEAP=1：堆改由 Vulkan 分配（零拷贝的前提）。别名区 / 栈区仍在上面的预留块里，
+    // 所以只有堆搬了出去——`as_reserve()` 会把报给 SDK 的区间跟着缩到 1 GB。
+    if (getenv("DM_VK_HEAP")) {
+        g_heap = (uint8_t *)dm_ohos_heap_reserve(RESERVE - 0x40000000);
+        if (!g_heap) die("reserve guest heap (Vulkan)：dm_ohos_heap_reserve 失败");
+        g_heap_cap = RESERVE - 0x40000000;
+        g_heap_vk = 1;
+        LOG("guest AS %p +%#llx（别名 %p 栈 %p）  heap **Vulkan** %p +%#zx",
+            g_as, (unsigned long long)(RESERVE - 0x40000000), g_alias, g_stack, g_heap, g_heap_cap);
+        return;
+    }
+#endif
     g_heap  = g_as + 0x40000000; g_heap_cap  = RESERVE - 0x40000000;   // 4 GB，容得下游戏那一整块约 3.2 GB 的堆 | 4 GB, enough to hold the game's single heap block of about 3.2 GB
     LOG("guest AS %p +%#llx  heap %p alias %p stack %p", g_as, (unsigned long long)RESERVE, g_heap, g_alias, g_stack);
 }
@@ -95,7 +125,7 @@ HLE_FORCE("_ZN2nn3mem17StandardAllocator8AllocateEmm", "照原版分配，只在
 
 // 内存账（memstat.m）用：客体地址空间整块范围（未初始化时 base = NULL）
 // For memory accounting (memstat.m): the range of the whole guest address space block (base = NULL when not initialized)
-void svc_guest_range(uint8_t **base, size_t *size) { *base = g_as; *size = RESERVE; }
+void svc_guest_range(uint8_t **base, size_t *size) { *base = g_as; *size = as_reserve(); }
 
 enum { I_CoreMask=0, I_PriorityMask=1, I_AliasAddr=2, I_AliasSize=3, I_HeapAddr=4, I_HeapSize=5,
        I_TotalMem=6, I_UsedMem=7, I_DebuggerAttached=8, I_ResourceLimit=9, I_IdleTick=10, I_RandomEntropy=11,
@@ -135,8 +165,14 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         if (size > g_heap_cap) { LOG("SetHeapSize OOM: req %#zx > cap %#zx", size, g_heap_cap); regs[0] = 0xD401; return 0; }
         if (size + image_bytes() > app_pool()) { g_heap_rejects++; regs[0] = 0x10801; return 0; }   // 超出应用内存池：ResultLimitReached。游戏启动时按 2 MB 递减重试直到放得下（main+0x1b66184） | exceeds the application memory pool: ResultLimitReached. At startup the game retries in 2 MB decrements until it fits (main+0x1b66184)
         int rc = 0;
-        if (size > g_heap_cur) rc = mprotect(g_heap + g_heap_cur, size - g_heap_cur, PROT_READ | PROT_WRITE);
-        else if (size < g_heap_cur) rc = mprotect(g_heap + size, g_heap_cur - size, PROT_NONE);
+        // 原路（匿名预留）：堆是 PROT_NONE 预留的，要靠 mprotect 一段段开放。
+        // Vulkan 路：整块内存一分配就是已映射可读写的，没有"逐段开放"这回事，跳过。
+        // Old path: the heap is reserved PROT_NONE and opened piecewise with mprotect.
+        // Vulkan path: the whole block is mapped read-write on allocation, so there is nothing to open.
+        if (!g_heap_vk) {
+            if (size > g_heap_cur) rc = mprotect(g_heap + g_heap_cur, size - g_heap_cur, PROT_READ | PROT_WRITE);
+            else if (size < g_heap_cur) rc = mprotect(g_heap + size, g_heap_cur - size, PROT_NONE);
+        }
         if (g_flag.svc) LOG("SetHeapSize %#zx -> base %p mprotect=%d errno=%d", size, g_heap, rc, errno);
         { static int said; if (!said && size) { said = 1; LOG("SetHeapSize：首次设堆成功 %zu MB（应用内存池 %llu MB − 映像 %zu MB；此前被拒 %d 次）", size >> 20, (unsigned long long)(app_pool() >> 20), image_bytes() >> 20, g_heap_rejects); } }
         g_heap_cur = size;
@@ -174,10 +210,15 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         int k;
         if (a >= g_heap && a < g_heap + g_heap_cur) { base=(uint64_t)g_heap; size=g_heap_cur; state=5/*Heap*/; perm=3; }
         else if ((k = map_find(addr, 1))) { base=g_map[k-1].base; size=g_map[k-1].size; state=g_map[k-1].state; perm=3; }
-        else if (a >= g_as && a < g_as + RESERVE) {   // 空闲：到相邻映射/堆边界为止 | free: up to the adjacent mapping/heap boundary
-            uint64_t lo = (uint64_t)g_as, hi = (uint64_t)g_as + RESERVE;
-            if (a >= g_heap) lo = (uint64_t)g_heap + g_heap_cur;
-            else if (hi > (uint64_t)g_heap) hi = (uint64_t)g_heap;
+        else if (a >= g_as && a < g_as + as_reserve()) {   // 空闲：到相邻映射/堆边界为止 | free: up to the adjacent mapping/heap boundary
+            uint64_t lo = (uint64_t)g_as, hi = (uint64_t)g_as + as_reserve();
+            // 原路：堆在预留块内，空闲区间要在堆边界处截断。Vulkan 路：堆在预留块外，不参与这里。
+            // Old path: the heap sits inside the reservation, so free space stops at its boundary.
+            // Vulkan path: the heap is outside the reservation and plays no part here.
+            if (!g_heap_vk) {
+                if (a >= g_heap) lo = (uint64_t)g_heap + g_heap_cur;
+                else if (hi > (uint64_t)g_heap) hi = (uint64_t)g_heap;
+            }
             for (int i = 0; i < g_nmap; i++) {
                 uint64_t e = g_map[i].base + g_map[i].size;
                 if (e <= addr && e > lo) lo = e;
@@ -229,7 +270,7 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         case I_PriorityMask: v = 0; break;
         case I_AliasAddr: v = (uint64_t)g_alias; break;   case I_AliasSize: v = g_alias_cap; break;
         case I_HeapAddr:  v = (uint64_t)g_heap;  break;   case I_HeapSize:  v = g_heap_cap;  break;
-        case I_AslrAddr:  v = (uint64_t)g_as;    break;   case I_AslrSize:  v = RESERVE;     break;
+        case I_AslrAddr:  v = (uint64_t)g_as;    break;   case I_AslrSize:  v = as_reserve();     break;
         case I_StackAddr: v = (uint64_t)g_stack; break;   case I_StackSize: v = g_stack_cap; break;
         case I_TotalMem: case I_TotalNonSys: v = app_pool(); break;
         case I_UsedMem:  case I_UsedNonSys:  v = g_heap_cur + image_bytes(); break;   // 已用 = 堆 + 映像，与 SetHeapSize 的核对同一口径（原先写死 64 MB）。sdk 的 QueryMemoryInfo（sdk+0x34f4ec）只拿它算「程序占用」那一格； | Used = heap + image, the same accounting as the check in SetHeapSize (it used to be hard-coded to 64 MB). The sdk's QueryMemoryInfo (sdk+0x34f4ec) only uses it to compute the "program usage" field;

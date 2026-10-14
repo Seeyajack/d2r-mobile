@@ -21,6 +21,8 @@ add_library(dmprobe SHARED
     napi_init.c
     # 阶段 1 的 Vulkan 冒烟后端（离屏：清屏 + 读回逐像素验证；对标 dm/gfx/metal/mtl_backend）
     ${DM_DIR}/ohos/vk_backend.c
+    # 阶段 3 的共享 Vulkan 上下文 + 客体堆预留（零拷贝的地基；见 vk_ctx_ohos.h 顶部的理由）
+    ${DM_DIR}/ohos/vk_ctx_ohos.c
     # 宿主单测跑测框架 + 统一日志（框架靠 dlopen 去载入各单测 .so，所以它自己很薄）
     ${DM_DIR}/ohos/host_tests.c
     ${DM_DIR}/ohos/host_tests_gen.c   # 生成：单测清单（哪些 .so、叫什么名字）
