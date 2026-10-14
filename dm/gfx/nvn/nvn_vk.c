@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 // 池登记表。**刻意用"不持有缓冲的指针"那套**：上游 `pool_ent` 存的是不持有的 `id<MTLBuffer>`，
@@ -170,7 +171,15 @@ static nvn_vk_shader_fn g_shader_fn;
 void nvn_vk_set_shader_resolver(nvn_vk_shader_fn fn) { g_shader_fn = fn; }
 
 static nvn_vk_stats_t g_st;
-void nvn_vk_stats_get(nvn_vk_stats_t *out) { if (out) *out = g_st; }
+// 载入字节数单独放：它由"打开缓存"决定，**不能被每帧的 stats_reset 清掉**
+// （踩过的坑：原先它在 g_st 里，frame_begin 一 reset 就变 0，判据误报"没载入"）
+static uint64_t g_pso_cache_blob;
+
+void nvn_vk_stats_get(nvn_vk_stats_t *out) {
+    if (!out) return;
+    *out = g_st;
+    out->pso_cache_blob = g_pso_cache_blob;
+}
 void nvn_vk_stats_reset(void) { memset(&g_st, 0, sizeof g_st); }
 
 // ---- 逐通道 GPU 计时（时间戳查询）。设备的 timestampValidBits / timestampPeriod 决定可不可用 ----
@@ -434,6 +443,82 @@ typedef struct {
 typedef struct { vk_pso_key k; VkPipeline pl; VkPipelineLayout lay; VkRenderPass rp; } vk_pso_ent;
 static vk_pso_ent *g_psos; static int g_npso, g_psocap;
 
+// ---- 管线缓存落盘（见 nvn_vk.h 的说明：Vulkan 特有，Metal 做不到运行时积累）----
+static char            g_pso_path[1024];
+static VkPipelineCache g_pso_cache;
+static uint64_t        g_pso_saved_built;   // 上次存盘时的 pso_built（有新管线才存，别每帧写盘）
+
+static uint64_t now_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
+int nvn_vk_pso_cache_enable(const char *path) {
+    VkDevice dev = dm_ohos_vk_device();
+    if (!dev) { set_err("共享上下文不可用：%s", dm_ohos_vk_err()); return -1; }
+    if (g_pso_cache) { vkDestroyPipelineCache(dev, g_pso_cache, NULL); g_pso_cache = VK_NULL_HANDLE; }
+    g_pso_path[0] = 0;
+    if (path && *path) {
+        snprintf(g_pso_path, sizeof g_pso_path, "%s", path);
+        g_pso_path[sizeof g_pso_path - 1] = 0;
+    }
+    // 盘上有就载入（热启动），没有就空着建（冷启动）
+    void *blob = NULL; size_t n = 0;
+    if (g_pso_path[0]) {
+        FILE *f = fopen(g_pso_path, "rb");
+        if (f) {
+            if (fseek(f, 0, SEEK_END) == 0) {
+                long sz = ftell(f);
+                if (sz > 0 && fseek(f, 0, SEEK_SET) == 0) {
+                    blob = malloc((size_t)sz);
+                    if (blob && fread(blob, 1, (size_t)sz, f) == (size_t)sz) n = (size_t)sz;
+                    else { free(blob); blob = NULL; }
+                }
+            }
+            fclose(f);
+        }
+    }
+    VkPipelineCacheCreateInfo ci = { VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO };
+    ci.initialDataSize = n; ci.pInitialData = blob;
+    VkResult r = vkCreatePipelineCache(dev, &ci, NULL, &g_pso_cache);
+    free(blob);
+    if (r != VK_SUCCESS) {
+        g_pso_cache = VK_NULL_HANDLE;
+        set_err("vkCreatePipelineCache 失败 VkResult=%d", (int)r);
+        return -1;
+    }
+    g_pso_cache_blob = n;
+    LOG("管线缓存：%s（%zu 字节）%s", n ? "热启动，已载入" : "冷启动（盘上还没有）", n,
+        g_pso_path[0] ? g_pso_path : "（不落盘）");
+    return 0;
+}
+
+static int pso_cache_save(void) {
+    VkDevice dev = dm_ohos_vk_device();
+    if (!dev || !g_pso_cache || !g_pso_path[0]) return -1;
+    size_t n = 0;
+    if (vkGetPipelineCacheData(dev, g_pso_cache, &n, NULL) != VK_SUCCESS || !n) return -1;
+    void *blob = malloc(n);
+    if (!blob) return -1;
+    if (vkGetPipelineCacheData(dev, g_pso_cache, &n, blob) != VK_SUCCESS) { free(blob); return -1; }
+    FILE *f = fopen(g_pso_path, "wb");
+    int ok = (f && fwrite(blob, 1, n, f) == n);
+    if (f) fclose(f);
+    free(blob);
+    LOG("管线缓存：存盘 %zu 字节 → %s", n, g_pso_path);
+    return ok ? 0 : -1;
+}
+
+void nvn_vk_pso_local_clear(void) {
+    VkDevice dev = dm_ohos_vk_device();
+    for (int i = 0; i < g_npso; i++) {
+        if (dev && g_psos[i].pl) vkDestroyPipeline(dev, g_psos[i].pl, NULL);
+        if (dev && g_psos[i].lay) vkDestroyPipelineLayout(dev, g_psos[i].lay, NULL);
+    }
+    g_npso = 0;
+}
+
 // ---- 回放状态（对标上游的 S）----
 static struct {
     int has_vp, has_sc;
@@ -503,6 +588,7 @@ static VkPipeline pso_get(vk_rt_ent *rt, VkPrimitiveTopology topo) {
     if (!k.fs_ctrl || !g_shader_fn(k.fs_ctrl, 1, &fs)) { set_err("片元着色器解析失败（控制段 %p）", k.fs_ctrl); return VK_NULL_HANDLE; }
 
     VkDevice dev = dm_ohos_vk_device();
+    uint64_t t_build = now_ns();     // 建管线的耗时（"落盘缓存"的判据就靠它）
     VkShaderModule vm = VK_NULL_HANDLE, fm = VK_NULL_HANDLE;
     VkPipelineLayout lay = VK_NULL_HANDLE;
     VkPipeline pl = VK_NULL_HANDLE;
@@ -576,13 +662,14 @@ static VkPipeline pso_get(vk_rt_ent *rt, VkPrimitiveTopology topo) {
         gi.pViewportState = &vps; gi.pRasterizationState = &rs; gi.pMultisampleState = &ms;
         gi.pDepthStencilState = &dss; gi.pColorBlendState = &cb; gi.pDynamicState = &ds;
         gi.layout = lay; gi.renderPass = rt->rp;
-        VkResult r = vkCreateGraphicsPipelines(dev, NULL, 1, &gi, NULL, &pl);
+        VkResult r = vkCreateGraphicsPipelines(dev, g_pso_cache, 1, &gi, NULL, &pl);
         if (r != VK_SUCCESS) { set_err("vkCreateGraphicsPipelines 失败 VkResult=%d", (int)r); goto fail_lay; }
     }
 
     if (g_npso == g_psocap) { g_psocap = g_psocap ? g_psocap * 2 : 64; g_psos = realloc(g_psos, (size_t)g_psocap * sizeof *g_psos); }
     g_psos[g_npso++] = (vk_pso_ent){ k, pl, lay, rt->rp };
     g_st.pso_built++;
+    g_st.pso_build_ns += now_ns() - t_build;
     vkDestroyShaderModule(dev, vm, NULL);
     vkDestroyShaderModule(dev, fm, NULL);
     return pl;
@@ -723,6 +810,11 @@ int nvn_vk_frame_end(void) {
         g_st.pass_gpu_ns[i] = ts_delta(g_ts_pass[i][0], g_ts_pass[i][1]);
     vkFreeCommandBuffers(dev, dm_ohos_vk_pool(), 1, &g_cb);
     g_cb = NULL;
+    // 有新管线才存盘（别每帧写盘）
+    if (g_st.pso_built != g_pso_saved_built) {
+        g_pso_saved_built = g_st.pso_built;
+        pso_cache_save();
+    }
     return 0;
 fail:
     vkFreeCommandBuffers(dev, dm_ohos_vk_pool(), 1, &g_cb);

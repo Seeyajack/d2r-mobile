@@ -74,6 +74,8 @@ typedef struct {
     uint64_t ops, ops_skipped;      // 走过的命令条数 / 未处理的条数（不静默）
     uint64_t draws, passes;         // 绘制次数 / 渲染通道数
     uint64_t pso_built, pso_hit;    // 新建管线数 / 命中缓存数
+    uint64_t pso_build_ns;          // 建管线累计耗时（着色器模块 + 管线创建）——"落盘缓存"的判据
+    uint64_t pso_cache_blob;        // 启动时从盘上载入的管线缓存字节数（0 = 冷启动）
     uint64_t bw_load, bw_store;     // 附件读入 / 写出字节（按通道尺寸 × 像素字节估算）
     uint64_t gpu_ns;                // 本帧 GPU 耗时（时间戳差值；0 = 设备不支持或没采到）
     uint64_t pass_gpu_ns[8];        // 逐通道 GPU 耗时（前 8 个通道）
@@ -81,6 +83,17 @@ typedef struct {
 } nvn_vk_stats_t;
 void nvn_vk_stats_get(nvn_vk_stats_t *out);
 void nvn_vk_stats_reset(void);
+
+// ---- 管线缓存落盘：**Vulkan 特有、Metal 做不到**的一项 ----
+// 建管线 = 驱动编译着色器，是首帧卡顿的主要来源。把 `VkPipelineCache` 存到盘上，第二次启动
+// 直接命中 ⇒ 零编译。上游 Metal 侧只有"离线 metallib + 预热清单"（构建期产物），
+// **做不到运行时积累**——这是鸿蒙侧可以比上游做得好的地方。
+//
+// path = 缓存文件路径（空串 = 关闭落盘）。文件不存在时按冷启动建缓存；存在则载入。
+// 每次提交后若有新管线，自动存盘。返回 0 = 成功。
+int  nvn_vk_pso_cache_enable(const char *path);
+// 诊断用：清空**内存里**的管线表（下次绘制会重新建管线，用来对照"冷 / 热"两次建管线的耗时）。
+void nvn_vk_pso_local_clear(void);
 
 // 当前渲染目标的 Vulkan 图像（读回 / 将来的出图用）。没设过渲染目标时返回 VK_NULL_HANDLE。
 // 通道结束时它处于 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL。

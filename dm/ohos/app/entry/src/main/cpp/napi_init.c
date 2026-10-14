@@ -189,6 +189,19 @@ static napi_value RunVkReplay(napi_env env, napi_callback_info info) {
     return ret;
 }
 
+static napi_value RunVkPsoCache(napi_env env, napi_callback_info info) {
+    // 管线缓存落盘：冷启动 vs 热启动，比建管线耗时。
+    char files_dir[1024];
+    Arg0String(env, info, files_dir, sizeof files_dir);
+    napi_value ret = NULL;
+    char *buf = (char *)malloc(VKSMOKE_BUF);
+    if (!buf) { napi_create_string_utf8(env, "内存不足", NAPI_AUTO_LENGTH, &ret); return ret; }
+    vk_backend_psocache(files_dir, buf, VKSMOKE_BUF);
+    napi_create_string_utf8(env, buf, NAPI_AUTO_LENGTH, &ret);
+    free(buf);
+    return ret;
+}
+
 static napi_value Init(napi_env env, napi_value exports) {
     napi_property_descriptor desc[] = {
         { "runProbes",      NULL, RunProbes,      NULL, NULL, NULL, napi_default, NULL },
@@ -201,6 +214,7 @@ static napi_value Init(napi_env env, napi_value exports) {
         { "runVkHeapReserve", NULL, RunVkHeapReserve, NULL, NULL, NULL, napi_default, NULL },
         { "runVkPoolMod",   NULL, RunVkPoolMod,   NULL, NULL, NULL, napi_default, NULL },
         { "runVkReplay",    NULL, RunVkReplay,    NULL, NULL, NULL, napi_default, NULL },
+        { "runVkPsoCache",  NULL, RunVkPsoCache,  NULL, NULL, NULL, napi_default, NULL },
     };
     napi_define_properties(env, exports, sizeof desc / sizeof desc[0], desc);
     return exports;

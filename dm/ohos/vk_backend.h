@@ -91,3 +91,9 @@ int     vk_backend_poolmod(char *out, size_t cap);
 // Phase 3 step 2: the minimal replay loop -- a hand-written NVN command stream replayed into Vulkan,
 // verified pixel by pixel. Shaders come through the resolver seam.
 int     vk_backend_replay(char *out, size_t cap);
+
+// **管线缓存落盘**（Vulkan 特有；Metal 做不到运行时积累）：同一段命令流跑两轮——
+// 冷启动（空缓存）vs 热启动（载入刚存盘的缓存），比建管线耗时。
+// 硬判据：热启动能从盘上载入缓存；软判据：建管线耗时"热 < 冷"（未观察到收益也如实报出）。
+// dir = 应用数据目录（缓存文件放它下面）。
+int     vk_backend_psocache(const char *dir, char *out, size_t cap);

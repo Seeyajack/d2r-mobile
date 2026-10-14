@@ -1232,30 +1232,24 @@ static uint8_t *wrec(uint8_t *p, uint32_t op, const void *payload, uint32_t plen
     return p + h.size;
 }
 
-int vk_backend_replay(char *out, size_t cap) {
-    if (!out || cap < 256) return -1;
-    char *p = out, *end = out + cap - 1;
-    int fails = 0;
-    uint64_t t0 = ms_now();
-    #define EMIT7(...) do { int _n = snprintf(p, (size_t)(end - p) + 1, __VA_ARGS__); \
-                            if (_n > 0) { p += _n; if (p > end) p = end; } \
-                            dm_log_printf(__VA_ARGS__); } while (0)
+// ---- 最小回放环境：客体堆 + 一个池 + 顶点/索引数据 + 手写命令流 ----
+// 3.2 与"管线缓存落盘"共用同一套环境，保证两次对照跑的是**同一段命令流**。
+static pool_t   g_pool;
+static tex_t    g_tex;
+static prog_t   g_prog;
+static uint8_t  g_stream[4096];
+static uint8_t *g_env_heap, *g_env_pool, *g_env_stream;
+static uint64_t g_env_stream_bytes;
 
-    EMIT7("=== 阶段 3 第二步（3.2）：回放层最小闭环 ===");
-    EMIT7("手写 NVN 命令流 → nvn_vk_exec 回放 → 离屏读回逐像素验证");
-
-    const uint64_t HEAP = 4ull << 30;
-    uint8_t *heap = (uint8_t *)dm_ohos_heap_reserve(HEAP);
-    if (!heap) { EMIT7("❌ 客体堆预留失败：%s", dm_ohos_vk_err()); EMIT7("===== 失败 ====="); *p = 0; return 1; }
+static int replay_env_build(char *err, size_t errcap) {
+    if (g_env_stream) return 0;                       // 已经建好（幂等：两轮对照共用）
+    uint8_t *heap = (uint8_t *)dm_ohos_heap_reserve(4ull << 30);
+    if (!heap) { snprintf(err, errcap, "客体堆预留失败：%s", dm_ohos_vk_err()); return -1; }
 
     // 一个池：顶点数据放在 +256，渲染目标的"存储"声明在 +4 MiB（图像自建分配，不用它，见 nvn_vk.c 的说明）
     const uint64_t POOL_SZ = 16ull << 20;
     uint8_t *pool_base = heap + (1ull << 30);
-    if (nvn_vk_pool_add(pool_base, POOL_SZ)) {
-        EMIT7("❌ 池登记失败：%s", nvn_vk_last_error()); EMIT7("===== 失败 ====="); *p = 0; return 1;
-    }
-    EMIT7("池：%p + %llu MiB（堆偏移 %#llx）", pool_base, (unsigned long long)(POOL_SZ >> 20),
-          (unsigned long long)(1ull << 30));
+    if (nvn_vk_pool_add(pool_base, POOL_SZ)) { snprintf(err, errcap, "池登记失败：%s", nvn_vk_last_error()); return -1; }
 
     // 顶点数据：和阶段 2 同一组三角形顶点（NDC，Vulkan 的 Y 向下 ⇒ 底边在上）
     const float verts[6] = { -1.f, -1.f,  1.f, -1.f,  0.f, 1.f };
@@ -1267,9 +1261,6 @@ int vk_backend_replay(char *out, size_t cap) {
     memcpy(ibuf, idx, sizeof idx);
 
     // 池对象 / 贴图对象 / 程序对象（都是 nvn_obj.h 的普通结构，探针自己填）
-    static pool_t g_pool;
-    static tex_t  g_tex;
-    static prog_t g_prog;
     g_pool.magic = MAGIC('P','O','O','L'); g_pool.mem = pool_base; g_pool.size = POOL_SZ;
     memset(&g_tex, 0, sizeof g_tex);
     g_tex.magic = MAGIC('T','E','X','0');
@@ -1284,9 +1275,7 @@ int vk_backend_replay(char *out, size_t cap) {
     g_prog.sd[1].control = (const void *)0x2;
     nvn_vk_set_shader_resolver(probe_shader_resolve);
 
-    // 手写命令流
-    static uint8_t stream[4096];
-    uint8_t *w = stream;
+    uint8_t *w = g_stream;
     {
         p_set_rt rt; memset(&rt, 0, sizeof rt);
         rt.n = 1; rt.color[0] = &g_tex;
@@ -1336,12 +1325,53 @@ int vk_backend_replay(char *out, size_t cap) {
         op_hdr eh = { OP_END, 8 };
         memcpy(w, &eh, sizeof eh); w += sizeof eh;
     }
-    EMIT7("命令流：%d 字节", (int)(w - stream));
+    g_env_heap = heap; g_env_pool = pool_base; g_env_stream = g_stream;
+    g_env_stream_bytes = (uint64_t)(w - g_stream);
+    return 0;
+}
+
+static void replay_env_free(void) {
+    if (!g_env_stream) return;
+    nvn_vk_pool_del(g_env_pool);
+    dm_ohos_heap_release();
+    g_env_stream = NULL; g_env_heap = NULL; g_env_pool = NULL;
+}
+
+static int replay_env_run(nvn_vk_stats_t *st) {
+    if (nvn_vk_frame_begin() != 0) return -1;
+    nvn_vk_exec(g_env_stream);
+    if (nvn_vk_frame_end() != 0) return -1;
+    if (st) nvn_vk_stats_get(st);
+    return 0;
+}
+
+int vk_backend_replay(char *out, size_t cap) {
+    if (!out || cap < 256) return -1;
+    char *p = out, *end = out + cap - 1;
+    int fails = 0;
+    uint64_t t0 = ms_now();
+    #define EMIT7(...) do { int _n = snprintf(p, (size_t)(end - p) + 1, __VA_ARGS__); \
+                            if (_n > 0) { p += _n; if (p > end) p = end; } \
+                            dm_log_printf(__VA_ARGS__); } while (0)
+
+    EMIT7("=== 阶段 3 第二步（3.2）：回放层最小闭环 ===");
+    EMIT7("手写 NVN 命令流 → nvn_vk_exec 回放 → 离屏读回逐像素验证");
+
+    char env_err[256] = "";
+    if (replay_env_build(env_err, sizeof env_err)) {
+        EMIT7("❌ %s", env_err); EMIT7("===== 失败 ====="); *p = 0; return 1;
+    }
+    EMIT7("池：%p + 16 MiB（堆偏移 %#llx）", g_env_pool, (unsigned long long)(1ull << 30));
+    EMIT7("命令流：%llu 字节", (unsigned long long)g_env_stream_bytes);
+
+    // 清掉内存里的管线表：本探针的判据是"新建管线应为 2"，**不能受前面跑过什么影响**。
+    // 踩过：先跑了「管线缓存落盘」探针，管线表已被填满 ⇒ 这里命中缓存 3 次、新建 0 条，判据误报。
+    nvn_vk_pso_local_clear();
 
     // 回放
     if (nvn_vk_frame_begin() != 0) { EMIT7("❌ 开始回放帧失败：%s", nvn_vk_last_error()); fails++; }
     else {
-        nvn_vk_exec(stream);
+        nvn_vk_exec(g_env_stream);
         if (nvn_vk_frame_end() != 0) { EMIT7("❌ 提交回放帧失败：%s", nvn_vk_last_error()); fails++; }
     }
 
@@ -1412,13 +1442,105 @@ int vk_backend_replay(char *out, size_t cap) {
         }
     }
 
-    nvn_vk_pool_del(pool_base);
-    dm_ohos_heap_release();
+    replay_env_free();
 
     EMIT7("");
     EMIT7("===== 3.2 %s：失败 %d 项（总耗时 %llums）=====",
           fails ? "未全通过" : "全部通过", fails, (unsigned long long)(ms_now() - t0));
     *p = 0;
     #undef EMIT7
+    return fails;
+}
+
+// ================= 管线缓存落盘（Vulkan 特有；Metal 做不到）=================
+// 建管线 = 驱动编译着色器，是首帧卡顿的主要来源。Vulkan 的 `VkPipelineCache` 可以序列化到盘上，
+// 第二次启动直接命中 ⇒ 零编译。上游 Metal 侧只有"离线 metallib + 预热清单"（构建期产物），
+// **做不到运行时积累**——这是鸿蒙侧能比上游做得好的地方。
+//
+// 判据分两层（都在同一段命令流上跑，排除变量）：
+//   硬判据：热启动能从盘上载入缓存（字节数 > 0）⇒ 落盘/载入这条链通了；
+//   软判据：建管线耗时"热 < 冷"⇒ 真的省了编译（如实报出，未观察到收益也照说）。
+int vk_backend_psocache(const char *dir, char *out, size_t cap) {
+    if (!out || cap < 256) return -1;
+    char *p = out, *end = out + cap - 1;
+    int fails = 0;
+    uint64_t t0 = ms_now();
+    #define EMIT8(...) do { int _n = snprintf(p, (size_t)(end - p) + 1, __VA_ARGS__); \
+                            if (_n > 0) { p += _n; if (p > end) p = end; } \
+                            dm_log_printf(__VA_ARGS__); } while (0)
+
+    EMIT8("=== 管线缓存落盘（Vulkan 特有；Metal 没有等价的持久化管线缓存）===");
+    EMIT8("同一段命令流跑两轮：冷启动（空缓存）vs 热启动（载入刚存的缓存），比建管线耗时");
+
+    char cache_path[1200];
+    snprintf(cache_path, sizeof cache_path, "%s/vk_pso_cache.bin", (dir && *dir) ? dir : ".");
+
+    char env_err[256] = "";
+    if (replay_env_build(env_err, sizeof env_err)) {
+        EMIT8("❌ %s", env_err); EMIT8("===== 失败 ====="); *p = 0; return 1;
+    }
+    EMIT8("命令流：%llu 字节；缓存文件：%s", (unsigned long long)g_env_stream_bytes, cache_path);
+
+    const int ROUNDS = 3;          // 每轮跑 3 遍，把编译耗时放大到能看清
+    uint64_t cold_ns = 0, hot_ns = 0, cold_built = 0, hot_built = 0, hot_blob = 0;
+
+    // ---- ① 冷启动：先把缓存文件删掉 ----
+    remove(cache_path);
+    if (nvn_vk_pso_cache_enable(cache_path) != 0) {
+        EMIT8("❌ 打开管线缓存失败：%s", nvn_vk_last_error()); fails++;
+    } else {
+        for (int i = 0; i < ROUNDS; i++) {
+            nvn_vk_pso_local_clear();                       // 清掉内存里的管线表 ⇒ 每次都要真的重建
+            nvn_vk_stats_t s;
+            if (replay_env_run(&s) != 0) { EMIT8("❌ 冷启动回放失败：%s", nvn_vk_last_error()); fails++; break; }
+            cold_ns += s.pso_build_ns;
+            cold_built += s.pso_built;
+            if (i == 0 && s.pso_cache_blob) { EMIT8("⚠ 冷启动居然载入了 %llu 字节（文件没删掉？）",
+                                                    (unsigned long long)s.pso_cache_blob); }
+        }
+        EMIT8("① 冷启动：建管线 %llu 条，累计耗时 %.3f ms（载入缓存 0 字节）",
+              (unsigned long long)cold_built, (double)cold_ns / 1e6);
+    }
+
+    // ---- ② 热启动：重新打开缓存（此时文件已由上一轮的 frame_end 自动存盘）----
+    nvn_vk_pso_local_clear();
+    if (nvn_vk_pso_cache_enable(cache_path) != 0) {
+        EMIT8("❌ 重新打开管线缓存失败：%s", nvn_vk_last_error()); fails++;
+    } else {
+        for (int i = 0; i < ROUNDS; i++) {
+            nvn_vk_pso_local_clear();
+            nvn_vk_stats_t s;
+            if (replay_env_run(&s) != 0) { EMIT8("❌ 热启动回放失败：%s", nvn_vk_last_error()); fails++; break; }
+            hot_ns += s.pso_build_ns;
+            hot_built += s.pso_built;
+            if (s.pso_cache_blob > hot_blob) hot_blob = s.pso_cache_blob;
+        }
+        EMIT8("② 热启动：建管线 %llu 条，累计耗时 %.3f ms（载入缓存 %llu 字节）",
+              (unsigned long long)hot_built, (double)hot_ns / 1e6, (unsigned long long)hot_blob);
+    }
+
+    // ---- 判据 ----
+    if (!cold_built || !hot_built) { EMIT8("❌ 有一轮没跑成，判据不成立"); fails++; }
+    else {
+        if (!hot_blob) { EMIT8("❌ 热启动没能从盘上载入缓存 —— **落盘/载入这条链没通**"); fails++; }
+        else EMIT8("✅ 热启动从盘上载入了 %llu 字节 ⇒ 落盘 → 载入这条链通了",
+                   (unsigned long long)hot_blob);
+        if (cold_ns && hot_ns) {
+            if (hot_ns < cold_ns)
+                EMIT8("✅ 建管线耗时：冷 %.3f ms → 热 %.3f ms（省 %.0f%%）",
+                      (double)cold_ns / 1e6, (double)hot_ns / 1e6,
+                      (1.0 - (double)hot_ns / (double)cold_ns) * 100.0);
+            else
+                EMIT8("⚠ 未观察到收益（冷 %.3f ms / 热 %.3f ms）—— 驱动可能没把编译结果放进缓存，如实记录",
+                      (double)cold_ns / 1e6, (double)hot_ns / 1e6);
+        }
+    }
+
+    replay_env_free();
+    EMIT8("");
+    EMIT8("===== 管线缓存落盘 %s：失败 %d 项（总耗时 %llums）=====",
+          fails ? "未全通过" : "全部通过", fails, (unsigned long long)(ms_now() - t0));
+    *p = 0;
+    #undef EMIT8
     return fails;
 }
