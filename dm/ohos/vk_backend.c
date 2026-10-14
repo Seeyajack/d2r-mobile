@@ -394,6 +394,7 @@ static void rec_draw(VkCommandBuffer cb, void *ud) {
     // 经典 renderPass：initialLayout=UNDEFINED、finalLayout=TRANSFER_SRC（渲染完直接可读回）
     VkClearValue cv = { 0 };
     cv.color.float32[0] = 1.f;                                 // 清成红（三角形外应读到它）
+    cv.color.float32[3] = 1.f;                                 // alpha 也要 1——上次漏了它，读回是 (255,0,0,0)
     VkRenderPassBeginInfo bi = { VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
     bi.renderPass = t->rp; bi.framebuffer = t->fb;
     bi.renderArea.extent.width = t->w; bi.renderArea.extent.height = t->h;
@@ -519,10 +520,13 @@ int vk_backend_shader(char *out, size_t cap) {
     {
         uint8_t pix[64 * 64 * 4];
         if (vk_backend_readback(c, t, pix, sizeof pix) < 0) { EMIT2("❌ 读回失败"); fails++; goto done; }
-        const uint8_t *inside = pix + (16 * 64 + 32) * 4;    // 三角形内（顶点在正上方，y=16 行在中线上方）
-        const uint8_t *outside = pix;                        // 角落（三角形外）
+        // Vulkan 的 NDC (-1,-1) 在**左上**（Y 向下）：三角形底边在顶部整行、顶点在底部中央。
+        // (32,16) 在三角形内；(0,63) 在底部左角——离三条边都远，必定在外。
+        // （别用 (0,0)：它恰好压在左边缘上，画不画是边界像素规则决定的，驱动间不一致。）
+        const uint8_t *inside = pix + (16 * 64 + 32) * 4;
+        const uint8_t *outside = pix + (63 * 64 + 0) * 4;
         EMIT2("三角形内 (32,16) 读到 (%u,%u,%u,%u)，预期蓝 (0,0,255,255)", inside[0], inside[1], inside[2], inside[3]);
-        EMIT2("三角形外 (0,0)   读到 (%u,%u,%u,%u)，预期红 (255,0,0,255)", outside[0], outside[1], outside[2], outside[3]);
+        EMIT2("三角形外 (0,63)  读到 (%u,%u,%u,%u)，预期红 (255,0,0,255)", outside[0], outside[1], outside[2], outside[3]);
         int ok_in = inside[0] == 0 && inside[1] == 0 && inside[2] == 255 && inside[3] == 255;
         int ok_out = outside[0] == 255 && outside[1] == 0 && outside[2] == 0 && outside[3] == 255;
         if (!ok_in) { EMIT2("❌ 三角形内颜色不对：着色器/管线/绘制这条链有问题"); fails++; }
