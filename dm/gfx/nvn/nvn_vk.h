@@ -66,7 +66,20 @@ int  nvn_vk_frame_end(void);
 void nvn_vk_exec(const uint8_t *handle);
 
 // 统计（判据用）：绘制次数 / 新建管线数 / 命中缓存数 / 走过的命令条数 / 未处理的命令条数。
-void nvn_vk_stats(uint64_t *draws, uint64_t *pso_built, uint64_t *pso_hit, uint64_t *ops, uint64_t *ops_skipped);
+//
+// **测量骨架**（对标上游那套 `DM_NVN_*` 诊断）：为什么先做它——"以性能优化为标准"的前提是
+// **能说出这一步花了多少 GPU 时间、搬了多少字节**；没有这个，优化就只能靠感觉。
+// 上游有逐通道 GPU 计时、绘制/通道数、附件读入写出字节数、贴图上传耗时……这里先落前四项。
+typedef struct {
+    uint64_t ops, ops_skipped;      // 走过的命令条数 / 未处理的条数（不静默）
+    uint64_t draws, passes;         // 绘制次数 / 渲染通道数
+    uint64_t pso_built, pso_hit;    // 新建管线数 / 命中缓存数
+    uint64_t bw_load, bw_store;     // 附件读入 / 写出字节（按通道尺寸 × 像素字节估算）
+    uint64_t gpu_ns;                // 本帧 GPU 耗时（时间戳差值；0 = 设备不支持或没采到）
+    uint64_t pass_gpu_ns[8];        // 逐通道 GPU 耗时（前 8 个通道）
+    uint64_t pass_n;                // 本帧通道数
+} nvn_vk_stats_t;
+void nvn_vk_stats_get(nvn_vk_stats_t *out);
 void nvn_vk_stats_reset(void);
 
 // 当前渲染目标的 Vulkan 图像（读回 / 将来的出图用）。没设过渲染目标时返回 VK_NULL_HANDLE。

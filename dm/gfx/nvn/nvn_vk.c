@@ -169,15 +169,86 @@ int nvn_vk_gpu_addr(uint64_t addr, uint64_t len, VkBuffer *buf, uint64_t *off, u
 static nvn_vk_shader_fn g_shader_fn;
 void nvn_vk_set_shader_resolver(nvn_vk_shader_fn fn) { g_shader_fn = fn; }
 
-static uint64_t g_draws, g_pso_built, g_pso_hit, g_ops, g_ops_skipped;
-void nvn_vk_stats(uint64_t *draws, uint64_t *pso_built, uint64_t *pso_hit, uint64_t *ops, uint64_t *ops_skipped) {
-    if (draws) *draws = g_draws;
-    if (pso_built) *pso_built = g_pso_built;
-    if (pso_hit) *pso_hit = g_pso_hit;
-    if (ops) *ops = g_ops;
-    if (ops_skipped) *ops_skipped = g_ops_skipped;
+static nvn_vk_stats_t g_st;
+void nvn_vk_stats_get(nvn_vk_stats_t *out) { if (out) *out = g_st; }
+void nvn_vk_stats_reset(void) { memset(&g_st, 0, sizeof g_st); }
+
+// ---- 逐通道 GPU 计时（时间戳查询）。设备的 timestampValidBits / timestampPeriod 决定可不可用 ----
+#define NVN_VK_TS_MAX 32
+#define NVN_VK_TS_PASS 8
+static VkCommandBuffer g_cb;          // 本帧正在录制的命令缓冲（回放层与计时都要用）
+static VkQueryPool g_qp;
+static float       g_ts_period;
+static int         g_ts_ok;
+static uint32_t    g_ts_next;
+static uint32_t    g_ts_frame[2];
+static uint32_t    g_ts_pass[NVN_VK_TS_PASS][2];
+static uint64_t    g_ts_val[NVN_VK_TS_MAX];
+static int         g_pass_cur = -1;
+
+static void ts_init(void) {
+    if (g_qp || g_ts_ok < 0) return;
+    VkPhysicalDevice pd = dm_ohos_vk_phys();
+    VkDevice dev = dm_ohos_vk_device();
+    if (!pd || !dev) return;
+    VkPhysicalDeviceProperties pp;
+    vkGetPhysicalDeviceProperties(pd, &pp);
+    g_ts_period = pp.limits.timestampPeriod;
+    // 有效位在**队列族**属性里（不是物理设备属性）：0 = 该队列不支持时间戳
+    uint32_t qn = 0, valid = 0;
+    vkGetPhysicalDeviceQueueFamilyProperties(pd, &qn, NULL);
+    if (qn) {
+        VkQueueFamilyProperties *qs = calloc(qn, sizeof *qs);
+        vkGetPhysicalDeviceQueueFamilyProperties(pd, &qn, qs);
+        uint32_t qf = dm_ohos_vk_qfam();
+        valid = qf < qn ? qs[qf].timestampValidBits : 0;
+        free(qs);
+    }
+    if (!pp.limits.timestampComputeAndGraphics || g_ts_period <= 0 || !valid) {
+        g_ts_ok = -1;
+        LOG("【提示】设备不支持 GPU 时间戳（period=%.3f 有效位=%u），测量骨架里的 GPU 耗时记 0",
+            (double)g_ts_period, valid);
+        return;
+    }
+    VkQueryPoolCreateInfo qi = { VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO };
+    qi.queryType = VK_QUERY_TYPE_TIMESTAMP;
+    qi.queryCount = NVN_VK_TS_MAX;
+    if (vkCreateQueryPool(dev, &qi, NULL, &g_qp) != VK_SUCCESS) {
+        g_qp = VK_NULL_HANDLE; g_ts_ok = -1;
+        LOG("【提示】建时间戳查询池失败，GPU 耗时记 0");
+        return;
+    }
+    g_ts_ok = 1;
+    LOG("GPU 计时可用：timestampPeriod=%.3f ns，队列族 %u 有效位 %u",
+        (double)g_ts_period, dm_ohos_vk_qfam(), valid);
 }
-void nvn_vk_stats_reset(void) { g_draws = g_pso_built = g_pso_hit = g_ops = g_ops_skipped = 0; }
+static void ts_mark(VkPipelineStageFlagBits stage, uint32_t *slot) {
+    if (!g_ts_ok || g_ts_ok < 0 || g_ts_next >= NVN_VK_TS_MAX) { *slot = (uint32_t)-1; return; }
+    *slot = g_ts_next++;
+    vkCmdWriteTimestamp(g_cb, stage, g_qp, *slot);
+}
+static void ts_fetch(void) {
+    if (g_ts_ok != 1 || !g_ts_next) return;
+    if (vkGetQueryPoolResults(dm_ohos_vk_device(), g_qp, 0, g_ts_next, sizeof g_ts_val, g_ts_val,
+                              sizeof(uint64_t), VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT) != VK_SUCCESS)
+        return;
+}
+static uint64_t ts_delta(uint32_t a, uint32_t b) {
+    if (a == (uint32_t)-1 || b == (uint32_t)-1 || b >= g_ts_next) return 0;
+    if (g_ts_val[b] < g_ts_val[a]) return 0;
+    return (uint64_t)((double)(g_ts_val[b] - g_ts_val[a]) * (double)g_ts_period);
+}
+
+// 像素字节数（带宽估算用；只列本步会遇到的格式）
+static int vk_bpp(VkFormat f) {
+    switch (f) {
+        case VK_FORMAT_R8G8B8A8_UNORM: case VK_FORMAT_R8G8B8A8_SRGB:
+        case VK_FORMAT_A2B10G10R10_UNORM_PACK32: return 4;
+        case VK_FORMAT_R16G16B16A16_SFLOAT: return 8;
+        default: break;
+    }
+    return 4;
+}
 
 // ---- 顶点属性格式：NVN → VkFormat。映射表照抄上游 vfmt()（nvn_mtl.m:2523）逐项换过来 ----
 static VkFormat vk_vfmt(int f) {
@@ -350,9 +421,12 @@ fail_img:  vkDestroyImage(dev, e.img, NULL);
 }
 
 // ---- 管线缓存（对标上游 pso_get：按"程序 + 目标格式 + 混合 / 写掩码 + 顶点布局"缓存）----
+// **拓扑也要进键**：管线里的 inputAssembly.topology 是建管线时定死的，不把拓扑算进键，
+// 换拓扑就会复用错管线——而且**不报错，只是画错**。（这是 3.2 埋下的缺陷，本步修掉。）
 typedef struct {
     const void *vs_ctrl, *fs_ctrl;
     VkFormat cfmt;
+    VkPrimitiveTopology topo;
     uint32_t chmask, blend_en, src_rgb, dst_rgb, eq_rgb, src_a, dst_a, eq_a;
     int nattr; uint32_t attr[16];
     int nstream; vs_st stream[16];
@@ -374,30 +448,39 @@ static struct {
     int has_st[6];
 } S;
 
-static VkCommandBuffer g_cb;
 static int g_pass_open; static vk_rt_ent *g_pass_rt;
 
 static void pass_close(void) {
     if (!g_pass_open) return;
     vkCmdEndRenderPass(g_cb);
-    g_pass_open = 0; g_pass_rt = NULL;
+    if (g_pass_cur >= 0 && g_pass_cur < NVN_VK_TS_PASS)
+        ts_mark(VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, &g_ts_pass[g_pass_cur][1]);
+    g_pass_open = 0; g_pass_rt = NULL; g_pass_cur = -1;
 }
 static void pass_open(vk_rt_ent *rt) {
     if (g_pass_open) { if (g_pass_rt == rt) return; pass_close(); }
     VkClearValue cv; memset(&cv, 0, sizeof cv);
     if (S.has_clear) memcpy(cv.color.float32, S.clear, sizeof cv.color.float32);
     else cv.color.float32[3] = 1.f;
+    // 通道计时：起止都写在通道**外面**（通道内的查询在部分驱动上不准）
+    g_pass_cur = (int)g_st.passes;
+    if (g_pass_cur < NVN_VK_TS_PASS)
+        ts_mark(VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, &g_ts_pass[g_pass_cur][0]);
     VkRenderPassBeginInfo bi = { VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
     bi.renderPass = rt->rp; bi.framebuffer = rt->fb;
     bi.renderArea.extent.width = rt->w; bi.renderArea.extent.height = rt->h;
     bi.clearValueCount = 1; bi.pClearValues = &cv;
     vkCmdBeginRenderPass(g_cb, &bi, VK_SUBPASS_CONTENTS_INLINE);
     g_pass_open = 1; g_pass_rt = rt;
+    g_st.passes++;
+    // 带宽估算：本步的通道一律 loadOp=CLEAR（不读入）、storeOp=STORE（写出）
+    g_st.bw_store += (uint64_t)rt->w * (uint64_t)rt->h * (uint64_t)vk_bpp(rt->fmt);
 }
 
-static VkPipeline pso_get(vk_rt_ent *rt) {
+static VkPipeline pso_get(vk_rt_ent *rt, VkPrimitiveTopology topo) {
     vk_pso_key k; memset(&k, 0, sizeof k);
     k.cfmt = rt->fmt;
+    k.topo = topo;
     k.nattr = S.nattr; memcpy(k.attr, S.attr, sizeof k.attr);
     k.nstream = S.nstream; memcpy(k.stream, S.stream, sizeof k.stream);
     if (S.prog && S.prog->nstage > 0) k.vs_ctrl = S.prog->sd[0].control;
@@ -411,7 +494,7 @@ static VkPipeline pso_get(vk_rt_ent *rt) {
     if (S.has_st[1]) k.blend_en = ((const color_st *)S.st[1])->blend_en;
 
     for (int i = 0; i < g_npso; i++)
-        if (!memcmp(&g_psos[i].k, &k, sizeof k) && g_psos[i].rp == rt->rp) { g_pso_hit++; return g_psos[i].pl; }
+        if (!memcmp(&g_psos[i].k, &k, sizeof k) && g_psos[i].rp == rt->rp) { g_st.pso_hit++; return g_psos[i].pl; }
 
     // 建：先解析两条着色器（走接缝），再按当前状态建管线
     if (!g_shader_fn) { set_err("没有装着色器解析回调（nvn_vk_set_shader_resolver）"); return VK_NULL_HANDLE; }
@@ -460,7 +543,7 @@ static VkPipeline pso_get(vk_rt_ent *rt) {
         vi.vertexAttributeDescriptionCount = (uint32_t)nattr_ok;
         vi.pVertexAttributeDescriptions = attrs;
         VkPipelineInputAssemblyStateCreateInfo ia = { VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
-        ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;       // 真正的拓扑在绘制时由 OP_DRAW 决定，这里给默认
+        ia.topology = k.topo;                                    // 拓扑已进键（见 vk_pso_key 的说明）
         VkPipelineViewportStateCreateInfo vps = { VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO };
         vps.viewportCount = 1; vps.scissorCount = 1;
         VkPipelineRasterizationStateCreateInfo rs = { VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
@@ -499,7 +582,7 @@ static VkPipeline pso_get(vk_rt_ent *rt) {
 
     if (g_npso == g_psocap) { g_psocap = g_psocap ? g_psocap * 2 : 64; g_psos = realloc(g_psos, (size_t)g_psocap * sizeof *g_psos); }
     g_psos[g_npso++] = (vk_pso_ent){ k, pl, lay, rt->rp };
-    g_pso_built++;
+    g_st.pso_built++;
     vkDestroyShaderModule(dev, vm, NULL);
     vkDestroyShaderModule(dev, fm, NULL);
     return pl;
@@ -509,24 +592,29 @@ fail_mod: vkDestroyShaderModule(dev, fm, NULL); vkDestroyShaderModule(dev, vm, N
     return VK_NULL_HANDLE;
 }
 
-// 绘制（对标上游的 draw()）。本步只做非索引绘制。
-static void draw(const p_draw *d) {
-    if (!S.prog || !S.rt) { g_ops_skipped++; return; }
-    vk_rt_ent *rt = rt_get(S.rt);
-    if (!rt) { g_ops_skipped++; return; }
-    VkPipeline pl = pso_get(rt);
-    if (!pl) { g_ops_skipped++; return; }
-
-    VkPrimitiveTopology topo;
-    switch (d->prim) {
-        case 0: topo = VK_PRIMITIVE_TOPOLOGY_POINT_LIST; break;
-        case 1: topo = VK_PRIMITIVE_TOPOLOGY_LINE_LIST; break;
-        case 3: topo = VK_PRIMITIVE_TOPOLOGY_LINE_STRIP; break;
-        case 4: case 7: topo = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST; break;
-        case 5: topo = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP; break;
-        default: set_err("图元类型 %d 未实现（上游同样报红）", d->prim); g_ops_skipped++; return;
+// 图元类型映射（照抄上游 nvn_mtl.m:4662 的 switch）
+static int vk_topo(int prim, VkPrimitiveTopology *out) {
+    switch (prim) {
+        case 0: *out = VK_PRIMITIVE_TOPOLOGY_POINT_LIST; return 1;
+        case 1: *out = VK_PRIMITIVE_TOPOLOGY_LINE_LIST; return 1;
+        case 3: *out = VK_PRIMITIVE_TOPOLOGY_LINE_STRIP; return 1;
+        case 4: case 7: *out = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST; return 1;
+        case 5: *out = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP; return 1;
     }
-    if (!d->count) return;
+    return 0;
+}
+
+// 绘制前的公共部分：查目标 → 查/建管线 → 开通道 → 绑管线 → 动态视口/剪裁 → 绑顶点缓冲。
+// 返回管线（VK_NULL_HANDLE = 这次绘制跳过），目标写到 *rt_out。
+static VkPipeline draw_begin(int prim, vk_rt_ent **rt_out) {
+    *rt_out = NULL;
+    if (!S.prog || !S.rt) { g_st.ops_skipped++; return VK_NULL_HANDLE; }
+    VkPrimitiveTopology topo;
+    if (!vk_topo(prim, &topo)) { set_err("图元类型 %d 未实现（上游同样报红）", prim); g_st.ops_skipped++; return VK_NULL_HANDLE; }
+    vk_rt_ent *rt = rt_get(S.rt);
+    if (!rt) { g_st.ops_skipped++; return VK_NULL_HANDLE; }
+    VkPipeline pl = pso_get(rt, topo);
+    if (!pl) { g_st.ops_skipped++; return VK_NULL_HANDLE; }
 
     pass_open(rt);
     vkCmdBindPipeline(g_cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pl);
@@ -539,7 +627,10 @@ static void draw(const p_draw *d) {
     }
     vkCmdSetViewport(g_cb, 0, 1, &vp);
     VkRect2D sc = { { 0, 0 }, { rt->w, rt->h } };
-    if (S.has_sc) { sc.offset.x = S.sc.x; sc.offset.y = S.sc.y; sc.extent.width = (uint32_t)S.sc.w; sc.extent.height = (uint32_t)S.sc.h; }
+    if (S.has_sc) {
+        sc.offset.x = S.sc.x; sc.offset.y = S.sc.y;
+        sc.extent.width = (uint32_t)S.sc.w; sc.extent.height = (uint32_t)S.sc.h;
+    }
     vkCmdSetScissor(g_cb, 0, 1, &sc);
 
     // 顶点缓冲：地址经池反查（3.1-C 那套）——这就是"游戏地址 → GPU 缓冲 + 偏移"的实际用法
@@ -548,14 +639,46 @@ static void draw(const p_draw *d) {
         VkBuffer vb = VK_NULL_HANDLE; uint64_t off = 0;
         if (!nvn_vk_addr((uint64_t)S.vbuf[i].address, 1, &vb, &off)) {
             set_err("顶点流 %d 的地址 %#llx 不在任何已登记的池里", i, (unsigned long long)S.vbuf[i].address);
-            g_ops_skipped++; return;
+            g_st.ops_skipped++; return VK_NULL_HANDLE;
         }
         VkDeviceSize o = (VkDeviceSize)off;
         vkCmdBindVertexBuffers(g_cb, (uint32_t)i, 1, &vb, &o);
     }
-    (void)topo;   // 拓扑已写进管线（本步管线按默认 TRIANGLE_LIST 建；多拓扑缓存留到下一步）
+    *rt_out = rt;
+    return pl;
+}
+
+// 非索引绘制（对标上游的 draw()）
+static void draw(const p_draw *d) {
+    if (!d->count) return;
+    vk_rt_ent *rt = NULL;
+    if (!draw_begin(d->prim, &rt)) return;
     vkCmdDraw(g_cb, (uint32_t)d->count, 1, (uint32_t)d->first, 0);
-    g_draws++;
+    g_st.draws++;
+}
+
+// 索引绘制（对标上游 draw(dw, di) 的索引分支）：索引缓冲同样走池反查
+static void draw_idx(const p_draw_idx *d) {
+    if (!d->count) return;
+    vk_rt_ent *rt = NULL;
+    if (!draw_begin(d->prim, &rt)) return;
+    VkBuffer ib = VK_NULL_HANDLE; uint64_t off = 0;
+    if (!nvn_vk_addr((uint64_t)d->ibuf, 1, &ib, &off)) {
+        set_err("索引缓冲地址 %#llx 不在任何已登记的池里", (unsigned long long)d->ibuf);
+        g_st.ops_skipped++; return;
+    }
+    VkIndexType it = d->itype == 1 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32;
+    uint64_t need = it == VK_INDEX_TYPE_UINT16 ? 2 : 4;
+    if (off % need) {
+        set_err("索引缓冲偏移 %llu 不是索引宽度 %llu 的整数倍",
+                (unsigned long long)off, (unsigned long long)need);
+        g_st.ops_skipped++; return;
+    }
+    vkCmdBindIndexBuffer(g_cb, ib, (VkDeviceSize)off, it);
+    vkCmdDrawIndexed(g_cb, (uint32_t)d->count,
+                     d->instances > 0 ? (uint32_t)d->instances : 1,
+                     0, (int32_t)d->base_vertex, (uint32_t)d->base_instance);
+    g_st.draws++;
 }
 
 int nvn_vk_frame_begin(void) {
@@ -569,8 +692,13 @@ int nvn_vk_frame_begin(void) {
     VkCommandBufferBeginInfo bi = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     if (vkBeginCommandBuffer(g_cb, &bi) != VK_SUCCESS) { set_err("vkBeginCommandBuffer 失败"); return -1; }
-    g_pass_open = 0; g_pass_rt = NULL;
+    g_pass_open = 0; g_pass_rt = NULL; g_pass_cur = -1;
     nvn_vk_stats_reset();
+    // 帧计时：起止各一个时间戳
+    ts_init();
+    if (g_ts_ok == 1) vkCmdResetQueryPool(g_cb, g_qp, 0, NVN_VK_TS_MAX);
+    g_ts_next = 0;
+    ts_mark(VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, &g_ts_frame[0]);
     return 0;
 }
 
@@ -578,6 +706,7 @@ int nvn_vk_frame_end(void) {
     if (!g_cb) { set_err("没有在录制的帧"); return -1; }
     VkDevice dev = dm_ohos_vk_device();
     pass_close();
+    ts_mark(VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, &g_ts_frame[1]);
     if (vkEndCommandBuffer(g_cb) != VK_SUCCESS) { set_err("vkEndCommandBuffer 失败"); goto fail; }
     {
         VkSubmitInfo si = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
@@ -586,6 +715,12 @@ int nvn_vk_frame_end(void) {
         if (vkQueueSubmit(q, 1, &si, NULL) != VK_SUCCESS) { set_err("vkQueueSubmit 失败"); goto fail; }
         vkQueueWaitIdle(q);
     }
+    // 取时间戳：整帧 + 逐通道
+    ts_fetch();
+    g_st.gpu_ns = ts_delta(g_ts_frame[0], g_ts_frame[1]);
+    g_st.pass_n = g_st.passes < NVN_VK_TS_PASS ? g_st.passes : NVN_VK_TS_PASS;
+    for (uint64_t i = 0; i < g_st.pass_n; i++)
+        g_st.pass_gpu_ns[i] = ts_delta(g_ts_pass[i][0], g_ts_pass[i][1]);
     vkFreeCommandBuffers(dev, dm_ohos_vk_pool(), 1, &g_cb);
     g_cb = NULL;
     return 0;
@@ -604,7 +739,7 @@ void nvn_vk_exec(const uint8_t *handle) {
         op_hdr h;
         memcpy(&h, p, sizeof h);
         const void *a = p + sizeof h;
-        g_ops++;
+        g_st.ops++;
         switch (h.op) {
             case OP_END: depth--; return;
             case OP_JUMP: { const uint8_t *t; memcpy(&t, a, 8); p = t; continue; }
@@ -629,13 +764,21 @@ void nvn_vk_exec(const uint8_t *handle) {
                 break;
             }
             case OP_BIND_VATTR: {
+                // 上游允许从任意槽位开始批量绑定（first != 0）——早先只认 first == 0，
+                // 非 0 起点会被**静默忽略**（又是一类"不报错的错"），这里补上。
                 const p_bind_vattr *b = (const p_bind_vattr *)a;
-                if (b->first == 0 && b->n <= 16) { S.nattr = b->n; memcpy(S.attr, b->st, sizeof(uint32_t) * (size_t)b->n); }
+                if (b->first >= 0 && b->n >= 0 && b->first + b->n <= 16) {
+                    for (int i = 0; i < b->n; i++) S.attr[b->first + i] = b->st[i];
+                    if (b->first + b->n > S.nattr) S.nattr = b->first + b->n;
+                } else { set_err("顶点属性槽位越界 first=%d n=%d", b->first, b->n); g_st.ops_skipped++; }
                 break;
             }
             case OP_BIND_VSTREAM: {
                 const p_bind_vstream *b = (const p_bind_vstream *)a;
-                if (b->first == 0 && b->n <= 16) { S.nstream = b->n; memcpy(S.stream, b->st, sizeof(vs_st) * (size_t)b->n); }
+                if (b->first >= 0 && b->n >= 0 && b->first + b->n <= 16) {
+                    for (int i = 0; i < b->n; i++) S.stream[b->first + i] = b->st[i];
+                    if (b->first + b->n > S.nstream) S.nstream = b->first + b->n;
+                } else { set_err("顶点流槽位越界 first=%d n=%d", b->first, b->n); g_st.ops_skipped++; }
                 break;
             }
             case OP_BIND_VBUF: {
@@ -644,7 +787,8 @@ void nvn_vk_exec(const uint8_t *handle) {
                 break;
             }
             case OP_DRAW: draw((const p_draw *)a); break;
-            default: g_ops_skipped++; break;   // 本步不处理的命令：计数，不静默
+            case OP_DRAW_IDX: draw_idx((const p_draw_idx *)a); break;
+            default: g_st.ops_skipped++; break;   // 本步不处理的命令：计数，不静默
         }
         p += h.size;
     }

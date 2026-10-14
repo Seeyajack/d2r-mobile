@@ -1261,6 +1261,10 @@ int vk_backend_replay(char *out, size_t cap) {
     const float verts[6] = { -1.f, -1.f,  1.f, -1.f,  0.f, 1.f };
     uint8_t *vtx = pool_base + 256;
     memcpy(vtx, verts, sizeof verts);
+    // 索引数据：同一组顶点的索引（验证索引绘制）
+    const uint32_t idx[3] = { 0, 1, 2 };
+    uint8_t *ibuf = pool_base + 512;
+    memcpy(ibuf, idx, sizeof idx);
 
     // 池对象 / 贴图对象 / 程序对象（都是 nvn_obj.h 的普通结构，探针自己填）
     static pool_t g_pool;
@@ -1321,6 +1325,14 @@ int vk_backend_replay(char *out, size_t cap) {
         p_draw dr = { 4, 0, 3 };                              // prim=4(三角形) first=0 count=3
         w = wrec(w, OP_DRAW, &dr, sizeof dr);
 
+        p_draw_idx di; memset(&di, 0, sizeof di);             // 索引绘制：同一组顶点
+        di.prim = 4; di.itype = 0; di.count = 3; di.instances = 1;
+        di.ibuf = (uint64_t)(uintptr_t)ibuf;
+        w = wrec(w, OP_DRAW_IDX, &di, sizeof di);
+
+        p_draw dr2 = { 3, 0, 3 };                             // LINE_STRIP：验证"拓扑进了管线键"
+        w = wrec(w, OP_DRAW, &dr2, sizeof dr2);
+
         op_hdr eh = { OP_END, 8 };
         memcpy(w, &eh, sizeof eh); w += sizeof eh;
     }
@@ -1359,11 +1371,19 @@ int vk_backend_replay(char *out, size_t cap) {
                         // 与阶段 2 同一组判据点：(32,16) 在三角形内；(0,63) 在左下角，必在三角形外
                         const uint8_t *in = pix + (16 * w2 + 32) * 4;
                         const uint8_t *ou = pix + (63 * w2 + 0) * 4;
-                        uint64_t nd = 0, nb = 0, nh = 0, nops = 0, nskip = 0;
-                        nvn_vk_stats(&nd, &nb, &nh, &nops, &nskip);
-                        EMIT7("渲染目标 %ux%u；回放统计：绘制 %llu 次 / 新建管线 %llu / 命中缓存 %llu / 命令 %llu 条 / 未处理 %llu 条",
-                              w2, h2, (unsigned long long)nd, (unsigned long long)nb,
-                              (unsigned long long)nh, (unsigned long long)nops, (unsigned long long)nskip);
+                        nvn_vk_stats_t stt;
+                        nvn_vk_stats_get(&stt);
+                        EMIT7("渲染目标 %ux%u；统计：命令 %llu 条 / 未处理 %llu 条 / 绘制 %llu 次 / 通道 %llu 个 / 新建管线 %llu / 命中缓存 %llu",
+                              w2, h2,
+                              (unsigned long long)stt.ops, (unsigned long long)stt.ops_skipped,
+                              (unsigned long long)stt.draws, (unsigned long long)stt.passes,
+                              (unsigned long long)stt.pso_built, (unsigned long long)stt.pso_hit);
+                        EMIT7("测量骨架：GPU 耗时 %.3f ms；附件写出 %.1f KiB；逐通道 %llu 个",
+                              (double)stt.gpu_ns / 1e6, (double)stt.bw_store / 1024.0,
+                              (unsigned long long)stt.pass_n);
+                        for (uint64_t i = 0; i < stt.pass_n; i++)
+                            EMIT7("  通道 %llu：%.3f ms", (unsigned long long)i,
+                                  (double)stt.pass_gpu_ns[i] / 1e6);
                         EMIT7("三角形内 (32,16) 读到 (%u,%u,%u,%u)，预期蓝 (0,0,255,255)", in[0], in[1], in[2], in[3]);
                         EMIT7("三角形外 (0,63)  读到 (%u,%u,%u,%u)，预期红 (255,0,0,255)", ou[0], ou[1], ou[2], ou[3]);
                         int ok_in = in[0] == 0 && in[1] == 0 && in[2] == 255 && in[3] == 255;
@@ -1372,6 +1392,17 @@ int vk_backend_replay(char *out, size_t cap) {
                         if (!ok_out) { EMIT7("❌ 三角形外颜色不对：清屏或绘制范围有问题"); fails++; }
                         EMIT7("%s 回放出来的画面与阶段 2 逐像素一致%s", (ok_in && ok_out) ? "✅" : "❌",
                               (ok_in && ok_out) ? "——记录流 → 回放 → 出图这条链通了" : "");
+                        // 本步新增的两条判据：索引绘制走通、拓扑真的进了管线键
+                        if (stt.draws != 3) { EMIT7("❌ 绘制次数应为 3（非索引 + 索引 + 线带），实为 %llu",
+                                                    (unsigned long long)stt.draws); fails++; }
+                        if (stt.pso_built != 2) {
+                            EMIT7("❌ 新建管线应为 2（三角形 + 线带），实为 %llu —— **拓扑没进管线键**（会复用错管线）",
+                                  (unsigned long long)stt.pso_built); fails++;
+                        } else EMIT7("✅ 索引绘制复用了三角形管线、线带另建一条 ⇒ 拓扑确实进了管线键");
+
+                        if (stt.ops_skipped != 0) { EMIT7("❌ 有 %llu 条命令未被处理（不该静默）",
+                                                          (unsigned long long)stt.ops_skipped); fails++; }
+                        else EMIT7("✅ 命令全部被处理（未处理 0 条）");
                     }
                     vkUnmapMemory(dev, rbm);
                 }
