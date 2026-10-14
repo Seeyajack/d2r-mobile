@@ -7,6 +7,7 @@ int dm_loadscreen_down(void) { return 1; }   // 读取画面判定在 diag.c；�
 void dm_world_pump(void) {}
 int dm_world_has_target(void) { return 1; }
 unsigned dm_world_tap(float nx, float ny) { (void)nx; (void)ny; return 0; }
+void dm_world_walk(float nx, float ny) { (void)nx; (void)ny; } unsigned dm_world_click(float nx, float ny) { (void)nx; (void)ny; return 0; } int dm_update_click_at(float nx, float ny) { (void)nx; (void)ny; return 0; } int dm_world_tap_result(unsigned q) { (void)q; return -1; }
 void dm_textinput_pump(void) {}   // 文本框接法（dm_textinput.c）：同上，给空桩 | text box hookup (dm_textinput.c): same as above, an empty stub
 void dm_update_pump(void) {}      // 选角页构建号与新版本提示（dm_update.c）：同上，给空桩 | build number and new-version notice on the character select page (dm_update.c): same as above, an empty stub
 void dm_num_set(int n) { (void)n; }
@@ -90,4 +91,4 @@ int dm_runeword_long_press(const void *ci) { (void)ci; return 0; }   // 符文�
 int dm_runeword_list_open(void) { return 0; }
 void dm_runeword_button(const char *name) { (void)name; }
 void dm_runeword_list_close(void) {}
-uint64_t dm_padmode_legend_click(float nx, float ny) { (void)nx; (void)ny; return 0; }   // 鼠标点按键提示条（dm_padmode.c）：这些单测不带游戏映像，给空桩 | mouse click on the key-hint bar (dm_padmode.c): these unit tests carry no game image, so an empty stub is given
+uint64_t dm_padmode_legend_click(float nx, float ny) { (void)nx; (void)ny; return 0; } int dm_padmode_hud_click(float nx, float ny, uint64_t *b) { (void)nx; (void)ny; (void)b; return 0; } int dm_padmode_legend_has(uint32_t g) { (void)g; return 0; } int dm_game_paused(void) { return 0; }   // 鼠标点按键提示条（dm_padmode.c）：这些单测不带游戏映像，给空桩 | mouse click on the key-hint bar (dm_padmode.c): these unit tests carry no game image, so an empty stub is given

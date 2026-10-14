@@ -28,10 +28,14 @@ with tempfile.TemporaryDirectory() as t:
     nw=round((x1-x0)*k); nx=round(((x0+x1)/2-ref_w/2)*k)-1
     # 系统提示框：整份自己写、不继承原版那份——原版带一个铺满的 Confirm 按钮（继承来的子控件删不掉），提示在屏上时它接住功能键和点击：
     # 按功能键 / 点它压着的地方都只是把提示关掉（面板开不了、下面的格子点不到）。触屏上提示到点自己消失，不要这个按钮
-    # System notification: written entirely by ourselves, not inheriting the original game's one -- the original carries a full-cover Confirm button (an inherited child widget cannot be deleted), which catches the function key and taps while the notification is on screen:
-    # pressing the function key / tapping where it covers only dismisses the notification (the panel cannot open, the cells beneath cannot be tapped). On a touchscreen the notification disappears by itself when its time is up, so this button is not wanted
+    # 停靠高度 y −790（原版 −500；先前为让开经验条提到 −600，仍压着底栏上方那行「生命 / 法力」数值——数值位数多时字伸进框里，触屏版那行更高、直接叠在框中间）：
+    # 框的下沿要高过数值行的上沿，触屏版需再上提约 173 单位、手柄版约 77 单位，取一个两版都让开的值。只改布局里的停靠位置，滑入滑出仍是游戏自己的动画
+    # System notice box: written entirely by us, not inheriting the original - the original has a full-size Confirm button (inherited child widgets cannot be removed), which takes the function keys and taps while a notice is on screen:
+    # pressing a function key / tapping where it covers only dismisses the notice (panels cannot be opened, the cells below cannot be tapped). On touch the notice disappears by itself on time, and this button is not wanted
+    # Docking height y -790 (original -500; it was raised to -600 earlier to clear the experience bar, but still covered the "life / mana" numbers above the bottom bar - with many digits the text ran into the box, and the touch layout's row is higher and sat right in the middle of the box):
+    # the lower edge of the box has to be above the upper edge of the number row; the touch layout needs about 173 more units, the gamepad layout about 77, so one value that clears both is taken. Only the docking position in the layout changes; slide-in and slide-out are still the game's own animation
     note={'type':'NotificationPanel','name':'NotificationPanel',
-          'fields':{'priority':9002,'notificationSeconds':5.0,'transitionSeconds':0.8,'rect':{'x':nx,'y':-600,'width':nw,'height':244},'anchor':{'x':0.5,'y':1.0}},
+          'fields':{'priority':9002,'notificationSeconds':5.0,'transitionSeconds':0.8,'rect':{'x':nx,'y':-790,'width':nw,'height':244},'anchor':{'x':0.5,'y':1.0}},
           'children':[{'type':'NineTileImageWidget','name':'NotificationBorder',
                        'fields':{'rect':{'x':0,'y':0,'width':nw,'height':244},'anchor':{'x':-0.5,'y':0.0},'filename':'PANEL/TooltipBorder/TooltipBorder','backgroundColor':[0.0,0.0,0.0,0.70],'tileScale':1},
                        'children':[{'type':'TextBoxWidget','name':'Prompt','fields':{'fitToParent':True,'style':'$StyleNotification'}}]}]}
@@ -47,6 +51,8 @@ with tempfile.TemporaryDirectory() as t:
     import merc_slots; REPL.update(merc_slots.build(romfs,t,REPL))   # 佣兵面板加六个装备位（底图 + 布局；要在 build_ingame 给它插关闭钮之后） | Add six equipment slots to the mercenary panel (base image + layout; must come after build_ingame has inserted the close button into it)
     REPL.update(touch_layout.build_cursor(romfs,t))   # 面板里的手柄光标圆环换成透明 | The controller cursor ring in panels replaced with a transparent one
     REPL.update(touch_layout.build_glyphs(romfs,t))   # 22 张手柄键图标换成透明 | 22 controller button icons replaced with transparent ones
+    if os.environ.get('DM_OVERLAY_MAC'):   # Mac App：再出一套键盘键帽，放在触屏键帽同一个目录、文件名「<平台>k<名字>」（宿主 dm_padmode.c 的键盘键帽路径 Ztouch_controller_buttons_ui/%sK%s） | Mac App: additionally produce a set of keyboard key caps, placed in the same directory as the touch key caps with file names "<platform>k<name>" (the keyboard key-cap path of the host's dm_padmode.c is Ztouch_controller_buttons_ui/%sK%s)
+        import kbd_glyphs; REPL.update({'data/hd/global/ui/ztouch_controller_buttons_ui/switchk'+os.path.basename(k):v for k,v in kbd_glyphs.build(romfs,t).items()})
     REPL.update(touch_layout.build_profile(romfs,t))   # 大字号 | Large font size
     import touch_strings; ts,nts=touch_strings.build(romfs,t); REPL.update(ts)   # 排版用的串（大字号）；手柄说法 → 触摸说法改由宿主按模式换（旁路表 touch_strings.tsv，见 emit） | Strings used for typesetting (large font size); controller wording → touch wording is now switched by the host according to mode (sidecar table touch_strings.tsv, see emit)
     TS=touch_strings.build_sidecar(romfs)
@@ -66,11 +72,20 @@ with tempfile.TemporaryDirectory() as t:
     for rel,gd in (('controller/pauselayoutgardenhd.json',1),('controller/pauselayouthd.json',0)):   # 手柄版暂停菜单：一键重开 / 切换难度 / 存放 / 分享诊断日志 | Controller pause menu: one-tap restart / change difficulty / Deposit / Share Diagnostics
         lp,lt=touch_layout.read_layout(romfs,rel); o=os.path.join(tpad,'pad_pause%d.json'%gd); open(o,'w',encoding='utf-8').write(touch_layout.pad_pause(lt,gd,share=not os.environ.get('DM_OVERLAY_MAC'))); PR[lp.lower()]=o
     # 大秘境面板（借「消息记录」面板外壳，touch_layout._rift_panel）：手柄版同一份。少了它手柄模式点秘境门开出来的是空的原版消息记录面板、进不了秘境；手柄键在 dm_rift_ui.c
-    # Greater Rift panel (borrows the shell of the "Message Log" panel, touch_layout._rift_panel): the controller version uses the same one. Without it,
-    # tapping the Rift portal in controller mode opens an empty original Message Log panel and the Rift cannot be entered; the controller keys are in
-    # dm_rift_ui.c
+    # 手柄版的系统提示框：原版那份（停靠 y −500）下沿压着底栏上方那行「生命 / 法力」数值，数值位数多时字伸进框里。只把停靠位置上提 90 单位（下沿高过数值行），其余原样
+    # Greater Rift panel (borrowing the shell of the "message log" panel, touch_layout._rift_panel): the same for the gamepad layout. Without it, tapping a rift door in gamepad mode opens the empty original message log panel and the rift cannot be entered; gamepad keys are in dm_rift_ui.c
+    # The gamepad layout's system notice box: in the original (docked at y -500) its lower edge sits on the "life / mana" numbers above the bottom bar, and with many digits the text runs into the box. Only the docking position is raised by 90 units (lower edge above the number row); everything else as in the original
+    lp,lt=touch_layout.read_layout(romfs,'controller/notificationpanelhd.json'); assert lt.count('"y": -500')==1, lp   # 原版手柄版提示框的停靠位置应是 y -500（原包变了就停在这里） | the original gamepad notice box should dock at y -500 (if the original package changes, stop here)
+    o=os.path.join(tpad,'pad_notification.json'); open(o,'w',encoding='utf-8').write(lt.replace('"y": -500','"y": -590')); PR[lp.lower()]=o
     lp,lt=touch_layout.read_layout(romfs,'controller/messagelogpanelhd.json'); o=os.path.join(tpad,'pad_rift.json'); open(o,'w',encoding='utf-8').write(touch_layout._rift_panel(lt)[0]); PR[lp.lower()]=o
     PR.update(merc_slots.build_pad(romfs,tpad))   # 手柄版佣兵面板：同样加六个装备位 | Controller layout mercenary panel: likewise add six equipment slots
+    # 手柄版职业选择页：八个职业的点击矩形同样改成按实际站位分的竖条（touch_layout.CLASS_STRIPS，原因见那里）。手柄用左右键选、原版没暴露；
+    # Mac App 是手柄版布局 + 鼠标，点德鲁伊出术士、右半边四个职业都错一格
+    # Gamepad-layout class selection page: the click rectangles of the eight classes are likewise changed to vertical strips split by where the characters actually stand (touch_layout.CLASS_STRIPS, see there for the reason). A gamepad selects with left / right and the original never exposed this;
+    # the Mac App is the gamepad layout plus a mouse, where clicking the Druid selected the Warlock and all four classes on the right half were off by one
+    lp,lt=touch_layout.read_layout(romfs,'controller/console/charactercreatepanelhd.json')
+    for nm,x0,x1 in touch_layout.CLASS_STRIPS: lt=touch_layout.set_rect(lt,nm,x0,450,x1-x0,1300)
+    o=os.path.join(tpad,'pad_charcreate.json'); open(o,'w',encoding='utf-8').write(lt); PR[lp.lower()]=o
     PR.update(touch_layout.build_ingame(romfs,tpad,touch_layout.PAD_VENDOR,present=False)[0])   # 手柄版商人页：刷新货架钮 | Controller layout vendor page: the refresh shop stock button
     lp,lt=touch_layout.read_layout(romfs,'controller/console/mainmenupanelhd.json'); o=os.path.join(tpad,'pad_mainmenu.json'); open(o,'w',encoding='utf-8').write(touch_layout.pad_mainmenu(lt)); PR[lp.lower()]=o   # 手柄版主菜单：构建号与新版本提示 | Controller layout main menu: build number and new version notice
     lp,lt=touch_layout.read_layout(romfs,'controller/console/mainmenubuttonribbonhd.json'); o=os.path.join(tpad,'pad_ribbon.json'); open(o,'w',encoding='utf-8').write(touch_layout.pad_ribbon(lt)); PR[lp.lower()]=o   # 手柄版主菜单按钮栏：拿掉「电影动画」 | Controller layout main menu button ribbon: remove 「电影动画」(Cinematics)
@@ -151,8 +166,8 @@ with tempfile.TemporaryDirectory() as t:
     PADLAY={k:v for k,v in PR.items() if touch_path(k)}   # 手柄版只取布局（数据表、图与触屏版同一份） | The controller version takes only layouts (data tables and images are the same copy as the touch version)
     # 手柄专用清单：手柄模式下不是原版字节的布局就这几份，一份不许多、一份不许少（改上面某一行时把相邻一行整行替掉过，商人页的刷新钮就从包里掉了）
     # Controller-only list: these are the only layouts that are not original bytes in controller mode, not one more and not one fewer (once, when a line above was edited, the adjacent line was replaced whole, and the vendor page's refresh button dropped out of the package)
-    PAD_PAGES=('controller/bankexpansionlayouthd.json','controller/console/characteroptionspanelhd.json','controller/console/mainmenubuttonribbonhd.json','controller/console/mainmenupanelhd.json','controller/console/settingspanelhd.json','controller/console/switch/playerinventoryexpansionlayouthd.json','controller/console/videooptionspanelhd.json',
-               'controller/controlleroverlayhd.json','controller/hirelinginventorypanelhd.json','controller/hudmonsterhealthhd.json','controller/messagelogpanelhd.json','controller/pauselayoutgardenhd.json','controller/pauselayouthd.json','controller/vendorpanellayouthd.json')
+    PAD_PAGES=('controller/bankexpansionlayouthd.json','controller/console/charactercreatepanelhd.json','controller/console/characteroptionspanelhd.json','controller/console/mainmenubuttonribbonhd.json','controller/console/mainmenupanelhd.json','controller/console/settingspanelhd.json','controller/console/switch/playerinventoryexpansionlayouthd.json','controller/console/videooptionspanelhd.json',
+               'controller/controlleroverlayhd.json','controller/hirelinginventorypanelhd.json','controller/hudmonsterhealthhd.json','controller/messagelogpanelhd.json','controller/notificationpanelhd.json','controller/pauselayoutgardenhd.json','controller/pauselayouthd.json','controller/vendorpanellayouthd.json')
     if sorted(k[len(LAY):] for k in PADLAY)!=sorted(PAD_PAGES): raise SystemExit('gen_romfs_overlay：手柄专用布局与清单 PAD_PAGES 不一致：多 %s，少 %s' % (sorted(set(k[len(LAY):] for k in PADLAY)-set(PAD_PAGES)), sorted(set(PAD_PAGES)-set(k[len(LAY):] for k in PADLAY))))
     def emit(repl, dst, tag, prebuilt=None):   # repl → 覆盖层（新 .build.config + 一个新数据档）写到 dst/data | repl → overlay (a new .build.config + one new data archive) written to dst/data
         repl=to_touch(repl); repl.update(PADLAY)
@@ -189,6 +204,7 @@ with tempfile.TemporaryDirectory() as t:
         for n in ('.build.config',new[0]): shutil.copyfile(os.path.join(src,n),os.path.join(dst,'data',n))
         with open(os.path.join(dst,'touch_strings.tsv'),'w',encoding='utf-8') as f:   # 键 \t 原文校验（SHA-1 前 8 位） \t 触摸说法（\\ \\n \\t 转义）；宿主 dm_padmode.c 读 | key <TAB> source checksum (first 8 hex digits of SHA-1) <TAB> touch wording (backslash, newline and tab are escaped); read by the host's dm_padmode.c
             for k,o,v in TS: f.write('%s\t%s\t%s\n' % (k,o,v.replace('\\','\\\\').replace('\n','\\n').replace('\t','\\t')))
+        if os.environ.get('DM_OVERLAY_MAC'): open(os.path.join(dst,'kbd_glyphs'),'w').write('ztouch_controller_buttons_ui/switchk*.sprite\n')   # 标记文件：覆盖层带键盘键帽，宿主 dm_padmode.c 见到它才用 | marker file: the overlay carries keyboard key caps; the host's dm_padmode.c uses them only when it sees this
         open(os.path.join(dst,'ctrl_touch'),'w').write('触屏版布局在 layouts/xtouch_lay、ztouch_console_lay、0touch_console_switch_lay（dm_padmode.c 见到本文件才改写前缀）\n')
         return new[0], os.path.getsize(os.path.join(dst,'data',new[0]))
     n0,z0=emit(REPL,out,'')

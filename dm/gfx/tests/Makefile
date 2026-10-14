@@ -54,7 +54,32 @@ t_pso_skey: t_pso_skey.m ../nvn/nvn_pso_skey.h ../nvn/nvn_obj.h
 	clang $(CFLAGS) -fobjc-arc -o $@ t_pso_skey.m -framework Foundation
 t_pfv: t_pfv.m ../../host/crash.c $(GFX) $(GFX_H)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_pfv.m ../../host/crash.c $(filter-out ../nvn/nvn_mtl.m ../nvn/nvn_entry.S ../nvn/nvn_thunks.S,$(GFX)) $(FW)
-run: t_nvn t_dirty_slots t_dirty_race t_builtin t_deswz_gpu t_pace t_refl t_hmap t_cover t_fuse_check t_present_crop t_reorder_chain t_defer_chain t_zskip t_xv t_ub t_mip_extent t_rt_range_shape t_rt_range_ro t_rt_range t_rt_depth_ro t_pso_skey t_pfv
+# 依赖一行一个、按字母序（免得加一个测试就整行冲突）；下面各条命令的先后不变
+# Dependencies one per line in alphabetical order (so that adding one test does not conflict on the whole line); the order of the commands below is unchanged
+run: \
+	t_builtin \
+	t_cover \
+	t_defer_chain \
+	t_deswz_gpu \
+	t_dirty_race \
+	t_dirty_slots \
+	t_fuse_check \
+	t_hmap \
+	t_mip_extent \
+	t_nvn \
+	t_pace \
+	t_pfv \
+	t_present_crop \
+	t_pso_skey \
+	t_refl \
+	t_reorder_chain \
+	t_rt_depth_ro \
+	t_rt_range \
+	t_rt_range_ro \
+	t_rt_range_shape \
+	t_ub \
+	t_xv \
+	t_zskip
 	./t_nvn
 	./t_dirty_slots
 	./t_dirty_race
@@ -85,3 +110,10 @@ run: t_nvn t_dirty_slots t_dirty_race t_builtin t_deswz_gpu t_pace t_refl t_hmap
 	MTL_DEBUG_LAYER=1 ./t_pfv
 	python3 test_tbdr_budget.py
 .PHONY: run
+# 老接口版那一遍（图形后端编译期开关 DM_NVN_M3=1，目标 macOS 15.0）：在旁边的 tests_m3 目录里用同一份测试源码另编另跑，不动这里的缺省产物。
+# 闸门（verify/accept.sh）两遍都跑，免得以后只测一边
+# The older-API pass (compile-time switch DM_NVN_M3=1 of the graphics backend, target macOS 15.0): built and run separately from the same test sources in the sibling tests_m3 directory, leaving the default outputs here untouched.
+# The gate (verify/accept.sh) runs both passes, so that only one side being tested cannot happen later
+run-m3:
+	rm -rf ../tests_m3 && mkdir ../tests_m3 && cp Makefile *.c *.m *.py ../tests_m3/
+	$(MAKE) -C ../tests_m3 run CFLAGS="$(CFLAGS) -DDM_NVN_M3=1 -mmacosx-version-min=15.0"

@@ -44,6 +44,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <CommonCrypto/CommonDigest.h>
+#include <TargetConditionals.h>
 
 static const struct { uint32_t off; const char *pad, *touch; } k_pfx[] = {
     { 0x1d21db5, "Controller/Console/Switch/", "0touch_console_switch_lay/" },
@@ -65,10 +66,40 @@ static uint64_t g_tx_from;          // 本次事务开始的帧 | Frame at which
 static _Atomic uint32_t g_rebuilds; // 布局重建完成的次数：前端据此重认 HUD（技能钮快照的 HUD 集合按控件地址认，重建后全换了） | Number of completed layout rebuilds: the front end uses it to re-identify the HUD (the HUD set of the skill-button snapshot is identified by widget address, and they all change after a rebuild)
 uint32_t dm_padmode_rebuilds(void) { return atomic_load(&g_rebuilds); }
 
+// Mac App 的键盘键帽（只在 macOS 宿主里编；iOS 包没有这一套）：手柄版布局不变，只把取键位图标的路径换到覆盖层里那套键盘键名的图
+// （ios/tools/kbd_glyphs.py，与触屏的透明键帽同目录、文件名「<平台>K<名字>」）。玩家按了键盘就用键盘键帽，实体手柄有输入就换回手柄键帽；
+// 换图要让游戏重载布局，走的就是手柄 / 触屏那同一个切换事务（事务里的「模式」多带一位：第 0 位手柄版、第 1 位键盘键帽）。
+// Keyboard key caps of the Mac App (compiled only in the macOS host; the iOS package does not have them): the gamepad layout is unchanged, only the path the key icons are taken from is switched to the keyboard-key images in the overlay
+// (ios/tools/kbd_glyphs.py, in the same directory as the touch layout's transparent key caps, file names "<platform>K<name>"). When the player presses the keyboard, keyboard key caps are used; when a physical gamepad has input, it switches back to gamepad key caps;
+// swapping images requires the game to reload the layout, which goes through the same switching transaction as gamepad / touch (the transaction's "mode" carries one more bit: bit 0 gamepad layout, bit 1 keyboard key caps).
+#if TARGET_OS_OSX
+#define KBD_GLYPH_OFF 0x1d0f5b8
+static const char k_kbd_glyph[] = "Ztouch_controller_buttons_ui/%sK%s";
+static int g_kbd_have, g_kbd, g_kbd_next, g_app;   // 覆盖层带键盘键帽；当前路径指着键盘键帽；下一次写路径时要不要指键盘键帽；Mac App 形态 | the overlay carries keyboard key caps; the current path points at keyboard key caps; whether the next path write should point at keyboard key caps; Mac App form
+static _Atomic int g_kbd_want;
+void dm_padmode_request_kbd(int kbd) { kbd = kbd ? 1 : 0; if (!g_kbd_have) return; atomic_store(&g_kbd_want, kbd); }   // 前端（任意线程）：键盘有输入 1 / 实体手柄有输入 0。这里不立输入冻结：换键帽要等面板都关了才起（见 kbd_swap_ok），等的时候玩家照常操作；事务起的那一帧才冻结 | front end (any thread): keyboard had input 1 / physical gamepad had input 0. No input freeze is raised here: swapping key caps waits until all panels are closed (see kbd_swap_ok), and the player operates as usual while waiting; the freeze starts only on the frame the transaction starts
+int dm_padmode_kbd(void) { return g_kbd; }
+// 只换键帽的重载只在「没有面板开着」时起：重载布局会把开着的页重建一遍，设置页的勾选框会全显示成未勾、还多出「全部接受」（实测），
+// 所以局内要 HUD 在屏、游戏没停（暂停菜单 / 设置页 / 借壳的页）、手势层认的面板一个没开；前端要删除 / 选项 / 起名 / 确认框都没开。等到条件满足的那一帧再换
+// The reload that only swaps key caps starts only when "no panel is open": reloading the layout rebuilds any open page, and the checkboxes of the settings page would all show as unchecked with an extra "Accept All" appearing (measured),
+// so in game the HUD must be on screen, the game not stopped (pause menu / settings page / pages borrowing another shell) and none of the panels the gesture layer recognises open; in the front end none of delete / options / naming / confirmation boxes open. The swap happens on the first frame where the conditions hold
+static int kbd_swap_ok(uint8_t *b) {
+    int dm_ingame_now(void), dm_ui_panel_state(void), dm_ui_fe_drag_ok(void);
+    if (!dm_ingame_now()) return dm_ui_fe_drag_ok();
+    return !(*(volatile uint8_t *)(b + 0x2d5ff51) | *(volatile uint8_t *)(b + 0x2d5ff67)) && !dm_ui_panel_state();
+}
+#endif
 static int pfx_write(uint8_t *b, int pad) {
     for (unsigned i = 0; i < sizeof k_pfx / sizeof *k_pfx; i++) { const char *p = (const char *)(b + k_pfx[i].off);
+#if TARGET_OS_OSX
+        if (k_pfx[i].off == KBD_GLYPH_OFF && !strcmp(p, k_kbd_glyph)) continue;
+#endif
         if (strcmp(p, k_pfx[i].pad) && strcmp(p, k_pfx[i].touch)) { LOG("【红】手柄 / 触屏布局：main+%#x 不是预期的「%s」（是「%.32s」），不改", k_pfx[i].off, k_pfx[i].pad, p); return 0; } }
     for (unsigned i = 0; i < sizeof k_pfx / sizeof *k_pfx; i++) memcpy(b + k_pfx[i].off, pad ? k_pfx[i].pad : k_pfx[i].touch, strlen(k_pfx[i].pad));
+#if TARGET_OS_OSX
+    _Static_assert(sizeof k_kbd_glyph == sizeof "Controller/ControllerButtons/%s/%s", "键盘键帽路径要与原版路径等长");
+    if (pad && g_kbd_next) memcpy(b + KBD_GLYPH_OFF, k_kbd_glyph, sizeof k_kbd_glyph - 1);
+#endif
     return 1;
 }
 enum { NSTR = 64 };
@@ -127,9 +158,17 @@ void dm_padmode_boot(void) {   // 开机：游戏建面板之前（main.c，nnMa
     if (!m || !getenv("DM_ROMFS_OVERLAY")) return;
     if (!dm_overlay_file("ctrl_touch", mk, sizeof mk)) { LOG("手柄 / 触屏布局：覆盖层没有 ctrl_touch 标记，照原版布局"); return; }
     int pad = getenv("DM_APP") != NULL;   // Mac App：没有触屏圆钮与底栏的绘制层，开机就用原版手柄版（我们的功能页在手柄版布局里同样有），之后也不切 | Mac App: there is no drawing layer for the touch buttons and bottom bar, so it starts in the original gamepad UI (our feature pages exist in the gamepad layout as well) and never switches afterwards
+#if TARGET_OS_OSX
+    g_app = pad; g_kbd_have = pad && dm_overlay_file("kbd_glyphs", mk, sizeof mk); g_kbd = g_kbd_next = g_kbd_have; atomic_store(&g_kbd_want, g_kbd);   // Mac App 开机先用键盘键帽（多数人没接手柄）；实体手柄一有输入就换 | the Mac App starts with keyboard key caps (most people have no gamepad connected); it switches as soon as a physical gamepad has input
+    if (pad) LOG("手柄 / 触屏布局：键盘键帽 %d", g_kbd_have);
+#endif
     if (pfx_write((uint8_t *)m->base, pad)) { g_have = 1; g_cur = pad; atomic_store(&g_want, pad); g_b = (uint8_t *)m->base; str_load(); LOG("手柄 / 触屏布局：开机用%s", pad ? "原版手柄版（Mac App）" : "触屏版（layouts/xtouch_lay 等三个目录）"); }
 }
-void dm_padmode_request(int pad) { pad = pad ? 1 : 0; atomic_store(&g_want, pad); if (g_have && pad != g_cur) atomic_store(&g_freeze, 1); }   // 前端（任意线程）：从这一刻起输入就不再交给游戏 | Front end (any thread): from this moment on input is no longer handed to the game
+void dm_padmode_request(int pad) { pad = pad ? 1 : 0;
+#if TARGET_OS_OSX
+    if (g_app) pad = 1;   // Mac App 没有触屏圆钮与底栏的绘制层：手柄断开也留在手柄版，不切触屏版 | the Mac App has no drawing layer for the touch round buttons and bottom bar: stay in the gamepad layout even when the gamepad disconnects, do not switch to the touch layout
+#endif
+    atomic_store(&g_want, pad); if (g_have && pad != g_cur) atomic_store(&g_freeze, 1); }   // 前端（任意线程）：从这一刻起输入就不再交给游戏 | Front end (any thread): from this moment on input is no longer handed to the game
 int dm_padmode_current(void) { return g_cur; }
 int dm_padmode_busy(void) { return atomic_load(&g_freeze); }   // 切换事务进行中（含请求已到、事务还没起的那一小段） | Switch transaction in progress (including the short span where the request has arrived but the transaction has not started yet)
 int dm_padmode_input_gate(uint64_t *buttons) { static dm_modegate g; return dm_modegate_apply(&g, atomic_load(&g_freeze), buttons); }   // 取手柄处（hle_hid.c fill，游戏主线程） | Where the controller is read (hle_hid.c fill, game main thread)
@@ -309,6 +348,21 @@ static uint64_t legend_at(uint8_t *b, uint64_t w, uint64_t xy, int dep) {
     uint64_t ch = rd8(w + 0x58), n = rd8(w + 0x60); for (uint64_t i = n < 256 ? n : 0; ch && i-- > 0; ) { uint64_t r = legend_at(b, rd8(ch + 8 * i), xy, dep + 1); if (r) return r; }
     return 0;
 }
+// 屏上最上面那条看得见的按键提示条里有没有某个键帽（如 ＋ = 0xe005）。Mac 键盘的回车据此决定当 ＋ 还是当确认（touch_mac.c）。只许游戏主线程调
+// Whether the topmost visible key-hint bar on screen contains a given key cap (e.g. + = 0xe005). Return on a Mac keyboard uses this to decide between + and confirm (touch_mac.c). Call only from the game main thread
+static uint64_t legend_top(uint8_t *b, uint64_t w, int dep) {
+    if (!w || dep > 8 || !*(uint8_t *)(uintptr_t)(w + 0x50) || !*(uint8_t *)(uintptr_t)(w + 0x51)) return 0;
+    uint64_t vt = rd8(w) - (uint64_t)(uintptr_t)b; if (vt == 0x20b7960 || vt == 0x20b7a30) return rd8(w + 0x88) && rd8(w + 0x90) && rd8(w + 0x90) <= 12 ? w : 0;
+    uint64_t ch = rd8(w + 0x58), n = rd8(w + 0x60); for (uint64_t i = n < 256 ? n : 0; ch && i-- > 0; ) { uint64_t r = legend_top(b, rd8(ch + 8 * i), dep + 1); if (r) return r; }
+    return 0;
+}
+int dm_padmode_legend_has(uint32_t glyph) {
+    extern module_t g_mod[]; extern int g_nmod; uint8_t *b = NULL; for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) b = (uint8_t *)g_mod[i].base;
+    uint64_t root = b ? rd8((uint64_t)(uintptr_t)(b + 0x2f05458)) : 0, lg = root ? legend_top(b, root, 0) : 0; if (!lg) return 0;
+    { const char *nm = (const char *)(uintptr_t)rd8(lg + 8); if (glyph == 0xe005 && nm && !strcmp(nm, "MainMenuLegend")) return 0; }   // 主菜单例外：它的提示条有「＋ 新角色」，但回车在主菜单要当确认（进入游戏）；新角色用 = 键或鼠标点那一条 | main menu exception: its hint bar has "+ New Character", but Return on the main menu must act as confirm (enter the game); a new character uses the = key or a mouse click on that entry
+    uint64_t arr = rd8(lg + 0x88), n = rd8(lg + 0x90); for (uint64_t i = 0; i < n; i++) if (*(int32_t *)(uintptr_t)(arr + 0x40 * i + 8) == 1 && *(uint32_t *)(uintptr_t)(arr + 0x40 * i) == glyph) return 1;
+    return 0;
+}
 uint64_t dm_padmode_legend_click(float nx, float ny) {
     extern module_t g_mod[]; extern int g_nmod; uint8_t *b = NULL; for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) b = (uint8_t *)g_mod[i].base;
     if (!b || !g_cur) return 0; int W = *(int32_t *)(b + 0x211da38), H = *(int32_t *)(b + 0x211da3c); uint64_t root = rd8((uint64_t)(uintptr_t)(b + 0x2f05458)); if (!root || W <= 0 || H <= 0) return 0;
@@ -325,9 +379,38 @@ uint64_t dm_padmode_legend_click(float nx, float ny) {
     if (*(int32_t *)(uintptr_t)(e + 8) == 1) for (unsigned k = 0; k < sizeof km / sizeof *km && !btn; k++) {   // 键帽 → 键：照 legend_find 的比法，拿动作号建一个空字条目取它的键帽来比 | key cap -> key: the same comparison as legend_find, build an entry with empty text from the action number and take its key cap to compare
         uint64_t ent[8] = { 0 }; struct { const char *p; uint64_t n; } sv = { "", 0 }; ((void (*)(void *, int, int, void *))(b + 0xaa9358))(ent, km[k].act, 0, &sv); legend_free(b, ent);
         if ((int32_t)ent[1] == 1 && (uint32_t)ent[0] == gl) btn = km[k].btn; }
+    if (!btn && gl == 0xe008) btn = DM_BTN_LS;   // 按左摇杆（物品栏「打开魔盒」）同样没有动作号可比（实测 e008） | pressing the left stick (inventory "Open Cube") likewise has no action number to compare with (measured e008)
     if (!btn && gl == 0xe005) btn = DM_BTN_PLUS;   // ＋ 键没有对应的动作号可比（主菜单「＋ 新角色」）：直接认它的键帽码（实测 e005） | the + key has no action number to compare with (main menu "+ New Character"): recognise its key-cap code directly (measured e005)
     LOG("手柄提示条：鼠标点在第 %d 条（共 %llu 条，键帽 %x）→ %s", hit + 1, (unsigned long long)n, gl, btn ? "按它那个键" : "认不出是哪个键，不按");
     return btn;
+}
+// 鼠标点局内底部 HUD（Mac App）：手柄版 HUD 上的东西不是可点控件（手柄各有专键），鼠标点上去原先被当成「点世界」。按在哪个控件上就按它对应的键：
+//   技能格 1–6 = A B Y X R ZR（屏上键帽的次序）；腰带四格 = 十字键 左 上 下 右（原版对应，同 dm_touch_controls.c）；中间的钮 = ＋（开功能页）；跑 / 走钮 = 按左摇杆。
+//   血球、魔球、经验条、耐力条：没有对应的键，吃掉这一下（不许落到世界上去发令）。返回 0 = 没点在 HUD 上，1 = 按 *btn，2 = 吃掉不处理。只许游戏主线程调
+// Mouse clicks on the in-game bottom HUD (Mac App): the things on the gamepad-layout HUD are not clickable widgets (the gamepad has a dedicated key for each), and a mouse click on them used to be treated as "click the world". Pressing on a widget presses its corresponding key:
+//   skill slots 1–6 = A B Y X R ZR (the order of the key caps on screen); the four belt cells = D-pad left up down right (as in the original, same as dm_touch_controls.c); the middle button = + (open the function page); the run / walk button = press the left stick.
+//   Life orb, mana orb, experience bar, stamina bar: no corresponding key, so the click is swallowed (it must not fall through to the world and issue an order). Returns 0 = not on the HUD, 1 = press *btn, 2 = swallowed without action. Call only from the game main thread
+int dm_padmode_hud_click(float nx, float ny, uint64_t *btn) {
+    extern module_t g_mod[]; extern int g_nmod; uint8_t *b = NULL; for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) b = (uint8_t *)g_mod[i].base;
+    if (!b || !g_cur) return 0; int W = *(int32_t *)(b + 0x211da38), H = *(int32_t *)(b + 0x211da3c); uint64_t root = rd8((uint64_t)(uintptr_t)(b + 0x2f05458)); if (!root || W <= 0 || H <= 0) return 0;
+    if (*(volatile uint8_t *)(b + 0x2d5ff51) | *(volatile uint8_t *)(b + 0x2d5ff67)) return 0;   // 游戏停着（暂停菜单、大秘境选层页这类借壳的面板开着——手势层的面板名单认不到后者）：HUD 不认，免得点技能格变成在那一页上按 A | the game is stopped (pause menu, or a panel borrowing another shell such as the Greater Rift level-selection page is open - the gesture layer's panel list does not recognise the latter): the HUD is not recognised, so a click on a skill slot does not turn into pressing A on that page
+    uint64_t hud = pm_find(root, "HUDPanel", 5); if (!hud || !*(uint8_t *)(uintptr_t)(hud + 0x50) || !*(uint8_t *)(uintptr_t)(hud + 0x51)) return 0;   // pm_find 的第三个参数是起始深度：只看根的直接子面板 | the third argument of pm_find is the starting depth: look only at the direct child panels of the root
+    uint64_t xy = (uint64_t)(uint32_t)(nx * W) | ((uint64_t)(uint32_t)(ny * H) << 32), ch = rd8(hud + 0x58), n = rd8(hud + 0x60);
+    static const struct { const char *nm; uint64_t btn; } km[] = { { "SkillButton1", DM_BTN_A }, { "SkillButton2", DM_BTN_B }, { "SkillButton3", DM_BTN_Y }, { "SkillButton4", DM_BTN_X }, { "SkillButton5", DM_BTN_R }, { "SkillButton6", DM_BTN_ZR },
+        { "LevelUpButton", DM_BTN_PLUS }, { "RunButton", DM_BTN_LS }, { "RunButtonPrompt", DM_BTN_LS }, { "HealthBall", 0 }, { "ManaBall", 0 }, { "ExpBar", 0 }, { "StaminaBar", 0 }, { "SkillSwapIndicator", 0 }, { "LTButtonPrompt", 0 } };
+    static const uint64_t belt[4] = { DM_BTN_LEFT, DM_BTN_UP, DM_BTN_DOWN, DM_BTN_RIGHT };
+    #define HUD_HIT(w, q) (((int (*)(uint64_t, uint64_t))rd8(rd8(w) + 0x48))((w), (q)) & 1)
+    int px = (int)(nx * W), py = (int)(ny * H);
+    for (int pass = 0; pass < 2; pass++)   // 先认有键的（跑 / 走钮被耐力条压着一部分），再认只吃掉的 | first recognise the ones with a key (the run / walk button is partly covered by the stamina bar), then the ones that are only swallowed
+        for (uint64_t i = n < 64 ? n : 0; ch && i-- > 0; ) { uint64_t w = rd8(ch + 8 * i); if (!w || !*(uint8_t *)(uintptr_t)(w + 0x50)) continue; const char *nm = (const char *)(uintptr_t)rd8(w + 8); if (!nm) continue;
+            if (!pass && !strcmp(nm, "Belt") && HUD_HIT(w, xy)) {   // 腰带是一个控件、四格等宽（子控件只是四个键帽字）：沿这一行量出它的左右边，按四等分取格 | the belt is one widget with four equal-width cells (the child widgets are only the four key-cap glyphs): measure its left and right edges along this row and pick the cell by quarters
+                int l = px, r = px; while (l > 0 && HUD_HIT(w, (uint64_t)(uint32_t)(l - 2) | ((uint64_t)(uint32_t)py << 32))) l -= 2; while (r < W - 1 && HUD_HIT(w, (uint64_t)(uint32_t)(r + 2) | ((uint64_t)(uint32_t)py << 32))) r += 2;
+                int k = r > l ? (px - l) * 4 / (r - l + 1) : 0; if (k < 0) k = 0; if (k > 3) k = 3; *btn = belt[k]; LOG("手柄 HUD：鼠标点在腰带第 %d 格（腰带 x %d–%d）→ 按十字键 %s", k + 1, l, r, k == 0 ? "LEFT" : k == 1 ? "UP" : k == 2 ? "DOWN" : "RIGHT"); return 1; }
+            for (unsigned k = 0; k < sizeof km / sizeof *km; k++) if ((km[k].btn != 0) == !pass && !strcmp(nm, km[k].nm) && HUD_HIT(w, xy)) {
+                *btn = km[k].btn; uint64_t kb = km[k].btn; const char *kn = kb == DM_BTN_A ? "A" : kb == DM_BTN_B ? "B" : kb == DM_BTN_Y ? "Y" : kb == DM_BTN_X ? "X" : kb == DM_BTN_R ? "R" : kb == DM_BTN_ZR ? "ZR" : kb == DM_BTN_PLUS ? "PLUS" : kb == DM_BTN_LS ? "LS" : "";
+                if (kb) LOG("手柄 HUD：鼠标点在 %s → 按 %s", nm, kn); else LOG("手柄 HUD：鼠标点在 %s → 没有对应的键，这一下不处理", nm); return kb ? 1 : 2; } }
+    #undef HUD_HIT
+    return 0;
 }
 static void legend_pump(uint8_t *b, uint64_t frame) {   // 游戏主线程每帧 | Game main thread, every frame
     static int miss, tot; static uint64_t logged; int test = getenv("DM_TEST_LEGEND") != NULL;
@@ -386,18 +469,40 @@ void dm_padmode_step(uint8_t *b, uint64_t frame) {   // 游戏主线程每帧（
           for (int i = 0; i < g_nstr && i < 3; i++) { struct { const char *s; uint64_t n; } q = { g_str[i].key, g_str[i].klen }; const char *r = ((const char *(*)(void *))(b + 0x7f5630))(&q);
               L += (size_t)snprintf(o + L, L < sizeof o ? sizeof o - L : 0, "%s%s=「%s」", i ? "、" : "", g_str[i].key, r ? r : "(空)"); }
           LOG("DM_TEST_PADMODE：帧 %llu 模式 %s，原版取串 %s", (unsigned long long)frame, g_cur ? "手柄" : "触屏", o); } }
+#if TARGET_OS_OSX
+    // 建角模式页「极乐世界」那行左边写死的手柄键帽（布局 touch_layout.py 的 TouchBlissKey，原位 x −1665）：Mac 的覆盖层同位带了一个键盘键帽 TouchBlissKeyK，按当前键帽对调
+    // The hard-coded gamepad key cap to the left of the "Elysium" row on the character-creation mode page (TouchBlissKey in the layout touch_layout.py, original position x -1665): the Mac overlay carries a keyboard key cap TouchBlissKeyK at the same position, and the two are swapped according to the current key caps
+    if (g_kbd_have && frame % 10 == 0) { uint64_t root = rd8((uint64_t)(uintptr_t)(b + 0x2f05458)), a = root ? pm_find(root, "TouchBlissKey", 0) : 0, k = a ? pm_find(root, "TouchBlissKeyK", 0) : 0;
+        for (int i = 0; i < 2 && a && k; i++) { uint64_t w = i ? k : a; int32_t *r = (int32_t *)(uintptr_t)(w + 0x70), x = (i ? g_kbd : !g_kbd) ? -1665 : 99999; if (r[0] != x) { r[0] = x; ((void (*)(uint64_t))rd8(rd8(w) + 0x10))(w); } } }
+    // 测试开关 DM_TEST_KBDCAPS=<帧>:<0|1>[,…]：到帧当作「实体手柄有输入（0）/ 键盘有输入（1）」（无人值守的局没有实体手柄）
+    // Test switch DM_TEST_KBDCAPS=<frame>:<0|1>[,...]: at that frame act as if "a physical gamepad had input (0) / the keyboard had input (1)" (unattended runs have no physical gamepad)
+    { static int n = -1, k; static struct { uint64_t f; int m; } ev[8];
+      if (n < 0) { n = 0; const char *e = getenv("DM_TEST_KBDCAPS"); for (const char *q = e; q && *q && n < 8; ) { unsigned long long f; int m; if (sscanf(q, "%llu:%d", &f, &m) != 2) break; ev[n].f = f; ev[n].m = m; n++; q = strchr(q, ','); if (q) q++; } }
+      if (k < n && frame >= ev[k].f) { LOG("DM_TEST_KBDCAPS：帧 %llu 请求键盘键帽 %d", (unsigned long long)frame, ev[k].m); dm_padmode_request_kbd(ev[k].m); k++; } }
+#endif
     if (g_have && frame % 30 == 0) str_apply(g_cur);   // 串表开机后才装、切语言会重装：定期核 | The string table is loaded only after boot and reloaded on a language switch: check periodically
     if (!g_have) return;
     { uint32_t dm_oe_ui_opmode_reads(void); static uint64_t fp0; static uint32_t nfp; uint64_t root = rd8((uint64_t)(uintptr_t)(b + 0x2f05458)), ch = root ? rd8(root + 0x58) : 0, n = root ? rd8(root + 0x60) : 0, fp = n * 0x9e3779b97f4a7c15ull;
       for (uint64_t i = 0; ch && i < n && i < 256; i++) fp = (fp << 7 | fp >> 57) ^ rd8(ch + 8 * i);
       if (fp != fp0) { fp0 = fp; nfp++; } g_sig = dm_oe_ui_opmode_reads() + nfp; }
+#if TARGET_OS_OSX
+    int w = atomic_load(&g_want), wx = w, cx = g_cur;
+    if (g_kbd_have) { int tp = w >= 0 ? w : g_cur, tk = tp ? atomic_load(&g_kbd_want) : 0; if (tk != g_kbd && tp == g_cur && !kbd_swap_ok(b)) tk = g_kbd;
+        wx = tp | tk << 1; cx = g_cur | g_kbd << 1; if (wx == cx && w < 0) wx = -1; }   // 键帽那一位并进事务的「模式」里 | the key-cap bit is merged into the transaction's "mode"
+    int act = dm_modetx_step(&g_tx, frame, wx, cx, g_sig);
+    if (act == DM_TXA_BEGIN) { g_kbd_next = wx >> 1; w = wx & 1; }
+#else
     int w = atomic_load(&g_want), act = dm_modetx_step(&g_tx, frame, w, g_cur, g_sig);
+#endif
     if (act == DM_TXA_NONE) { if (g_tx.st == DM_TX_IDLE && atomic_load(&g_freeze)) { atomic_store(&g_freeze, 0); if (atomic_load(&g_want) != w) atomic_store(&g_freeze, 1); } return; }   // 没在切：请求时立的冻结（想要的就是当前模式 / 又改回来了）撤掉；撤的同时又来了新请求的重新立上 | Not switching: the freeze set at request time (the wanted mode is the current one / it was changed back) is lifted; if a new request arrives at the same time as the lift, it is set again
     if (act == DM_TXA_BEGIN) {
         if (!pfx_write(b, w)) { g_tx.st = DM_TX_IDLE; atomic_store(&g_want, -1); atomic_store(&g_freeze, 0); return; }
         atomic_store(&g_freeze, 1); g_tx_from = frame;
         items_run(g_cur, 1);   // 旧一侧各登记项收手（dm_mode_items.h）：在途的替按键作废、挪过的控件写回、缓存的控件地址清掉 | Registered items of the old side stand down (dm_mode_items.h): in-flight key presses on the player's behalf are voided, moved widgets written back, cached widget addresses cleared
         g_cur = w; str_apply(w); dm_oe_ui_opmode(!dm_opmode());
+#if TARGET_OS_OSX
+        g_kbd = g_kbd_next; if (g_kbd_have) LOG("手柄 / 触屏布局：键盘键帽 → %d", g_kbd);
+#endif
         LOG("手柄 / 触屏布局：切到%s版——开始（输入冻结，让游戏重载布局）", w ? "原版手柄" : "触屏"); return; }
     if (g_tx.timeouts) LOG("【红】手柄 / 触屏布局：%d 帧内没回读到界面重建（游戏没来读运行模式、界面根下的面板也没换），按超时往下走", DM_MODETX_TIMEOUT);
     if (act == DM_TXA_REPORT_BACK) { dm_oe_ui_opmode(-1); return; }

@@ -69,6 +69,14 @@ static int ground_items(uint64_t G) { int n = 0; for (int b = 0; b < 128; b++) f
 static uint64_t find_unit(uint64_t G, int type, uint32_t id) { for (int b = 0; b < 128; b++) for (uint64_t u = rd(G + 0x2230 + type * 0x400 + 8 * b); u; u = rd(u + 0x158)) if (*(uint32_t *)(uintptr_t)(u + 8) == id) return u; return 0; }
 static int gs(uint64_t u, int st) { return ((int (*)(uint64_t, int, int))(B + 0x5b9290))(u, st, 0); }
 static void ss(uint64_t u, int st, int v) { ((void (*)(uint64_t, int, int, int))(B + 0x5bc1f0))(u, st, v, 0); }
+// 属性的基础项。0x5b9290（gs）在带扩展标志的属性表上读的是合计数组（表 +0xe8：基础 + 各状态 / 光环 / 装备的加成，百分比加成已乘进去），
+// 而 0x5bc1f0（ss）写的是基础数组（表 +0x30，经 0x5bbe20）、写完由 0x5bbcd0 重算合计。「读合计、乘一个数、写回」会把加成乘两遍；要改基础项就得读基础项。
+// 基础数组：{键 = 属性号 << 16 | 层号, 值} 各 4 字节，个数在 +0x38（同 0x5b9290 里的查法，这里层号取 0）
+// The base entry of a stat. On a stat table with the extended flag, 0x5b9290 (gs) reads the totals array (table +0xe8: base plus the bonuses of states / auras / equipment, with percentage bonuses already multiplied in),
+// while 0x5bc1f0 (ss) writes the base array (table +0x30, through 0x5bbe20), after which 0x5bbcd0 recomputes the total. "Read the total, multiply by a number, write back" multiplies the bonus in twice; to change the base entry the base entry must be read.
+// Base array: {key = stat id << 16 | layer, value}, 4 bytes each, count at +0x38 (the same lookup as in 0x5b9290, with layer 0 here)
+static int gsb(uint64_t u, int st) { uint64_t sl = rd(u + 0x88); const uint32_t *a = sl ? (const uint32_t *)(uintptr_t)rd(sl + 0x30) : NULL; uint64_t n = sl ? rd(sl + 0x38) : 0;
+    if (!a || n > 4096) return 0; for (uint64_t i = 0; i < n; i++) if (a[i * 2] == (uint32_t)st << 16) return (int)a[i * 2 + 1]; return 0; }
 static uint64_t free_spot(uint64_t G, uint64_t room, int32_t pos[2]) { uint64_t out = 0; ((void (*)(uint64_t, uint64_t, int32_t *, int, int, uint64_t *, int, int))(B + 0x7160d0))(G, room, pos, 3, 0x400, &out, 4, 100); return out; }
 static void level_origin(uint64_t lv, int *x0, int *y0) { *x0 = *y0 = 1 << 30; int n = 0;
     for (uint64_t r = dm_level_rooms(lv); r && n < 2000; r = rd(r + 0x48), n++) { int x = *(int32_t *)(uintptr_t)(r + 0x60) * 5, y = *(int32_t *)(uintptr_t)(r + 0x64) * 5; if (x < *x0) *x0 = x; if (y < *y0) *y0 = y; } }
@@ -91,8 +99,12 @@ static void say(const char *key, ...) { char line[160], full[180]; va_list ap; v
 enum { ST_IDLE, ST_RUN, ST_DONE };
 static struct {
     _Atomic int st; int tier, maps[3], nmaps, cur;                    // 本次层数、串起来的图、正在第几张 | This rift's level, the chained maps, which map we are on
+    _Atomic int gdead, gtotal;   // 守护者：当前这一波已倒下几位 / 这一波刷出几位（顶部条用） | Guardians: how many of the current wave are down / how many this wave spawned (for the top bar)
+    int nwave, wave, wcls[3][2], wn[3], whp[3], wdm[3]; uint32_t wave_t;   // 守护者分几波（95 层起 2 波、100 层 3 波）、当前第几波（0 起）、各波的类号 / 人数 / 生命与伤害系数（×1000）、上一波全倒那一拍（0 = 不在两波之间） | how many Guardian waves (2 from level 95, 3 at level 100), the current wave (from 0), each wave's class ids / count / life and damage factors (x1000), the tick the previous wave was all down (0 = not between two waves)
     _Atomic int score, need; uint64_t t0_ns; _Atomic int timeout, guard_dead;    // 分数（客户端加）、开局时刻（客体时钟）、超时、守护者已死 | Score (added by the client), start time (guest clock), timed out, guardian dead
-    uint32_t guard; int guard_cls, inc;                                 // 守护者单位 id；成功涨了几层 | Guardian unit id; how many levels were gained on success
+    int su_order[43], su_next, su_cnt; uint32_t su_live[3], su_seen[3], su_near[3], su_last;   // 特殊精英（75 层起）：本场的出场次序（池洗过的牌）、下一位、已放几组；在场各组本体的单位 id、最后一次找到它的拍、最后一次离玩家 60 格以内的拍、上次放组的拍 | special elites (from level 75): this run's order of appearance (the shuffled pool), the next one, how many groups placed; for each group present, the body's unit id, the tick it was last found, the tick it was last within 60 tiles of the player; the tick of the last placement
+    int inv_n, inv_cls[2], inv_pct[2], inv_st[2]; uint32_t inv_id[2], inv_t[2];   // 闯入首领（80 层起）：本场几位、各自类号、在进度百分之几闯入、状态（0 未到 / 1 已预警 / 2 在场 / 3 已死 / 4 作罢）、单位 id、预警那一拍 | Invading bosses (from level 80): how many this run, their class ids, at what percentage of progress they invade, state (0 not yet / 1 warned / 2 present / 3 dead / 4 called off), unit id, the tick of the warning
+    uint32_t guard, guards[3]; int guard_cls, gcls[3], nplan, inc;      // 守护者：guards[] 各位的单位 id（guard = 第一位，非 0 即「已刷出」）、gcls[] 开局抽好的类号、nplan 本场几位；inc 成功涨了几层 | Guardians: guards[] unit id of each (guard = the first, non-zero meaning "spawned"), gcls[] class ids drawn at the start, nplan how many in this run; inc how many levels were gained on success
     int players_old;                                                    // 开局前的 /players 档 | The /players setting from before the start of the run
     char who[64];                                                       // 角色名（层数侧文件） | Character name (level sidecar file)
     int resume_tier;                                                    // 图用完 → 一键重开后新局里要直接开的层（0 = 无） | Maps ran out -> the level to open directly in the new run after the one-tap restart (0 = none)
@@ -100,8 +112,8 @@ static struct {
 static struct { uint64_t G, player; uint32_t last_t; int eligible; uint32_t door, next_door, town_door, pend, pend_at; int door_tried, lv_prev, dead; int used[24], nused; int redir; int last_lv, last_x, last_y, nd_lv, nd_x, nd_y, tp_lv, tp_x, tp_y, resume, gift_due; uint32_t tp_until; } L;   // used = 本局秘境用过的图（已生成过的关卡同一局里不会重新生成，下次不抽）   // 本局 | used = maps used by the rift in this run (levels already generated are not regenerated in the same run, so they are not drawn next time)   // This run
 // 选层页 / 继续放弃页（前端 dm_rift_menu.m 画，点按经下面的请求回到服务端拍里执行）
 // Level selection page / continue-abandon page (drawn by the front end dm_rift_menu.m; taps go back through the requests below to be executed in the server tick)
-enum { MENU_NONE, MENU_SELECT, MENU_CHOICE };
-static struct { _Atomic int menu, req_start, req_cont, req_abandon, clvl; } M;
+enum { MENU_NONE, MENU_SELECT, MENU_CHOICE, MENU_NEXT };   // MENU_NEXT：碰了守护者处「下一层」那扇门，先问一句（公开仓库 原先碰一下就开新一场，地上没捡的东西回不去） | MENU_NEXT: the "next level" door at the Guardian was touched; ask first (touching it used to start a new run at once, and uncollected items on the ground could no longer be reached)
+static struct { _Atomic int menu, req_start, req_cont, req_abandon, req_next, clvl; } M;
 
 // 侧文件：<存档工作目录>/<角色名>/<角色名>.sw_rift（同刷怪积分牌的写法：写在工作目录、随存档提交）。一行一项，键在前：
 //   tier N（下次进门打第 N 层）/ best N（通关过的最高层）/ clears N（通关次数）；best / clears 只计 15 分钟内打倒守护者的（超时通关不算过关；旧文件里的数不回溯）/ deaths N（秘境里死亡次数）/
@@ -270,16 +282,30 @@ int dm_rift_active(void) { return atomic_load(&K.st) == ST_RUN; }
 // ---- 界面读数（前端每帧）
 // 挑战计时一律读客体时钟 guest_ns()（hle_os.c）：App 在后台 / 锁屏、系统键盘弹着的时候它不走，倒计时也就不走；
 // 回城、开面板、读取画面这些游戏照常运行的时间照常计入。开局时刻不落盘（侧文件里记的是用时秒数）。公开仓库
+// 本层完成后的下一层层号：限时内完成涨 K.inc 层（封顶 100），超时完成不涨。算下一层只有这一处——守护者处那扇门、结算日志、顶部进度条上的「下次第 N 层」都取它
+// （顶部条原先自己用 tier + inc 算、没封顶，100 层限时通关后写「下次第 103 层」，公开仓库）
 // ---- UI readouts (front end, every frame)
-// All challenge timing reads the guest clock guest_ns() (hle_os.c): it does not advance while the App is in the background / the screen is locked or while the system keyboard is up, so the countdown does not advance either;
-// time during which the game keeps running -- back in town, panels open, loading screens -- counts as usual. The start time is not written to disk (the sidecar file records elapsed seconds).
+// The challenge timer always reads the guest clock guest_ns() (hle_os.c): it does not advance while the App is in the background / the screen is locked / the system keyboard is up, so the countdown does not advance either;
+// time during which the game keeps running - in town, with a panel open, on the loading screen - counts as usual. The start moment is not persisted (the sidecar file records elapsed seconds).
+// The next level after this one is completed: completing within the time limit goes up K.inc levels (capped at 100), completing overtime does not go up. The next level is computed in this one place only - the door at the Guardian, the completion log and "next: level N" on the progress bar at the top all take it from here
+// (the top bar used to compute tier + inc by itself without the cap, and wrote "next: level 103" after a timed clear of level 100)
+static int next_tier(void) { int nt = K.inc ? K.tier + K.inc : K.tier; return nt > 100 ? 100 : nt; }
+// 「进行中且已超时」：限时到了但守护者还没倒——还能打完、有掉落，但不计通关。只有这一处算；顶部条与城里入口菜单都读它，不各自拿剩余秒数去猜
+// （公开仓库 超时后只弹一次提示，之后顶部条只剩红色 0:00 和平常的目标，城里菜单仍叫「进行中」，分不清是超时还是还在限时内）
+// "In progress and overtime": the time limit has passed but the Guardian is not down yet - the run can still be finished and still drops loot, but does not count as a clear. Computed in this one place only; the top bar and the town entrance menu both read it instead of each guessing from the seconds left
+// (after timing out only one message was shown, then the top bar was left with a red 0:00 and the usual goal, and the town menu still said "in progress", so overtime could not be told from still being within the limit)
+static int rift_overtime(void) { return atomic_load(&K.st) == ST_RUN && K.t0_ns && guest_ns() - K.t0_ns >= (uint64_t)RIFT_SECS * 1000000000ull; }
 static int g_left_done;   // 结算时剩余秒数：打倒守护者后顶部条与面板都显示它，不再往下走 | Seconds left at completion: after the guardian is defeated both the top bar and the panel show it, and it no longer counts down
 int dm_rift_hud(dm_rift_hud_t *o) {
     int st = atomic_load(&K.st); if (st != ST_RUN && st != ST_DONE) return 0;
     uint64_t now = guest_ns();
     int el = K.t0_ns ? (int)((now - K.t0_ns) / 1000000000ull) : 0; int need = atomic_load(&K.need);
     o->tier = K.tier; o->progress = need > 0 ? (float)atomic_load(&K.score) / need : 0; if (o->progress > 1) o->progress = 1;
-    o->secs_left = st == ST_DONE ? g_left_done : RIFT_SECS - el; o->done = st == ST_DONE; o->guardian = K.guard != 0 && !atomic_load(&K.guard_dead); o->inc = K.inc;
+    o->secs_left = st == ST_DONE ? g_left_done : RIFT_SECS - el; o->done = st == ST_DONE; o->guardian = K.guard != 0 && !atomic_load(&K.guard_dead); o->inc = K.inc; o->next = next_tier(); o->overtime = rift_overtime();
+    // 第二行写哪一句在这里定（一个来源）：超时优先说明「已超时」，守护者在场就把「击败守护者」合进同一句；两位以上带（已倒 / 总数）
+    // Which sentence the second line shows is decided here (one source): overtime takes priority with "Overtime", and when Guardians are present "Slay the Rift Guardian" is merged into the same sentence; with two or more it carries (fallen / total)
+    o->gdead = atomic_load(&K.gdead); o->gtotal = atomic_load(&K.gtotal); o->wave = K.wave + 1 - (K.wave_t != 0); o->nwave = K.nwave;
+    o->goal = o->overtime ? (o->guardian ? (o->gtotal >= 2 ? 5 : 4) : 3) : o->guardian ? (o->gtotal >= 2 ? 2 : 1) : 0;
     return 1;
 }
 
@@ -288,7 +314,105 @@ int dm_rift_hud(dm_rift_hud_t *o) {
 enum { NQ = 256 };
 static _Atomic uint32_t g_newq[NQ]; static _Atomic uint32_t g_newq_w;   // 新见到的敌对怪 id（服务端按目标等级改属性） | Newly seen hostile monster ids (the server changes stats by target level)
 static uint32_t g_swept[1024]; int dm_rift_swept(uint32_t id) { return id && g_swept[id & 1023] == id; }   // 这只是结算后清掉的（积分牌不计击杀） | This one was cleared after completion (the kill board does not count the kill)
+// ---- 75 层以上的内容（设计稿）。总开关 DM_RIFT_HI=0 整体关回原状；测试开关 DM_RIFT_TEST_HI=<段名,…> 在任意层强制某一段（duo = 双守护者）
+// ---- Content above level 75 (design draft). The master switch DM_RIFT_HI=0 turns it all back to the previous behaviour; the test switch DM_RIFT_TEST_HI=<segment,...> forces a segment at any level (duo = dual Guardians)
+static int hi_on(const char *seg, int from) { static int off = -1; if (off < 0) { const char *e = getenv("DM_RIFT_HI"); off = e && !strcmp(e, "0"); } if (off) return 0;
+    const char *f = getenv("DM_RIFT_TEST_HI"); return (f && strstr(f, seg)) || K.tier >= from; }
+// 双守护者每位的生命系数 s、伤害系数 d（×1000）：75 层 0.51 / 0.75，线性到 100 层 0.775 / 1.0；低于 75 层被测试开关强制时取 75 层的值。
+// s 的两端：75 层双守护者期望总量 = 74 层单守护者的 1.16 倍（不跳变；双守护者的池是四位，见 k_duo）；100 层最大的单体（巴尔）正好不过属性上限。d 用替身读数校过一轮（设计稿第十五节：75 层六对的承伤每秒峰值最高是 74 层最重单体的 1.06 倍，各 1 局）
+// Life factor s and damage factor d of each of two Guardians (x1000): 0.51 / 0.75 at level 75, linear to 0.775 / 1.0 at level 100; below level 75 (forced by a test switch) the level-75 values are used.
+// The two ends of s: the expected total of two Guardians at level 75 = 1.16 times a single Guardian at level 74 (no jump; the dual pool has four bosses, see k_duo); at level 100 the largest single one (Baal) stays just within the stat limit. d has been calibrated once with stand-in readouts (for the six pairs at level 75 the highest per-second peak of damage taken is 1.06 times the heaviest single Guardian at level 74, one run each)
+static int hi_duo_x1000(int which) { int t = K.tier < 75 ? 75 : K.tier > 100 ? 100 : K.tier; return which ? 750 + 250 * (t - 75) / 25 : 510 + 265 * (t - 75) / 25; }
+// 多位首领同场的池不含安达利尔（156）：她死后十几到四十拍，同场的另一位首领会跟着死——与巴尔、迪亚波罗各试过，3 + 1 局必现，那时另一位还剩大半生命、
+// 不是被伤害打死的；带不带任务事件门都一样；对照组（都瑞尔 + 迪亚波罗）没有这回事。看起来是她原版的死亡过程带的，没读到那段代码。单守护者（74 层及以下）仍是五位
+// The pool for several bosses in one fight does not include Andariel (156): ten-odd to forty ticks after she dies, the other boss in the same fight dies too - tried with Baal and with Diablo, reproduced in 3 + 1 runs, with the other one still at most of its life at that point,
+// not killed by damage; the same with or without the quest-event gate; the control pair (Duriel + Diablo) shows nothing of the kind. It appears to come with her original death sequence; that code has not been read. A single Guardian (level 74 and below) is still drawn from all five
+static const int k_duo[] = { 211, 242, 243, 544 };
+static int g_entry_lv, g_entry_x, g_entry_y;   // 玩家进当前这张秘境图时的落点（退场找不到远处空地时的兜底去处：一定可达） | where the player entered the current rift map (the fallback destination when no distant open ground is found for leaving: always reachable)
+// ---- 特殊精英（75 层起；设计稿第二十四节）：层数越高原生怪越少、特殊精英越多，90 层起随机生成的原生怪为 0。
+// 池：超级金怪表（66 行）里去掉带任务掉落 / 固定场地 / 脚本的 23 行（设计稿第二十三节；按原版常识圈的），剩 43 行，女伯爵（行 6）在内。掉落一律照原版。
+// 放法：不在开局定点，跟着玩家推进一组一组放——在场组数低于上限、玩家 40 格内敌对单位少于 SU_NEAR 只时，在玩家前方约 70 格的空地用原版函数
+//   main+0x69b310(游戏, 房间, x, y, 行号, 0) 连随从一起刷一组（第六个参数含义没查到，取 0 的依据是探路与验收轮的局）。守护者现身后不再放新的。
+//   它们走现有的「客户端见到 → 认作敌对 → 按层改属性 → 计分（本体 15、随从 2）」流程；本体（怪物数据带超级独特标志的，含地图自带的）生命另乘 SU_HP_X，到软顶为止；
+//   我们刷的组里的随从生命另乘 SU_MINION_X1000 ÷ 1000。两个系数按「一场的生命和 ≈ 74 层一场 × 层倍率之比」校（设计稿第二十五节）：池里高幕的行多、随从按原生等级起算偏肉。
+//   追击：在场的本体离玩家 80 格以外满 5 秒，挪到玩家前方约 70 格——不会被甩在卸载的房间里占着名额，玩家不动它们也会找上来。
+//   两个距离都按「屏幕外」取（推算：一格横向约 16 像素、纵向约 8 像素，1952×900 的画面半宽约 61 格、半高约 56 格；没用截图核），玩家看不到它消失、也看不到它出现
+// 本场有巴尔（守护者或闯入）时不抽随从 9 只的三行（24、36、38）：巴尔自己召的触手已占同屏余量。
+// 总开关 DM_RIFT_HI=0；测试开关 DM_RIFT_TEST_HI=su（低层强开）、DM_RIFT_TEST_SUROWS=<行号>,…（指定出场次序）、DM_RIFT_TEST_NAT=<百分数>（指定原生怪比例）
+// ---- Special elites (from level 75; design draft section 24): the higher the level, the fewer native monsters and the more special elites; from level 90 randomly generated native monsters are 0.
+// Pool: the super unique table (66 rows) minus the 23 rows with quest drops / fixed locations / scripts (design draft section 23; picked by common knowledge of the original), leaving 43 rows, the Countess (row 6) included. Drops always follow the original.
+// Placement: not at fixed points at the start, but one group at a time as the player advances - when the number of groups present is below the limit and there are fewer than SU_NEAR hostile units within 40 tiles of the player, a group is spawned with its minions on open ground about 70 tiles ahead of the player with the original function
+//   main+0x69b310(game, room, x, y, row, 0) (the meaning of the sixth argument was not found; 0 is used on the basis of the exploratory and acceptance runs). No new ones are placed after the Guardians appear.
+//   They go through the existing "client sees it -> treated as hostile -> attributes scaled by level -> scored (body 15, minion 2)" flow; the body (monster data with the super unique flag, including ones placed by the map) has its life additionally multiplied by SU_HP_X, up to the soft cap;
+//   minions in the groups we spawned have their life additionally multiplied by SU_MINION_X1000 / 1000. Both factors are calibrated so that "total life in one run ~= one level-74 run x ratio of level multipliers" (design draft section 25): the pool has many high-act rows, and minions starting from their native level are on the tanky side.
+//   Pursuit: a body present more than 80 tiles from the player for 5 seconds is moved to about 70 tiles ahead of the player - it is not left behind in an unloaded room holding a slot, and comes to the player even if the player stays put.
+//   Both distances are chosen to be "off screen" (estimate: one tile is about 16 pixels horizontally and about 8 vertically; a 1952x900 view is about 61 tiles half-wide and about 56 tiles half-high; not checked with screenshots), so the player sees it neither disappear nor appear
+// When this run has Baal (as Guardian or invader), the three rows with 9 minions (24, 36, 38) are not drawn: the tentacles Baal summons himself already use up the on-screen headroom.
+// Master switch DM_RIFT_HI=0; test switches DM_RIFT_TEST_HI=su (force on at low levels), DM_RIFT_TEST_SUROWS=<row>,... (set the order of appearance), DM_RIFT_TEST_NAT=<percent> (set the native monster share)
+#define SU_NEAR 12
+#define SU_HP_X 3
+#define SU_MINION_X1000 800   // 特殊精英的随从生命另乘 0.8 | special elite minions' life additionally x0.8
+static uint32_t g_su_min[64]; static unsigned g_su_min_w;   // 我们刷的特殊精英组里的随从（单位 id）：刷出当拍在本体 15 格内找新单位记下 | minions in the special elite groups we spawned (unit ids): on the tick of spawning, new units within 15 tiles of the body are recorded
+static int su_minion(uint32_t id) { for (int i = 0; i < 64; i++) if (id && g_su_min[i] == id) return 1; return 0; }
+#define SU_HP_SOFT 225000   // 本体生命乘 SU_HP_X 的软顶：× 本层总倍率，90 层约 100 万点（读数：不设顶时攻城兽那一行 383 万） | soft cap for multiplying body life by SU_HP_X: x this level's total multiplier, about 1 million points at level 90 (reading: without a cap the siege beast row reached 3.83 million)
+static int su_nat_pct(int tier) { return tier >= 90 ? 0 : tier >= 85 ? 30 : tier >= 80 ? 55 : tier >= 75 ? 80 : 100; }   // 原生怪（密度与精英组数）留几成 | what share of native monsters (density and elite pack count) is kept
+static int su_quota(int tier) { return tier >= 90 ? 1 << 30 : tier >= 85 ? 7 : tier >= 80 ? 5 : tier >= 75 ? 2 : 0; }   // 一场最多放几组（90 层起放到守护者现身为止） | at most this many groups placed in one run (from level 90, placed until the Guardians appear)
+static int su_cap(int tier) { return tier >= 90 ? 3 : 2; }                                                              // 同时在场最多几组 | at most this many groups present at the same time
+// 刷一位超级金怪（连随从）。原版 main+0x69b310 对「表里 +0x21 字节为 0 的行」查本局已出现位图（游戏 +0x5668，第 行号 位）：出现过就返回 0、不刷——
+// 同一局里一位超级金怪只出一次（地图上自带的那位，例如图 111 的 Eldritch = 行 49，也算）。秘境同一局连开多场、池放完一轮从头，都会撞上它。
+// 做法：刷之前把这一位清掉、刷完写回原值——原版地图自带的那位该不该出现照旧，我们刷的不受这条限制
+// Spawn one super unique (with minions). The original main+0x69b310, for "rows whose byte +0x21 in the table is 0", checks this game's has-appeared bitmap (game +0x5668, bit <row>): if it has appeared, it returns 0 and spawns nothing -
+// in one game a super unique appears only once (the one placed by the map itself also counts, e.g. Eldritch on map 111 = row 49). Several rifts in a row in one game, and the pool starting again after a full round, both run into this.
+// Approach: clear this one's bit before spawning and write the original value back afterwards - whether the one the original map places should appear stays as before, and the ones we spawn are not limited by this
+static uint64_t su_spawn(uint64_t G, uint64_t room, int x, int y, int row) {
+    uint8_t *bm = (uint8_t *)(uintptr_t)(G + 0x5668 + (row >> 3)), bit = (uint8_t)(1u << (row & 7)), old = *bm & bit; *bm &= (uint8_t)~bit;
+    uint64_t u = ((uint64_t (*)(uint64_t, uint64_t, int, int, int, int))(B + 0x69b310))(G, room, x, y, row, 0);
+    uint8_t mid = *bm & bit; *bm = (uint8_t)((*bm & ~bit) | old); static int n; if (n++ < 3) LOG("秘境：刷超级金怪 行 %d：本局已出现位 刷前 %d、刷完原版置成 %d、写回 %d", row, old != 0, mid != 0, (*bm & bit) != 0); return u; }
+static int g_near_now;   // 玩家 40 格内的敌对单位数（hs_tick 每秒数一次） | number of hostile units within 40 tiles of the player (counted once a second by hs_tick)
+static const uint8_t k_su_pool[] = { 0, 1, 2, 3, 4, 6, 7, 8, 9, 11, 12, 13, 14, 16, 17, 19, 21, 22, 23, 24, 25, 32, 33, 34, 35, 36, 37, 38, 40, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59 };
+static uint32_t g_inv_gone[2]; static int g_inv_gone_xy[2][2];
+static uint32_t g_suseq_id;   // 测试开关 DM_RIFT_TEST_SUSEQ 当前在场的那位（任务事件的门见到它死要记一行）   // 已退场的闯入首领：单位 id（等它所在的房间被游戏卸载后，把它那条存档记录改成不还原；见 inv_gone_pump）与退场落点 | the one currently present for test switch DM_RIFT_TEST_SUSEQ (the quest-event gate records a line when it sees it die)   // an invading boss that has left: its unit id (once the game unloads the room it is in, its saved record is changed to do-not-restore; see inv_gone_pump) and where it was sent
+// 首领自己召出来的单位（现在只有巴尔的：触手 562–566、分身 570）。75 层以上它们不按层改属性、保持原版数值——它们是首领技能的一部分，不是秘境的怪；
+// 按层放大会让触手变成打不完的墙，并且随战斗时长在场上越积越多（实测巴尔在场 36 秒同屏多 26 只、141 秒多 44 只）。74 层及以下照旧（那条「逐位不变」的线不为此破例）。
+// 按类号认：单位上「召唤者是谁」的字段没读到；以后别的首领有召唤物要加进来
+// Units summoned by a boss itself (currently only Baal's: tentacles 562–566, clone 570). Above level 75 they are not scaled by level and keep the original values - they are part of the boss's skills, not monsters of the rift;
+// scaling them by level turns the tentacles into a wall that cannot be cleared, and they pile up on the field as the fight goes on (measured: 26 more on screen after Baal has been present for 36 seconds, 44 more after 141 seconds). Level 74 and below stay as they were (the "nothing changes" line is not broken for this).
+// Recognised by class id: the "who summoned it" field on the unit has not been read; summons of other bosses will have to be added later
+static int boss_summon(uint32_t cls) { return (cls >= 562 && cls <= 566) || cls == 570; }
+static int is_guard(uint32_t id) { return id && (id == K.guards[0] || id == K.guards[1] || id == K.guards[2] || id == K.inv_id[0] || id == K.inv_id[1] || id == g_inv_gone[0] || id == g_inv_gone[1]); }   // 守护者与闯入首领：不按普通怪再改一遍属性、不按普通怪计分 | Guardians and invading bosses: not scaled again as ordinary monsters, not scored as ordinary monsters
 static int pts_of(uint8_t fl) { return fl & 0x02 ? 15 : fl & 0x08 ? 10 : fl & 0x04 ? 5 : fl & 0x10 ? 2 : 1; }   // 怪物数据 +0x1a：超级独特 / 金怪 / 冠军 / 随从 / 普通（同 hle_target.c） | Monster data +0x1a: super unique / unique (gold) monster / champion / minion / normal (same as hle_target.c)
+// ---- 每场读数（75 层以上内容曲线的量具，docs 设计稿第 0 步）：只记、不改任何玩法。结算时打一行：
+//   用时；击杀只数与这些怪的生命上限之和（按层改完之后的值，守护者另加）；本场认作敌对并改过属性的怪的只数与生命和；
+//   玩家受到的伤害和（当前生命逐拍下降量之和，回血不抵）、每秒峰值（连续 25 拍内的最大和）、死亡次数；
+//   玩家 40 格内活着的敌对单位数的峰值与均值（每 25 拍数一次，只在秘境图里数）。
+// 生命以点计（原始定点 >> 8）。表按单位号记，每开一层清一次。击杀在客户端每帧函数里认（另一条线程），所以两个累加量用原子量；其余只在服务端拍里读写
+// ---- Per-run readouts (the measuring tool for the content curve above level 75, step 0 of the design): record only, change no gameplay. One line at completion:
+//   time taken; number of kills and the sum of those monsters' maximum life (the values after per-level scaling, Guardian added separately); number and life total of the monsters recognised as hostile and scaled in this run;
+//   total damage the player took (sum of per-tick drops in current life, healing not offset), the per-second peak (largest sum within 25 consecutive ticks), number of deaths;
+//   peak and mean of the number of living hostile units within 40 tiles of the player (counted every 25 ticks, only on rift maps).
+// Life is in points (raw fixed point >> 8). The table is keyed by unit id and cleared at the start of every level. Kills are recognised in the client's per-frame function (another thread), so the two accumulators are atomics; everything else is read and written only on server ticks
+static struct { int seq; uint32_t id[4096]; int hp[4096]; _Atomic long long kill_hp; _Atomic int kills; long long spawn_hp, guard_hp, dmg, win[25], win_sum, dmg_peak, near_sum; int spawns, wi, last_hp, deaths0, near_peak, near_n; } HS;
+static int unit_align(uint64_t u);
+static void hs_sync(void) { int sq = atomic_load(&g_run_seq); if (sq == HS.seq) return; memset(&HS, 0, sizeof HS); HS.seq = sq; HS.deaths0 = R.deaths; }
+static void hs_spawn(uint32_t id, int hp) { hs_sync(); HS.id[id & 4095] = id; HS.hp[id & 4095] = hp; HS.spawns++; HS.spawn_hp += hp; }
+static void hs_kill(uint32_t id) { if (HS.id[id & 4095] != id) return; atomic_fetch_add(&HS.kill_hp, HS.hp[id & 4095]); atomic_fetch_add(&HS.kills, 1); }
+static void hs_tick(uint64_t G, uint64_t player, uint32_t t, int lv) {
+    hs_sync(); int hp = gs(player, 6) >> 8, d = HS.last_hp > 0 && hp < HS.last_hp ? HS.last_hp - hp : 0; HS.last_hp = hp;
+    HS.dmg += d; HS.win_sum += d - HS.win[HS.wi]; HS.win[HS.wi] = d; HS.wi = (HS.wi + 1) % 25; if (HS.win_sum > HS.dmg_peak) HS.dmg_peak = HS.win_sum;
+    // 测试读数 DM_RIFT_TEST_HSLOG=1：每 750 拍打一行进行中的读数（自动跑的局打不完一整场时，用「击杀生命和 ÷ 已得分数」推算整场）
+    // Test readout DM_RIFT_TEST_HSLOG=1: print one line of in-progress readouts every 750 ticks (when an automated run cannot finish a whole run, the whole run is estimated from "killed life total / score so far")
+    { static int on = -1; if (on < 0) on = getenv("DM_RIFT_TEST_HSLOG") != NULL; if (on && t % 750 == 0 && atomic_load(&K.st) == ST_RUN) { int sc = atomic_load(&K.score);
+        LOG("秘境：读数（进行中）第 %d 层 拍 %u：分数 %d / %d，击杀 %d 只、生命和 %lld 点（每分 %.0f 点）；改过属性的敌对怪 %d 只、生命和 %lld 点；40 格内敌对单位 峰值 %d / 均值 %.1f", K.tier, t, sc, atomic_load(&K.need), atomic_load(&HS.kills), atomic_load(&HS.kill_hp), sc ? (double)atomic_load(&HS.kill_hp) / sc : 0.0, HS.spawns, HS.spawn_hp, HS.near_peak, HS.near_n ? (double)HS.near_sum / HS.near_n : 0.0); } }
+    if (t % 25 || !in_rift_map(lv)) return;
+    int px, py, n = 0; if (!unit_xy(player, &px, &py)) return;
+    for (int b = 0; b < 128; b++) for (uint64_t u = rd(G + 0x2230 + 1 * 0x400 + 8 * b); u; u = rd(u + 0x158)) { uint32_t m = *(uint32_t *)(uintptr_t)(u + 0xc); int x, y;
+        if (m == 0 || m == 12 || unit_level(u) != lv || !unit_xy(u, &x, &y) || abs(x - px) > 40 || abs(y - py) > 40 || unit_align(u)) continue; n++; }
+    HS.near_sum += n; HS.near_n++; if (n > HS.near_peak) HS.near_peak = n; g_near_now = n;
+}
+static void hs_report(int secs) {
+    LOG("秘境：读数 第 %d 层 用时 %d 秒：击杀 %d 只、生命和 %lld 点（另守护者 %lld 点）；改过属性的敌对怪 %d 只、生命和 %lld 点；承伤和 %lld 点、每秒峰值 %lld 点、死亡 %d 次；40 格内敌对单位 峰值 %d / 均值 %.1f（采样 %d 次）",
+        K.tier, secs, atomic_load(&HS.kills), atomic_load(&HS.kill_hp), HS.guard_hp, HS.spawns, HS.spawn_hp, HS.dmg, HS.dmg_peak, R.deaths - HS.deaths0, HS.near_peak, HS.near_n ? (double)HS.near_sum / HS.near_n : 0.0, HS.near_n);
+}
 void dm_rift_client_pump(uint8_t *b) {
     static uint32_t seen[4096], dead[4096]; static int lvp = -1;
     // 每开一层清一次「见过 / 已算死」两张表：表按单位号记，而单位号每局从头编——上一局（一键重开、退出再进）或上一层留下的记录会让新局里
@@ -316,13 +440,13 @@ void dm_rift_client_pump(uint8_t *b) {
     if (!in_rift_map(lv)) return;
     for (int k = 0; k < 128; k++) for (uint64_t u = rd((uint64_t)(uintptr_t)(b + 0x2d603a0 + 1 * 0x400 + k * 8)); u; u = rd(u + 0x158)) {
         uint32_t id = *(uint32_t *)(uintptr_t)(u + 8), m = *(uint32_t *)(uintptr_t)(u + 0xc), h = id & 4095;
-        if (id == K.guard) continue;   // 守护者另算 | The guardian is counted separately
+        if (is_guard(id)) continue;   // 守护者另算 | The guardian is counted separately
         int alive = m != 0 && m != 12;
         if (alive) { if (seen[h] == id) continue;
             if (((int (*)(int, uint64_t, uint64_t))(b + 0x2f7b7c))(0x165, pl, u) != 1) continue;
             seen[h] = id; uint32_t w = atomic_fetch_add(&g_newq_w, 1); atomic_store(&g_newq[w % NQ], id); continue; }
         if (seen[h] != id || dead[h] == id) continue;   // 只算活着时见过、认作敌对的 | Count only those seen alive and identified as hostile
-        dead[h] = id; uint64_t md = rd(u + 0x10); uint8_t fl = md ? *(uint8_t *)(uintptr_t)(md + 0x1a) : 0; int p = pts_of(fl);
+        dead[h] = id; hs_kill(id); uint64_t md = rd(u + 0x10); uint8_t fl = md ? *(uint8_t *)(uintptr_t)(md + 0x1a) : 0; int p = pts_of(fl);
         int s = atomic_fetch_add(&K.score, p) + p; static int ln; if (ln++ < 40 || s % 50 < p) LOG("秘境：击杀 id %u（标志 %#x，+%d）→ 分数 %d / %d", id, fl, p, s, atomic_load(&K.need));
     }
 }
@@ -380,12 +504,22 @@ static _Atomic uint32_t g_mlhp[112];   // MonLvl 表的生命列（资料片地�
 int dm_rift_tier_hp_x10(int tier, int clvl) { int p = tier < 8 ? tier : 8, l9 = dm_rift_tier_level(9, clvl); long long v = (long long)(p + 1) * 5; if (tier < 9) return (int)v;
     uint32_t h85 = atomic_load(&g_mlhp[85]), hl = l9 > 0 && l9 < 112 ? atomic_load(&g_mlhp[l9]) : 0; if (h85 && hl && hl > h85) v = v * hl / h85; return (int)(v * tier_total_x1000(tier, 0) / 1000); }
 static uint32_t monlvl(uint64_t G, int lvl, int grp) { uint64_t T = tables(G), a = rd(T + 0x1178), n = rd(T + 0x1180); if (!a || lvl < 0 || (uint64_t)lvl >= n) return 0; return *(uint32_t *)(uintptr_t)(a + (uint64_t)lvl * 0x78 + (grp * 6 + 5) * 4); }   // 组 0 AC、2 HP、3 DM；资料片地狱列 | Group 0 AC, 2 HP, 3 DM; expansion Hell column
+// 生命上限的基础项最多能写到多少：属性上限是 0x7fffff00（8388607 点，×256 定点的 32 位有符号数上限），而游戏给的是合计 = 基础 × (合计 ÷ 基础)——
+// 单位带百分比生命加成时，基础写到上限、合计就溢出成负数、被读成 1 点（里随从回到 1 就是这么来的）。所以按现在的 合计 ÷ 基础 留出余量。
+// base / full = 此刻的基础项与合计（原始定点值）；没有加成（合计不大于基础）或读不到基础项时就是属性上限本身
+// How high the base entry of maximum life may be written: the stat limit is 0x7fffff00 (8388607 points, the limit of a 32-bit signed number in x256 fixed point), while what the game presents is the total = base x (total / base) -
+// for a unit with a percentage life bonus, writing the base up to the limit makes the total overflow to a negative number, which is read as 1 point (this is how minions fell back to 1). So headroom is left according to the current total / base.
+// base / full = the base entry and the total at this moment (raw fixed-point values); with no bonus (total not greater than base) or when the base entry cannot be read, it is the stat limit itself
+static long long hp_base_limit(int base, int full) { return base > 0 && full > base ? 0x7fffff00LL * base / full : 0x7fffff00LL; }
+static int g_hp_soft;   // 额外系数的软顶（点数，按「本层总倍率 = 1」计；0 = 没有）：特殊精英本体用，免得天生就肉的怪种（攻城兽）再乘 4 变成半个守护者 | soft cap of the extra factor (points, counted with "this level's total multiplier = 1"; 0 = none): used for special elite bodies, so that naturally tanky monster types (siege beasts) do not become half a Guardian after another x4
+static int g_hp_mul = 1000;   // scale_monster 的生命额外系数（×1000）：双守护者的 s 在截顶之前乘进去——先截顶再乘的话，规则值过上限的那位（巴尔）会被多砍一刀 | extra life factor of scale_monster (x1000): the dual-Guardian s is multiplied in before the clamp - clamping first and multiplying afterwards would cut the one whose rule value exceeds the limit (Baal) a second time
 static void scale_monster(uint64_t G, uint64_t u, int lt, int l9) {   // lt = 本层的等级（守护者 + 3）、l9 = 起算层的等级 | lt = this level's level (Guardian + 3), l9 = the baseline level's level
     int l0 = gs(u, 12); if (l0 <= 0) return; if (lt > lvl_cap()) lt = lvl_cap(); if (l9 > lt) l9 = lt;
     int tx = tier_total_x1000(K.tier, 0), lb = l0 > l9 ? l0 : l9, le = l0 > lt ? l0 : lt;   // lb：「起算层那只怪」的等级；le：写进单位的等级（不降级） | lb: the level of "that monster at the baseline level"; le: the level written into the unit (never lowered)
     if (le == l0 && lb == l0 && tx == 1000) return;   // 9 层、原生等级已不低于目标：什么都不用改 | level 9 and the native level is already no lower than the target: nothing to change
     uint32_t h0 = monlvl(G, l0, 2), hb = monlvl(G, lb, 2), d0 = monlvl(G, l0, 3), db = monlvl(G, lb, 3), a0 = monlvl(G, l0, 0), a1 = monlvl(G, le, 0); if (!h0 || !d0 || !a0) return;
-    long long want = (long long)gs(u, 7) * hb / h0 * tx / 1000, hp = want; if (hp > 0x7fffff00LL) hp = 0x7fffff00LL;   // 定点 ×256；原版上限 2²³ 点 | Fixed point ×256; the original cap is 2²³ points
+    long long want = (long long)gs(u, 7) * hb / h0 * tx / 1000 * g_hp_mul / 1000; if (g_hp_soft > 0 && g_hp_mul > 1000) { long long w1 = want * 1000 / g_hp_mul, sf = (long long)g_hp_soft * 256 * tx / 1000; if (want > sf) want = w1 > sf ? w1 : sf; }   /* 软顶：额外系数最多把它乘到软顶，本来就过软顶的不再乘 | soft cap: the extra factor raises it at most to the soft cap; one already above the soft cap is not multiplied further */
+    long long hp = want, lim = hp_base_limit(gsb(u, 7), gs(u, 7)); if (hp > lim) hp = lim;   // 定点 ×256；原版上限 2²³ 点，带百分比生命加成的怪按比例留余量（hp_base_limit） | fixed point x256; the original's limit is 2^23 points, and monsters with a percentage life bonus get proportional headroom (hp_base_limit)
     // 顶到上限不静默：这只怪（多半是守护者）的生命没按线涨足，只剩伤害在涨。每开一层记前 3 只
     // Hitting the cap is not silent: this monster (most likely the Guardian) did not get its full life according to the line, and only its damage keeps
     // growing. The first 3 are logged for each level opened
@@ -446,6 +580,18 @@ static void pet_file_save(void) { char p[1200], q[1220]; if (!pet_path(p, sizeof
     snprintf(q, sizeof q, "%s.tmp", p); FILE *f = fopen(q, "w"); if (!f) { LOG("【红】秘境：随从基数侧文件写不进 %s", q); return; }
     for (int i = 0; i < g_pfn; i++) fprintf(f, "%u %d %d\n", g_pf[i].cls, g_pf[i].base, g_pf[i].boosted);
     if (fclose(f) || rename(q, p)) LOG("【红】秘境：随从基数侧文件改名失败 %s", p); }
+// 束缚恶魔生命上限的原版封顶，现算：随从表（monpet）那一行的 BoundStat1 须是生命上限（属性 7），用它的算式 BoundCalc1 让游戏自己再算一遍——
+// 就是转化那一刻原版的做法（main+0x7aaf78 起：0x51ea40 取行，行 +0x50 属性号、+0x5c 算式号，0x5285b0 求值，生命类属性左移 8 位）。
+// 算式是 min(现值, 该类封顶)，人数档读恶魔自己身上记的那份（属性 100，转化时定下、随存档走），所以对没被动过的恶魔算出来就是它现在的值。返回原始定点值；取不到 = 0
+// The original's cap on a bound demon's maximum life, computed on the spot: BoundStat1 of its row in the pet table (monpet) must be maximum life (stat 7), and its formula BoundCalc1 is evaluated by the game itself once more -
+// exactly what the original does at the moment of conversion (from main+0x7aaf78: 0x51ea40 fetches the row, row +0x50 stat id, +0x5c formula id, 0x5285b0 evaluates, life-type stats shifted left by 8).
+// The formula is min(current value, cap of this class), and the player-count tier is read from what is recorded on the demon itself (stat 100, fixed at conversion and saved with the save), so for an untouched demon the result is just its current value. Returns the raw fixed-point value; 0 = unavailable
+static int bound_cap(uint64_t u, uint64_t player) {
+    uint8_t ver = *(uint8_t *)(uintptr_t)(u + 0x1bd); if (ver < 1 || ver > 3) return 0;
+    uint64_t row = ((uint64_t (*)(uint64_t))(B + 0x51ea40))(u); if (!row || *(uint16_t *)(uintptr_t)(row + 0x50) != 7) return 0;
+    int v = ((int (*)(int, uint64_t, uint64_t, uint32_t))(B + 0x5285b0))(ver, u, player, *(uint32_t *)(uintptr_t)(row + 0x5c));
+    return v > 0 && v <= 0x7fffff ? v << 8 : 0;
+}
 static void pet_hp_pump(uint64_t G, uint64_t player, uint32_t t) {
     static int dump = -1; if (dump < 0) dump = getenv("DM_RIFT_TEST_PETDUMP") != NULL;
     if (!K.who[0]) return;
@@ -459,21 +605,40 @@ static void pet_hp_pump(uint64_t G, uint64_t player, uint32_t t) {
     int mult = on ? 1000 + (int)((long long)(top - 100) * 10 * (tier - f) / (100 - f)) : 1000, act = top || g_pfn;
     uint64_t pd = rd(player + 0x10), lst = pd ? rd(pd + 0x98) : 0, arr = lst ? rd(lst) : 0, T = tables(G); uint32_t nt = T ? *(uint32_t *)(uintptr_t)(T + 0x1300) : 0; if (!arr || nt > 64) return;
     char line[700]; int lo = 0; line[0] = 0;
-    struct { uint32_t cls; int base, boosted; } now[16]; int nn = 0;
+    struct { uint32_t cls; int base, boosted; } now[16]; int nn = 0, pf_dirty = 0;
     for (uint32_t ty = 1; ty < nt; ty++) { if (ty == 7) continue;   /* 7 = 佣兵，不算 | 7 = mercenary, not counted */
         int guard = 0; for (uint64_t nd = rd(arr + (uint64_t)ty * 0x20); nd && guard < 64; nd = rd(nd + 0x18), guard++) {
             uint32_t id = *(uint32_t *)(uintptr_t)(nd + 4); uint64_t u = find_unit(G, 1, id); if (!u) continue; uint32_t md = *(uint32_t *)(uintptr_t)(u + 0xc); if (md == 0 || md == 12) continue;
-            int cur = gs(u, 7); uint32_t cls = *(uint32_t *)(uintptr_t)(u + 4); if (cur <= 0) continue;
-            if (dump && t % 125 == 0 && lo < (int)sizeof line - 80) lo += snprintf(line + lo, sizeof line - lo, " [类型 %u 类号 %u id %u 等级 %d 生命上限 %d]", ty, cls, id, gs(u, 12), cur >> 8);
+            // cur = 生命上限的基础项（不是 gs 读到的合计）：我们写的是基础项，基数、比较、侧文件全按同一个量走；游戏给随从的百分比生命加成（技能 / 光环）由它自己乘在合计上。
+            // 原先这里读合计：有 +N% 加成的随从，写进去的「合计 × 倍率」又被游戏乘一遍 (1 + N%)，下一轮读回 ≠ 上次写入、被当成新基数再乘——每 10 拍涨 (1 + N%) 倍直到溢出
+            // cur = the base entry of maximum life (not the total gs reads): what we write is the base entry, and base, comparison and sidecar file all use the same quantity; the percentage life bonus the game gives minions (skills / auras) is multiplied onto the total by the game itself.
+            // This used to read the total: for a minion with a +N% bonus, the written "total x multiplier" was multiplied by (1 + N%) again by the game, the next readback != the last write and was taken as a new base and multiplied again - growing by (1 + N%) every 10 ticks until overflow
+            int cur = gsb(u, 7), full = gs(u, 7); uint32_t cls = *(uint32_t *)(uintptr_t)(u + 4); if (cur <= 0 || full <= 0) continue;
+            // 测试开关 DM_RIFT_TEST_PETPCT=<百分数>（造现场用）：给每只随从的基础项加一条「生命上限 +N%」（属性 76），模拟技能 / 光环给随从的常驻生命加成
+            // Test switch DM_RIFT_TEST_PETPCT=<percent> (for staging a scene): add a "maximum life +N%" entry (stat 76) to the base of every minion, imitating a standing life bonus given to minions by a skill / aura
+            { static int pct = -1; static uint32_t done[16]; static unsigned dn; if (pct < 0) { const char *e = getenv("DM_RIFT_TEST_PETPCT"); pct = e ? atoi(e) : 0; }
+              if (pct > 0) { int seen = 0; for (int i = 0; i < 16; i++) seen |= done[i] == id; if (!seen) { done[dn++ % 16] = id; int b0 = gsb(u, 7), f0 = gs(u, 7); ss(u, 76, pct);
+                  LOG("秘境：测试 DM_RIFT_TEST_PETPCT 给随从 id %u（类号 %u）加生命上限 +%d%%：基础 %d、合计 %d → 基础 %d、合计 %d", id, cls, pct, b0 >> 8, f0 >> 8, gsb(u, 7) >> 8, gs(u, 7) >> 8); full = gs(u, 7); } } }
+            if (dump && t % 125 == 0 && lo < (int)sizeof line - 110) lo += snprintf(line + lo, sizeof line - lo, " [类型 %u 类号 %u id %u 等级 %d 生命上限 %d（基础 %d）当前 %d]", ty, cls, id, gs(u, 12), full >> 8, cur >> 8, gs(u, 6) >> 8);
             if (!act) continue;
-            int k = -1; for (int i = 0; i < 64; i++) if (tb[i].id == id && tb[i].cls == cls) { k = i; break; }
+            int k = -1, fresh = 1; for (int i = 0; i < 64; i++) if (tb[i].id == id && tb[i].cls == cls) { k = i; break; }
             if (k < 0) { k = (int)(tw++ % 64); tb[k].id = id; tb[k].cls = cls; tb[k].base = cur; tb[k].last = cur;
                 for (int i = 0; i < g_pfn; i++) if (g_pf[i].cls == cls && g_pf[i].boosted == cur) { tb[k].base = g_pf[i].base; LOG("秘境：随从 id %u（类号 %u）读档带着放大后的生命上限 %d，基数按侧文件取 %d", id, cls, cur >> 8, tb[k].base >> 8); break; } }
             else if (cur != tb[k].last) { tb[k].base = cur; tb[k].last = cur; }   /* 游戏自己改过：新值当基数 | changed by the game itself: the new value becomes the base */
-            long long want = (long long)tb[k].base * mult / 1000; if (want > 0x7fffff00LL) want = 0x7fffff00LL;
-            if ((int)want != cur) { int hp = gs(u, 6); long long nh = (long long)hp * want / cur; if (nh < 256) nh = 256; if (nh > want) nh = want;
+            else fresh = 0;
+            // 一次性修正（留在存档里的值）：束缚恶魔的基数不可能高过原版封顶——高了就是修正前那个循环写进角色档的，设回封顶；
+            // 侧文件里同类号、基数也高过封顶的记录是那条链上的，一并去掉。低于封顶的污染值和正常值分不开，不碰。只在基数刚定下时判（头一次见到 / 游戏改过）
+            // One-time repair (values left in saves): a bound demon's base cannot be higher than the original's cap - if it is, it was written into the character save by the loop that existed before the fix, so set it back to the cap;
+            // records in the sidecar file with the same class id whose base is also above the cap belong to that chain and are removed as well. Polluted values below the cap cannot be told apart from normal ones and are left alone. Checked only when the base has just been established (first seen / changed by the game)
+            if (fresh && ty == 21) { int cap = bound_cap(u, player); if (cap > 0 && tb[k].base > cap) {
+                LOG("秘境：%s 的束缚恶魔（类号 %u）生命基础 %d 超过上限，已设回 %d", K.who, cls, tb[k].base >> 8, cap >> 8); tb[k].base = cap;
+                for (int i = 0; i < g_pfn; ) { if (g_pf[i].cls == cls && g_pf[i].base > cap) { g_pf[i] = g_pf[--g_pfn]; pf_dirty = 1; } else i++; } } }
+            // 封顶按合计算：合计 = 基础 × (合计 ÷ 基础)，合计不能过属性的上限（0x7fffff00 = 8388607 点；再大就溢出成负数，游戏读成 1 点）
+            // The cap is computed on the total: total = base x (total / base), and the total must not exceed the stat's limit (0x7fffff00 = 8388607 points; any larger and it overflows to a negative number, which the game reads as 1 point)
+            long long want = (long long)tb[k].base * mult / 1000, lim = hp_base_limit(cur, full); if (want > lim) want = lim;
+            if ((int)want != cur) { int hp = gs(u, 6); long long nf = (long long)full * want / cur, nh = (long long)hp * want / cur; if (nh < 256) nh = 256; if (nh > nf) nh = nf;   /* 当前生命同比例；nf = 写完后的合计 | current life in the same proportion; nf = the total after writing */
                 ss(u, 7, (int)want); ss(u, 6, (int)nh);
-                LOG("秘境：随从 id %u（宠物类型 %u，类号 %u）生命上限 %d → %lld（基数 %d，第 %d 层 ×%d.%02d）", id, ty, cls, cur >> 8, want >> 8, tb[k].base >> 8, K.tier, mult / 1000, mult % 1000 / 10); }
+                LOG("秘境：随从 id %u（宠物类型 %u，类号 %u）生命上限基础项 %d → %lld（基数 %d，第 %d 层 ×%d.%02d）；合计 %d → %d", id, ty, cls, cur >> 8, want >> 8, tb[k].base >> 8, K.tier, mult / 1000, mult % 1000 / 10, full >> 8, gs(u, 7) >> 8); }
             tb[k].last = (int)want;
             if (tb[k].last != tb[k].base && nn < 16) { now[nn].cls = cls; now[nn].base = tb[k].base; now[nn].boosted = tb[k].last; nn++; } } }
     // 侧文件 = 现在放大着的 + 刚设回基数的。设回基数的记录不当场删，留到其后第 2 次存档提交：那一刻若正有一次存盘「已序列化、还没写盘」，
@@ -486,7 +651,7 @@ static void pet_hp_pump(uint64_t G, uint64_t player, uint32_t t) {
             uint64_t gone = g_pf[i].gone ? g_pf[i].gone : cc + 1; if (cc >= gone + 1) continue;   /* 设回之后已经提交过两次：记录可以没了 | two commits have happened since it was set back: the record can go */
             nl[m].cls = g_pf[i].cls; nl[m].base = g_pf[i].base; nl[m].boosted = g_pf[i].boosted; nl[m].gone = gone; m++; }
         int same = m == g_pfn; for (int i = 0; same && i < m; i++) same = nl[i].cls == g_pf[i].cls && nl[i].base == g_pf[i].base && nl[i].boosted == g_pf[i].boosted && !nl[i].gone == !g_pf[i].gone;
-        if (!same) { g_pfn = m; for (int i = 0; i < m; i++) { g_pf[i].cls = nl[i].cls; g_pf[i].base = nl[i].base; g_pf[i].boosted = nl[i].boosted; g_pf[i].gone = nl[i].gone; } pet_file_save(); } }
+        if (!same || pf_dirty) { g_pfn = m; for (int i = 0; i < m; i++) { g_pf[i].cls = nl[i].cls; g_pf[i].base = nl[i].base; g_pf[i].boosted = nl[i].boosted; g_pf[i].gone = nl[i].gone; } pet_file_save(); } }
     if (dump && t % 125 == 0) LOG("秘境：随从读数 拍 %u（%s，第 %d 层，倍率 ×%d.%02d，侧文件 %d 条）：%s", t, atomic_load(&K.st) == ST_RUN ? "秘境进行中" : "不在秘境", K.tier, mult / 1000, mult % 1000 / 10, g_pfn, lo ? line : " 没有随从");
 }
 
@@ -727,10 +892,40 @@ static void merc_test(uint64_t G, uint64_t pl, uint32_t t) {
 static void rift_quest_obs(const uint64_t *regs) {
     static uint8_t stand_in[0x200]; uint64_t G = regs[0], mon = regs[1]; int st = atomic_load(&K.st);
     if ((st != ST_RUN && st != ST_DONE) || !G || G != L.G || !mon || !in_rift_map(any_level(mon))) return;
-    static int n; if (n++ < 6) LOG("秘境：怪物类号 %u（单位 id %u）死在秘境图里，不走原版任务事件", *(uint32_t *)(uintptr_t)(mon + 4), *(uint32_t *)(uintptr_t)(mon + 8));
+    static int n; if (n++ < 6 || (g_suseq_id && *(uint32_t *)(uintptr_t)(mon + 8) == g_suseq_id)) LOG("秘境：怪物类号 %u（单位 id %u）死在秘境图里，不走原版任务事件", *(uint32_t *)(uintptr_t)(mon + 4), *(uint32_t *)(uintptr_t)(mon + 8));
     ((uint64_t *)(uintptr_t)regs)[1] = (uint64_t)(uintptr_t)stand_in;
 }
+// 90 层起秘境图里不放普通预设怪（90 层以上没有其它怪、全是特殊精英）。观测门 OBS_PRESET_SPAWN 挂在「放一条预设单位记录」main+0x7ce800(游戏, 房间, 记录) 的入口，
+// 它只由房间激活时的放预设单位 0x7ce930 调（8 处）；我们自己刷守护者 / 闯入首领直接调 0x7ce630，刷特殊精英调 0x69b310，都不经过这里。
+// 记录 {+0 模式, +4 类号, +8 / +0x24 房内坐标, +0x18 地图 AI, +0x20 单位类型 1 怪 / 2 物件}；怪的类号分三段（原版 0x6910d0）：
+// 小于 monstats 行数（表 +0xf98）= 普通怪，再往上超级独特行数（表 +0x10b8）以内 = 超级独特，再往上 = monplace 放置码。
+// 拦的：会打人 / 刷怪的普通怪（投石车 497–500、观察员 516–519、邪恶小屋 528）；放置码里的随机怪群、金怪群、冠军、营地、group25–100 等。
+// 留的：超级独特；门 / 墙 / 攻城塔 / 监狱门 / 陷阱 / 友军野蛮人（场景，拿掉会改通行）；放置码 0 空、4 / 14–16 NPC、5 血鸦、29–31 尸体。
+// 拦法：x2 换成一份类号 −1 的副本，原版 0x6910d0 入口自己返回空（tbnz w2, #31），0x7ce630 / 0x7ce800 随之走各自的收尾，不碰任何状态；原记录不动。
+// From level 90, no ordinary preset monsters are placed in rift maps (above level 90 there are no other monsters, only special elites). Observation gate OBS_PRESET_SPAWN is hooked at the entry of "place one preset unit record" main+0x7ce800(game, room, record);
+// it is only called by the room-activation preset placement 0x7ce930 (8 call sites); our own Guardian / invading boss spawns call 0x7ce630 directly and special elite spawns call 0x69b310, neither goes through here.
+// Record {+0 mode, +4 class id, +8 / +0x24 in-room coordinates, +0x18 map AI, +0x20 unit type 1 monster / 2 object}; monster class ids fall into three ranges (original 0x6910d0):
+// below the monstats row count (table +0xf98) = ordinary monster, above that within the super unique row count (table +0x10b8) = super unique, above that = monplace placement code.
+// Blocked: ordinary monsters that attack or spawn monsters (catapults 497–500, watchers 516–519, evil hut 528); in the placement codes, random monster packs, unique packs, champions, camps, group25–100 etc.
+// Kept: super uniques; doors / walls / siege towers / prison doors / traps / friendly barbarians (scenery; removing them changes passability); placement codes 0 empty, 4 / 14–16 NPCs, 5 Blood Raven, 29–31 corpses.
+// How it is blocked: x2 is replaced by a copy with class id -1, the original 0x6910d0 entry returns null by itself (tbnz w2, #31), 0x7ce630 / 0x7ce800 then go through their own exits without touching any state; the original record is untouched.
+static void rift_preset_obs(const uint64_t *regs) {
+    static uint8_t stand_in[0x40]; static int n_blk; uint64_t G = regs[0], room = regs[1], rec = regs[2]; int st = atomic_load(&K.st);
+    if ((st != ST_RUN && st != ST_DONE) || !G || G != L.G || !room || !rec || *(int32_t *)(uintptr_t)(rec + 0x20) != 1 || !hi_on("pre", 90)) return;
+    uint64_t ex = rd(room + 0x18), lv = ex ? rd(ex + 0x90) : 0; int lvno = lv ? *(int32_t *)(uintptr_t)(lv + 0x1f8) : 0; if (!in_rift_map(lvno)) return;
+    uint64_t T = tables(G); if (!T) return; int N = *(int32_t *)(uintptr_t)(T + 0xf98), S = *(int32_t *)(uintptr_t)(T + 0x10b8), c = *(int32_t *)(uintptr_t)(rec + 4), blk;
+    if (c < 0) return;
+    if (c < N) blk = (c >= 497 && c <= 500) || (c >= 516 && c <= 519) || c == 528;
+    else if (c < N + S) blk = 0;
+    else { int p = c - N - S; blk = !(p == 0 || p == 4 || p == 5 || (p >= 14 && p <= 16) || (p >= 29 && p <= 31)); }
+    if (!blk) return;
+    memcpy(stand_in, (const void *)(uintptr_t)rec, 0x30); *(int32_t *)(stand_in + 4) = -1; *(uint64_t *)(stand_in + 0x18) = 0;
+    ((uint64_t *)(uintptr_t)regs)[2] = (uint64_t)(uintptr_t)stand_in;
+    static int all = -1; if (all < 0) all = getenv("DM_RIFT_TEST_TOUR") != NULL;
+    if (n_blk++ < 6 || n_blk % 100 == 0 || all) LOG("秘境：第 %d 层 关卡 %d 不放预设怪 类号 %d（%s %d；monstats %d 行、超级独特 %d 行；本进程累计 %d 条）", K.tier, lvno, c, c < N ? "普通" : "放置码", c < N ? c : c - N - S, N, S, n_blk);
+}
 static void rift_gates(void) { static int once; if (once) return; once = 1;
+    if (gate_obs_present(OBS_PRESET_SPAWN)) gate_obs_set(OBS_PRESET_SPAWN, rift_preset_obs); else LOG("秘境：这个产物不带放预设单位的门（r44 起的 touch 产物才带），90 层起普通预设怪照原版放");
     if (gate_obs_present(OBS_QUEST_KILL)) gate_obs_set(OBS_QUEST_KILL, rift_quest_obs); else LOG("秘境：这个产物不带任务事件的门（r36 起的 touch 产物才带），秘境里的首领死亡会走原版任务");
     if (gate_obs_present(OBS_LEVEL_WARP)) gate_obs_set(OBS_LEVEL_WARP, rift_level_obs);
     else LOG("秘境：这个产物不带出口换目的地的门（只有 r36 起的 touch 产物带），走出口会先落到原版的下一关、再由每拍检测送进下一张图"); }
@@ -773,6 +968,20 @@ static void region_set(uint64_t G, int mode) {   // mode 0 写回原值、1 置 
     for (int i = 0; i < K.nmaps; i++) { int lv = K.maps[i]; uint8_t *umin, *umax; int32_t *den = region_of(G, lv, &umin, &umax); if (!den) continue;
         int d = mode ? 0 : g_reg[lv].den, a = mode ? 0 : g_reg[lv].umin, b = mode ? 0 : g_reg[lv].umax; if (*den == d && *umin == a && *umax == b) continue;
         LOG("秘境：关卡 %d 本局怪物区域 密度 %d → %d、精英组 %d–%d → %d–%d（%s）", lv, *den, d, *umin, *umax, a, b, mode ? "已结算，不再填怪" : "写回原值"); *den = d; *umin = (uint8_t)a; *umax = (uint8_t)b; } }
+// 退场的闯入首领的真移除：它被传到远处后，那间房离玩家远、游戏自己会把房间卸载（实测约 150 拍），单位随之从单位表里拿掉、存成房间存档里的一条怪物记录
+// （记录 +0xc 是单位号）。这时把那条记录照 saved_purge 的做法改成「不还原」（标志 +0x14 置 0x100、单位号写成全 1）——以后玩家走回去，房间重新载入也不会再把它放出来。
+// 全程不走死亡 / 掉落 / 击杀计数。房间还没卸载时什么都不做（它在 150 格外原地站着）
+// True removal of an invading boss that has left: after it is teleported far away, its room is far from the player and the game unloads the room by itself (about 150 ticks, measured), taking the unit out of the unit table and storing it as one monster record in the room's saved state
+// (record +0xc is the unit id). At that point the record is changed to "do not restore" the way saved_purge does it (flag +0x14 set to 0x100, unit id written as all ones) - if the player walks back later and the room is loaded again, it is not brought out again.
+// No death / drop / kill count is involved at any point. Nothing is done while the room is not yet unloaded (it stands in place more than 150 tiles away)
+static void inv_gone_pump(uint64_t G, uint32_t t) {
+    for (int i = 0; i < 2; i++) { uint32_t id = g_inv_gone[i]; if (!id || find_unit(G, 1, id)) continue;
+        uint64_t T = tables(G), heads = rd(G + 0x1b0); int acts = T ? *(int32_t *)(uintptr_t)(T + 0x108) : 0, hit = 0; if (!heads || acts <= 0 || acts > 8) continue;
+        for (int a = 0; a < acts && !hit; a++) for (uint64_t nd = rd(heads + 8ull * a), k = 0; nd && k < 4096 && !hit; nd = rd(nd + 0x20), k++) for (uint64_t r = rd(nd + 0x10), j = 0; r && j < 1024; r = rd(r + 0xb0), j++)
+            if (*(uint32_t *)(uintptr_t)(r + 0xc) == id) { *(uint32_t *)(uintptr_t)(r + 0x14) |= 0x100; *(uint32_t *)(uintptr_t)(r + 0xc) = 0xffffffffu; hit = 1; break; }
+        if (hit) { LOG("秘境：拍 %u 退场的闯入首领（单位 id %u）所在房间已卸载，它的存档记录改成不还原", t, id); g_inv_gone[i] = 0; }
+        else { static uint32_t warned; if (warned != id && t % 250 == 0) { warned = id; LOG("秘境：拍 %u 退场的闯入首领（单位 id %u）不在单位表里，房间存档里也没找到它的记录", t, id); } } }
+}
 // 已结算的图里，地图预设点上的怪也不再放：给预设记录置原版自己的「跳过」位（记录 +0x28 位 0，放预设单位的循环 main+0x7ce9bc 读它；+0x20 = 1 是怪）。记录在房间初始化时才有，所以每拍对一遍
 // 单位阵营（0 敌对 / 2 玩家一方）：原版存房间时自己的读法（main+0x7e0f3c 起）——单位 +0x88 的属性表，+0x1c 位 31 没置 = 0；否则在 +0xd0 / +0xd8 两条链（下一条 +0x68）里找状态 0x69 的节点，
 // 对它取属性 0xac：main+0x5bc810([单位 +0x1bd] 字节, 节点, 0xac, 0)；没有这个节点 = 0
@@ -807,7 +1016,8 @@ static void rift_setup(uint64_t G) {
     uint64_t T = tables(G), a = T ? rd(T + 0x18f8) : 0, n = T ? rd(T + 0x1900) : 0;
     for (int i = 0; i < K.nmaps; i++) { int lv = K.maps[i]; uint64_t r = rd(G + 0x1d0 + 8ull * lv); if (!r) { LOG("【红】秘境：关卡 %d 没有怪物区域", lv); continue; }
         uint8_t *umin, *umax; int32_t *den = region_of(G, lv, &umin, &umax); int d0 = g_reg[lv].den, a0 = g_reg[lv].umin, b0 = g_reg[lv].umax;   // 从原值算（上一次秘境结算后置过 0） | Computed from the original values (they were set to 0 after the previous rift completion)
-        int e2 = tier_elite_x2(K.tier); *den = d0 * 3 > 10000 ? 10000 : d0 * 3; *umin = a0 * e2 / 2 > 255 ? 255 : a0 * e2 / 2; *umax = b0 * e2 / 2 > 255 ? 255 : b0 * e2 / 2;   // 精英组倍数按层（tier_elite_x2） | elite pack multiplier by level (tier_elite_x2)
+        int e2 = tier_elite_x2(K.tier); *den = d0 * 3 > 10000 ? 10000 : d0 * 3; *umin = a0 * e2 / 2 > 255 ? 255 : a0 * e2 / 2; *umax = b0 * e2 / 2 > 255 ? 255 : b0 * e2 / 2;
+        { const char *e = getenv("DM_RIFT_TEST_NAT"); int pct = e ? atoi(e) : hi_on("su", 75) ? su_nat_pct(K.tier) : 100; *den = (int)((long long)*den * pct / 100); *umin = (uint8_t)(*umin * pct / 100); *umax = (uint8_t)(*umax * pct / 100); }   // 75 层起原生怪按层减少，位置让给特殊精英 | from level 75, native monsters are reduced level by level, making room for special elites
         LOG("秘境：关卡 %d 本局怪物区域 密度 %d → %d、精英组 %d–%d → %d–%d（第 %d 层 ×%d.%d）", lv, d0, *den, a0, b0, *umin, *umax, K.tier, e2 / 2, e2 % 2 * 5);
         for (uint64_t k = 0; a && k < n; k++) if (*(int32_t *)(uintptr_t)(a + k * 0x1c) == lv) { int32_t *rm = (int32_t *)(uintptr_t)(a + k * 0x1c + 0xc); int had = 0; for (int q = 0; q < g_nmz; q++) had |= g_mz[q].lv == lv;
             if (g_built[lv]) LOG("秘境：关卡 %d 服务端已建，LvlMaze 地狱房间数不动（%d）", lv, *rm);
@@ -870,14 +1080,16 @@ static void milestone(uint64_t G, uint64_t player, int m) {
 static void finish(uint64_t G, uint64_t player, uint64_t guard) {
     uint64_t now = guest_ns();
     int left = RIFT_SECS - (int)((now - K.t0_ns) / 1000000000ull); g_left_done = left;   // 结算这一拍停表 | Stop the clock on the completion tick
-    K.inc = left >= 600 ? 3 : left >= 300 ? 2 : left > 0 ? 1 : 0; int next = K.tier + K.inc; if (next > 100) next = 100; if (!K.inc) next = K.tier;
+    hs_report(RIFT_SECS - left);
+    K.inc = left >= 600 ? 3 : left >= 300 ? 2 : left > 0 ? 1 : 0; int next = next_tier();
     if (K.inc) { R.clears++; if (K.tier > R.best) R.best = K.tier; } if (K.inc && (!R.fast[K.tier] || RIFT_SECS - left < R.fast[K.tier])) R.fast[K.tier] = RIFT_SECS - left;
     if (K.inc) pts_grant(player);   // 通关点数：R.best 更新之后、下面 rec_save 之前。只算限时内通关（「超时通关不算过关，15 分钟内才是过关」），与上一行最高通关层同一口径 | clear points: after R.best is updated and before rec_save below. Only clears within the time limit count ("a clear after the time limit does not count as passing; only within 15 minutes does"), same rule as the highest cleared level on the previous line
     if (K.inc) for (int m = 10; m <= 100; m += 10) if (K.tier >= m && !(R.ms & (1u << (m / 10 - 1)))) milestone(G, player, m);   // 限时内通关才算首通 | Only a clear within the time limit counts as a first clear
     R.tier = next; if (next > R.unlock) R.unlock = next; rec_save(); if (GB.on) gamble_apply(G);
     { int dm_request_save(void); LOG("秘境：结算请游戏存盘 → %d", dm_request_save()); }   // 层数进度（侧文件，上一行刚写进工作目录）与刚打到的东西随这次提交落盘，见 start_rift | the level progress (side file, just written into the working directory on the line above) and what was just looted go to disk with this commit, see start_rift
     if (K.inc) { char c[5] = "xa1 "; c[2] = (char)('1' + rnd(5)); give_item(G, player, c, 2, 99); }
-    if (K.inc) LOG("秘境：第 %d 层完成（剩 %d:%02d）→ 下次第 %d 层", K.tier, left > 0 ? left / 60 : 0, left > 0 ? left % 60 : 0, next); else LOG("秘境：第 %d 层超时未过关 → 不涨层、不计最高层与通关数，下次仍第 %d 层", K.tier, next);   // 剩余时间与下次层数在左上角任务条上（dm_rift_hud），不再单发一条提示 | Time left and next level are on the top-left quest bar (dm_rift_hud); no separate notice is sent anymore
+    if (K.inc && next == K.tier) LOG("秘境：第 %d 层完成（剩 %d:%02d）→ 已是最高层，没有下一层", K.tier, left > 0 ? left / 60 : 0, left > 0 ? left % 60 : 0);
+    else if (K.inc) LOG("秘境：第 %d 层完成（剩 %d:%02d）→ 下次第 %d 层", K.tier, left > 0 ? left / 60 : 0, left > 0 ? left % 60 : 0, next); else LOG("秘境：第 %d 层超时未过关 → 不涨层、不计最高层与通关数，下次仍第 %d 层", K.tier, next);   // 剩余时间与下次层数在左上角任务条上（dm_rift_hud），不再单发一条提示 | Time left and next level are on the top-left quest bar (dm_rift_hud); no separate notice is sent anymore
     atomic_store(&K.st, ST_DONE); region_set(G, 1);
     pet_hp_pump(G, player, tick_of(G));   // 随从生命当拍设回基数（结算后紧跟着会存盘，放大着的值不能进角色档） | set minion life back to the base on this very tick (a save follows right after completion, and the boosted value must not go into the character save)
     if (K.players_old) dm_hud_request_players(K.players_old);
@@ -926,36 +1138,46 @@ static void finish(uint64_t G, uint64_t player, uint64_t guard) {
         LOG("秘境：结算处门位 人 %d,%d 掩码 %#x 窗口内可达 %d 格；下一层想放 %d,%d（%s，走 %d 步）→ 取 %d,%d（档 %d，走 %d 步）；回城想放 %d,%d（%s，走 %d 步）→ 取 %d,%d（档 %d，走 %d 步）", x, y, mk, dg.reach,
             bx + ox, by + oy, ds_blk(&dg, bx + ox - x + DS_R, by + oy - y + DS_R) ? "挡" : "不挡", ds_dist(&dg, bx + ox - x + DS_R, by + oy - y + DS_R), x + nx, y + ny, t1, ds_dist(&dg, nx + DS_R, ny + DS_R),
             bx - ox, by - oy, ds_blk(&dg, bx - ox - x + DS_R, by - oy - y + DS_R) ? "挡" : "不挡", ds_dist(&dg, bx - ox - x + DS_R, by - oy - y + DS_R), x + tx, y + ty, t2, ds_dist(&dg, tx + DS_R, ty + DS_R));
-        L.next_door = place_door(G, room_at(lvp, x + nx, y + ny), x + nx, y + ny, "结算处下一层", RIFT_OBJ, 1); if (!L.next_door) LOG("【红】秘境：下一层的门开门失败");
+        L.next_door = getenv("DM_RIFT_TEST_NONEXTDOOR") ? 0 : place_door(G, room_at(lvp, x + nx, y + ny), x + nx, y + ny, "结算处下一层", RIFT_OBJ, 1)   /* 测试开关 DM_RIFT_TEST_NONEXTDOOR=1：当作这扇门没开出来（造现场） | test switch DM_RIFT_TEST_NONEXTDOOR=1: act as if this door could not be placed (for staging a scene) */; if (!L.next_door) LOG("【红】秘境：下一层的门开门失败");
         L.town_door = place_door(G, room_at(lvp, x + tx, y + ty), x + tx, y + ty, "结算处回城", TOWN_OBJ, 1); if (!L.town_door) LOG("【红】秘境：回城门开门失败"); }
-      { int nt = K.inc ? K.tier + K.inc : K.tier;   // 一条提示说清两扇门，长度与原先那句相当、系统提示框不多换行 | One notice explains both doors; about as long as the previous sentence, with no extra line wrap in the system notice box
+      {   // 一条提示说清两扇门，长度与原先那句相当、系统提示框不多换行 | One notice explains both doors; about as long as the previous sentence, with no extra line wrap in the system notice box
         // 结算只发这一条（原先「第 N 层完成…」「门已开启」各一条，加上首通奖励那条，原版系统提示框一条一条放，连着通关时会落后一层）
         // 文字控制在 16 个字以内（加上「秘境」前缀与「初入秘境…」那句等长，提示框里是一行）；层数、剩余时间、下次层数都在左上角任务条上
-        // Completion sends only this one notice (previously 「第 N 层完成…」(Level N complete...) and 「门已开启」(The door is open) were one notice each, plus the first-clear reward one; the original system notice box shows them one at a time, so with back-to-back clears it would lag one level behind)
-        // Text kept within 16 characters (with the 「秘境」(Rift) prefix it is as long as the 「初入秘境…」(First time in the rift...) sentence, one line in the notice box); the level, time left and next level are all on the top-left quest bar
-        (void)nt; if (L.next_door && L.town_door) say(K.inc ? "dmRiftSayDoneBoth" : "dmRiftSayLateBoth");
-        else if (L.next_door) say(K.inc ? "dmRiftSayDoneNext" : "dmRiftSayLateNext"); else if (L.town_door) say(K.inc ? "dmRiftSayDoneTown" : "dmRiftSayLateTown"); else say(K.inc ? "dmRiftSayDone" : "dmRiftSayLate"); } }
+        // 已在最高层（限时内通关但没有下一层）：那扇门是「重打」，不说「下一层」
+        // Completion sends only this one message (it used to be one each for "level N complete..." and "the doors are open", plus the first-clear reward one; the original's system message box shows them one at a time, so on consecutive clears it fell a level behind)
+        // The text is kept within 16 characters (with the "Rift" prefix it is as long as the "first time in a rift..." line, one line in the message box); level, time left and next level are all on the quest bar at the top left
+        // Already at the highest level (cleared within the time limit but with no next level): that door is "replay", not "next level"
+        int top = K.inc && next_tier() == K.tier;
+        if (L.next_door && L.town_door) say(top ? "dmRiftSayTopBoth" : K.inc ? "dmRiftSayDoneBoth" : "dmRiftSayLateBoth");
+        else if (L.next_door) say(top ? "dmRiftSayTopNext" : K.inc ? "dmRiftSayDoneNext" : "dmRiftSayLateNext"); else if (L.town_door) say(top ? "dmRiftSayTopTown" : K.inc ? "dmRiftSayDoneTown" : "dmRiftSayLateTown"); else say(top ? "dmRiftSayTop" : K.inc ? "dmRiftSayDone" : "dmRiftSayLate"); } }
 }
 
-// 本层完成后的下一层层号：限时内完成涨 K.inc 层（封顶 100），超时完成不涨。守护者处那扇门取这个数（结算日志、任务条上的「下次第 N 层」同源）
-// Level number of the next level after this one is completed: completing within the time limit raises it by K.inc levels (capped at 100), completing
-// over time does not raise it.
-// The portal at the Guardian's spot uses this number (same source as the completion log and the "Next: level N" on the quest bar)
-static int next_tier(void) { int nt = K.inc ? K.tier + K.inc : K.tier; return nt > 100 ? 100 : nt; }
 static void menu_fill(dm_rift_menu_t *o, int m) {
     uint64_t now = guest_ns();
     int need = atomic_load(&K.need); o->menu = m; o->best = R.best; o->unlock = R.unlock < 1 ? 1 : R.unlock; o->def = R.tier; o->ms = R.ms; o->clvl = atomic_load(&M.clvl);
-    o->tier = K.tier; o->done = atomic_load(&K.st) == ST_DONE; o->inc = K.inc; o->secs_left = o->done ? g_left_done : K.t0_ns ? RIFT_SECS - (int)((now - K.t0_ns) / 1000000000ull) : RIFT_SECS; if (o->secs_left < 0) o->secs_left = 0;
+    o->tier = K.tier; o->done = atomic_load(&K.st) == ST_DONE; o->inc = K.inc; o->next = next_tier(); o->overtime = rift_overtime(); o->secs_left = o->done ? g_left_done : K.t0_ns ? RIFT_SECS - (int)((now - K.t0_ns) / 1000000000ull) : RIFT_SECS; if (o->secs_left < 0) o->secs_left = 0;
     o->progress = need > 0 ? (float)atomic_load(&K.score) / need : 0; if (o->progress > 1) o->progress = 1;
 }
 int dm_rift_menu(dm_rift_menu_t *o) { int m = atomic_load(&M.menu); if (m == MENU_NONE) return 0; menu_fill(o, m); return 1; }
 int dm_rift_stats(dm_rift_stats_t *o) {   // 积分牌「秘境」页（dm_kills.c）：本局角色的侧文件读数；没资格 / 没读过返回 0 | Kill board 「秘境」(Rift) page (dm_kills.c): sidecar file readout for this run's character; returns 0 if not eligible / not read yet
     if (!K.who[0]) return 0; o->best = R.best; o->clears = R.clears; o->deaths = R.deaths; o->tier = R.tier; o->unlock = R.unlock; o->ms = R.ms; memcpy(o->fast, R.fast, sizeof o->fast); return 1; }
 void dm_rift_menu_close(void) { atomic_store(&M.menu, MENU_NONE); }
-void dm_rift_menu_peek(dm_rift_menu_t *o) { int m = atomic_load(&K.st) == ST_RUN || (atomic_load(&K.st) == ST_DONE && L.next_door) ? MENU_CHOICE : MENU_SELECT; menu_fill(o, m); }   // 没点门时也给页面读数（玩家自己翻到编年史「秘境」页） | Provide page readouts even when the door was not tapped (the player browsed to the chronicle 「秘境」(Rift) page themselves)
+// 城里入口该给哪一页：有一场可以回去（正在打，或打完了、旧场位置还记着）→ 继续 / 放弃，否则选层。
+// 打完那种情况按「旧场位置在不在」（L.nd_lv，结算时记、开新场 / 放弃时清）判，不按守护者处那扇门的单位号：门是开在那张图上的一个物件，
+// 没开出来（place_door 失败，有【红】日志）时单位号是 0，原先就只给选层页——玩家回不去捡地上的东西（公开仓库 里与玩法无关的那部分）
+// Which page the town entrance should give: when there is a run to go back to (in progress, or finished with the old run's position still recorded) -> Continue / Abandon, otherwise level selection.
+// The finished case is decided by "whether the old run's position is there" (L.nd_lv, recorded at completion, cleared when a new run starts / on abandon), not by the unit id of the door at the Guardian: the door is an object placed on that map,
+// and when it could not be placed (place_door failed, with a red log line) its unit id is 0, and only the level-selection page used to be given - the player could not go back to pick up what was on the ground
+static int town_menu(int st) { return st == ST_RUN || (st == ST_DONE && L.nd_lv) ? MENU_CHOICE : MENU_SELECT; }
+// 新一局开始时清掉上一局留下的页面状态与请求（开始 / 继续 / 放弃）：这几个请求由界面线程置位、服务端拍里取走，上一局结束前没被取走的不能带进新局
+// When a new game starts, clear the page state and requests left by the previous game (start / continue / abandon): these requests are set by the UI thread and taken on a server tick, and any not taken before the previous game ended must not be carried into the new game
+static void menu_reset(void) { int a = atomic_exchange(&M.req_start, 0), b = atomic_exchange(&M.req_cont, 0), c = atomic_exchange(&M.req_abandon, 0), m = atomic_exchange(&M.menu, MENU_NONE);
+    if (a || b || c || m) LOG("秘境：新局，清掉上一局留下的请求（开始 %d / 继续 %d / 放弃 %d / 页 %d）", a, b, c, m); }
+void dm_rift_menu_peek(dm_rift_menu_t *o) { menu_fill(o, town_menu(atomic_load(&K.st))); }   // 没点门时也给页面读数（玩家自己翻到编年史「秘境」页） | Provide page readouts even when the door was not tapped (the player browsed to the chronicle 「秘境」(Rift) page themselves)
 void dm_rift_menu_start(int tier) { atomic_store(&M.req_start, tier); atomic_store(&M.menu, MENU_NONE); }
 void dm_rift_menu_continue(void) { atomic_store(&M.req_cont, 1); atomic_store(&M.menu, MENU_NONE); }
 void dm_rift_menu_abandon(void) { atomic_store(&M.req_abandon, 1); atomic_store(&M.menu, MENU_NONE); }
+void dm_rift_menu_next(void) { atomic_store(&M.req_next, 1); atomic_store(&M.menu, MENU_NONE); }
 static _Atomic int g_menu_seq; int dm_rift_menu_seq(void) { return atomic_load(&g_menu_seq); }   // 点城里的门的次数（面板据此认「又点了一次」） | Number of taps on the town door (the panel uses it to recognize "tapped again")
 int dm_rift_menu_pending(void) { return atomic_load(&M.req_abandon) != 0; }   // 放弃还没在服务端拍里执行（大秘境面板据此放开暂停） | Abandon has not yet been executed in the server tick (the greater rift panel releases the pause based on this)
 
@@ -985,12 +1207,53 @@ static int start_rift(uint64_t G, uint64_t player, uint32_t t, int tier) {
     for (int q = 0; q < K.nmaps && L.nused < 24; q++) L.used[L.nused++] = K.maps[q];
     atomic_fetch_add(&g_run_seq, 1);
     rift_setup(G); K.cur = 0; atomic_store(&K.score, getenv("DM_RIFT_TEST_SCORE") ? atoi(getenv("DM_RIFT_TEST_SCORE")) : 0);   // 测试：初始分数（看进度条） | Test: initial score (to see the progress bar)
-    atomic_store(&K.guard_dead, 0); atomic_store(&K.timeout, 0); K.guard = 0; K.inc = 0;
+    atomic_store(&K.guard_dead, 0); atomic_store(&K.timeout, 0); atomic_store(&K.gdead, 0); atomic_store(&K.gtotal, 0); K.guard = 0; memset(K.guards, 0, sizeof K.guards); K.inc = 0;
+    // 本场的守护者开局就抽好（之后回城再来、继续，都是这几位）：75 层起两位不同的。测试开关 DM_RIFT_TEST_GUARDS=<类号>[,<类号>] 指定（逐对验收用）
+    // This run's Guardians are drawn at the start (returning to town and coming back, or continuing, gives the same ones): from level 75 two different ones. Test switch DM_RIFT_TEST_GUARDS=<class id>[,<class id>] specifies them (for pair-by-pair acceptance)
+    { K.nplan = hi_on("duo", 75) ? 2 : 1; K.gcls[2] = 0;
+      if (K.nplan == 2) { int a = rnd(4), b = (a + 1 + rnd(3)) % 4; K.gcls[0] = k_duo[a]; K.gcls[1] = k_duo[b]; } else { K.gcls[0] = k_guard[rnd(5)]; K.gcls[1] = 0; }
+      const char *e = getenv("DM_RIFT_TEST_GUARDS"); if (e) { int x = 0, y = 0, n = sscanf(e, "%d,%d", &x, &y); if (n >= 1 && x > 0) K.gcls[0] = x; if (n >= 2 && y > 0) K.gcls[1] = y; }
+      // 闯入首领（设计稿第二、十七、十八节）：80 层起 1 位、90 层起 2 位，开局抽好——是谁（多首领同场的池里、不与本场守护者同类号的那几位，两位不重样）、
+      // 在进度百分之几闯入（1 位：30–70；2 位：25–45 与 55–80）。同一场不重抽。掉落不干预：它被打死就照自己在当前难度的原版表掉。
+      // 测试开关：DM_RIFT_TEST_INVADE=<类号>[,<类号>] 指定是谁、DM_RIFT_TEST_INVPCT=<百分数> 指定第一位的闯入点
+      // Invading bosses (design draft): 1 from level 80, 2 from level 90, drawn at the start - who (from the pool for several bosses in one fight, not sharing a class id with this run's Guardians, the two being different),
+      // and at what percentage of progress they invade (1 boss: 30–70; 2 bosses: 25–45 and 55–80). Not redrawn within a run. Drops are not interfered with: when killed it drops from its own original table for the current difficulty.
+      // Test switches: DM_RIFT_TEST_INVADE=<class id>[,<class id>] chooses who, DM_RIFT_TEST_INVPCT=<percent> the first one's invasion point
+      { memset(K.inv_cls, 0, sizeof K.inv_cls); memset(K.inv_st, 0, sizeof K.inv_st); memset(K.inv_id, 0, sizeof K.inv_id); K.inv_n = !hi_on("invade", 80) ? 0 : (K.tier >= 90 || (getenv("DM_RIFT_TEST_HI") && strstr(getenv("DM_RIFT_TEST_HI"), "invade2"))) ? 2 : 1;
+        int pool[4], np = 0; for (int q = 0; q < 4; q++) pool[np++] = k_duo[q];   // 可以与本场守护者同类号：守护者现身时在场的闯入首领退场（见刷守护者处），两者不会同场 | it may share a class id with this run's Guardians: when the Guardians appear an invading boss that is present leaves (see where the Guardians are spawned), so the two are never on the field together
+        if (K.inv_n > np) K.inv_n = np;
+        for (int q = 0; q < K.inv_n; q++) { int j = rnd(np); K.inv_cls[q] = pool[j]; pool[j] = pool[--np];
+            K.inv_pct[q] = K.inv_n == 1 ? 30 + rnd(41) : q == 0 ? 25 + rnd(21) : 55 + rnd(26); }
+        const char *e = getenv("DM_RIFT_TEST_INVADE"); if (e && K.inv_n) { int x = 0, y = 0, n = sscanf(e, "%d,%d", &x, &y); if (n >= 1 && x > 0) K.inv_cls[0] = x; if (n >= 2 && y > 0 && K.inv_n > 1) K.inv_cls[1] = y; }
+        if ((e = getenv("DM_RIFT_TEST_INVPCT")) && K.inv_n) K.inv_pct[0] = atoi(e);
+        if (K.inv_n) { int nd = atomic_load(&K.need); atomic_store(&K.need, nd * (100 + 12 * K.inv_n) / 100);   // 打掉一位 +12% 进度：进度需求同步上调，免得内容更多反而更快出守护者 | +12% progress for each one killed: the progress requirement is raised to match, so that more content does not make the Guardians appear sooner
+            if (K.inv_n >= 2) say("dmRiftSayFoes", K.inv_n);   // 90 层起开局说一声本场有几位强敌（不说是谁、不说何时） | from level 90, say at the start how many strong enemies this run has (not who, not when)
+            LOG("秘境：本场闯入首领 %d 位：类号 %d（进度 %d%% 时）%s；进度需求 %d → %d", K.inv_n, K.inv_cls[0], K.inv_pct[0], K.inv_n > 1 ? "与另一位（见闯入时的日志）" : "", nd, atomic_load(&K.need)); } }
+      // 特殊精英：开局把池洗成本场的出场次序（放完一轮再从头）
+      // Special elites: at the start, shuffle the pool into this run's order of appearance (after a full round, start again from the top)
+      { K.su_next = K.su_cnt = 0; K.su_last = 0; memset(K.su_live, 0, sizeof K.su_live); int np = (int)sizeof k_su_pool; for (int q = 0; q < np; q++) K.su_order[q] = k_su_pool[q];
+        for (int q = np - 1; q > 0; q--) { int j = rnd(q + 1), x = K.su_order[q]; K.su_order[q] = K.su_order[j]; K.su_order[j] = x; }
+        const char *e = getenv("DM_RIFT_TEST_SUROWS"); if (e) { char bf[200]; strlcpy(bf, e, sizeof bf); int q = 0; for (char *sv, *k = strtok_r(bf, ",", &sv); k && q < np; k = strtok_r(NULL, ",", &sv)) K.su_order[q++] = atoi(k); }
+        if (hi_on("su", 75)) LOG("秘境：本场特殊精英：原生怪留 %d%%，同时在场最多 %d 组，头几位的行号 %d、%d、%d", su_nat_pct(K.tier), su_cap(K.tier), K.su_order[0], K.su_order[1], K.su_order[2]); }
+      // 守护者分波（设计稿第二十四节第 3 问）：安达利尔死时会连带杀死同场的其它首领，所以她单独一波、先出；她倒下 WAVE_GAP 拍后下一波才刷
+      //   （实测她死后 0 / 25 / 75 拍刷出的迪亚波罗都活着，各 1 局；取 75 拍留余量，也给玩家喘口气）。
+      //   95–99 层：安达利尔（生命 ×0.5 → ×0.9）→ 本场那一对（照双守护者的 s / d）；100 层：安达利尔（×1.0）→ 一对 → 另一对（四位各 ×0.5、伤害 ×1.0）。94 层及以下一波不变
+      // Guardian waves (design draft section 24, question 3): when Andariel dies she also kills the other bosses on the field, so she is a wave of her own and comes first; the next wave is spawned WAVE_GAP ticks after she falls
+      //   (measured: Diablo spawned 0 / 25 / 75 ticks after her death stayed alive, 1 run each; 75 ticks is taken to leave margin, and it also gives the player a breather).
+      //   Levels 95–99: Andariel (life x0.5 -> x0.9) -> this run's pair (with the s / d of the two-Guardian fight); level 100: Andariel (x1.0) -> a pair -> the other pair (each of the four x0.5, damage x1.0). Level 94 and below: one wave, unchanged
+      K.wave = 0; K.wave_t = 0; K.nwave = 1; K.wn[0] = K.nplan; K.wcls[0][0] = K.gcls[0]; K.wcls[0][1] = K.gcls[1]; K.whp[0] = K.nplan == 2 ? hi_duo_x1000(0) : 1000; K.wdm[0] = K.nplan == 2 ? hi_duo_x1000(1) : 1000;
+      if (K.nplan == 2 && hi_on("wave", 95)) { const char *tw = getenv("DM_RIFT_TEST_HI"); int three = K.tier >= 100 || (tw && strstr(tw, "wave3"));
+          K.wn[0] = 1; K.wcls[0][0] = 156; K.wcls[0][1] = 0; K.wdm[0] = 1000; K.whp[0] = three ? 1000 : 500 + 100 * ((K.tier < 95 ? 95 : K.tier > 99 ? 99 : K.tier) - 95);
+          K.wn[1] = 2; K.wcls[1][0] = K.gcls[0]; K.wcls[1][1] = K.gcls[1]; K.whp[1] = three ? 500 : hi_duo_x1000(0); K.wdm[1] = three ? 1000 : hi_duo_x1000(1); K.nwave = 2;
+          if (three) { int q = 0; for (int k = 0; k < 4; k++) if (k_duo[k] != K.gcls[0] && k_duo[k] != K.gcls[1] && q < 2) K.wcls[2][q++] = k_duo[k]; K.wn[2] = q; K.whp[2] = 500; K.wdm[2] = 1000; K.nwave = 3; }
+          LOG("秘境：本场守护者分 %d 波：安达利尔（生命 ×%d.%03d）→ 类号 %d 与 %d（×%d.%03d）%s", K.nwave, K.whp[0] / 1000, K.whp[0] % 1000, K.wcls[1][0], K.wcls[1][1], K.whp[1] / 1000, K.whp[1] % 1000, K.nwave == 3 ? " → 另外两位（×0.500）" : ""); }
+      K.guard_cls = K.gcls[0]; if (K.nplan == 2 && K.nwave == 1) LOG("秘境：本场守护者两位，类号 %d 与 %d（生命 ×%d.%03d、伤害 ×%d.%03d）", K.gcls[0], K.gcls[1], hi_duo_x1000(0) / 1000, hi_duo_x1000(0) % 1000, hi_duo_x1000(1) / 1000, hi_duo_x1000(1) % 1000); }
     K.t0_ns = guest_ns();
     if (getenv("DM_RIFT_TEST_LATE")) { K.t0_ns -= (uint64_t)RIFT_SECS * 1000000000ull; LOG("秘境：测试 DM_RIFT_TEST_LATE 开局即超时"); }   // 造「超时打倒守护者」现场 | set up the "Guardian defeated after time ran out" test case
     K.players_old = dm_hud_requested_players(); if (!K.players_old) K.players_old = 1;
     dm_quiet_difficulty_msg(1);   // 本局原版「游戏难度设为 N」提示不弹（观测门 15，diag.c；换局关） | The original 「游戏难度设为 N」(Game difficulty set to N) notice is not shown this run (observation gate 15, diag.c; turned off on run change)
     dm_hud_request_players(K.tier < 8 ? K.tier : 8);
+    L.nd_lv = 0;   // 旧场位置到此作废（这一场结算时重记；结算读不到玩家位置时不记，那时不能回到更早那一场的位置） | the old run's position is void from here (recorded again when this run is completed; not recorded when the player's position cannot be read at completion, in which case returning to an even earlier run's position must not happen)
     atomic_store(&K.st, ST_RUN); say("dmRiftSayStart", K.tier);   // 一行放得下（原句在提示框和聊天栏里折行，把「15 分钟」拆开；攒进度 / 打守护者在左上角任务条上有） | Fits on one line (the original sentence wrapped in the notice box and chat bar, splitting 「15 分钟」(15 minutes); building progress / fighting the guardian are on the top-left quest bar)
     LOG("秘境：拍 %u 开局 第 %d 层，图 %d → %d → %d（共 %d 张），/players %d", t, K.tier, K.maps[0], K.maps[1], K.maps[2], K.nmaps, K.tier < 8 ? K.tier : 8);
     // 进秘境 / 换层前请游戏存一次盘（dm_request_save：下一拍它走自己的定时存盘）：秘境是连着换图的高风险转场，这里崩了不该回退到 5 分钟一次的定时存盘那一刻
@@ -1002,6 +1265,23 @@ static int start_rift(uint64_t G, uint64_t player, uint32_t t, int tier) {
     if (!R.gift) L.gift_due = 1;   // 第一次进秘境送一颗彩虹刻面，只送一次：落到秘境图里再掉在脚下 | The first rift entry gives one Rainbow Facet, only once: dropped at the player's feet after landing on a rift map
     return 1;
 }
+// 刷当前这一波守护者（K.wave）。一位：人右下 6 格；两位：一左一右各 6 格。每位先照常按层改（守护者 = 本层怪物等级 + 3，起算层也 + 3，同吃本层总倍率），
+// 再乘这一波的生命系数（截顶之前乘）与伤害系数
+// Spawn the Guardians of the current wave (K.wave). One: 6 tiles to the player's lower right; two: 6 tiles to the left and 6 to the right. Each is first scaled by level as usual (Guardian = this level's monster level + 3, the starting level also + 3, taking this level's total multiplier as well),
+// then multiplied by this wave's life factor (before capping) and damage factor
+#define WAVE_GAP 75
+static void guard_wave(uint64_t G, uint64_t player, uint32_t t, int lowhp) {
+    static const int ox[2][2] = { { 6, 0 }, { 6, -6 } }, oy[2][2] = { { 6, 0 }, { 6, 6 } }; int w = K.wave, nw = K.wn[w] < 1 ? 1 : K.wn[w] > 2 ? 2 : K.wn[w], x, y, n = 0; unit_xy(player, &x, &y); hs_sync();
+    for (int i = 0; i < nw; i++) { int32_t pos[2] = { x + ox[nw - 1][i], y + oy[nw - 1][i] }; uint64_t rr = free_spot(G, unit_room(player), pos);
+        uint64_t u = rr ? ((uint64_t (*)(uint64_t, uint64_t, int, int, int, int, int, int, uint64_t))(B + 0x7ce630))(G, rr, 1, K.wcls[w][i], pos[0], pos[1], 1, 0, 0x10) : 0;
+        if (!u) { LOG("【红】秘境：守护者第 %d 波第 %d 位（类号 %d）没刷出来", w + 1, i + 1, K.wcls[w][i]); continue; }
+        K.guards[i] = *(uint32_t *)(uintptr_t)(u + 8); K.gcls[i] = K.wcls[w][i]; if (!K.guard) K.guard = K.guards[i]; n++;
+        if (lowhp) ss(u, 6, 256); else if (K.tier >= 9) { g_hp_mul = K.whp[w]; scale_monster(G, u, target_level(player) + 3, dm_rift_tier_level(9, gs(player, 12)) + 3); g_hp_mul = 1000; }
+        if (K.wdm[w] != 1000 && !lowhp) ss(u, 25, (int)((100LL + gs(u, 25)) * K.wdm[w] / 1000 - 100));   // 伤害：属性 25 是「伤害 +N%」，整体乘 d 即 (100 + N) × d − 100 | damage: stat 25 is "damage +N%", so multiplying the whole by d gives (100 + N) x d - 100
+        HS.guard_hp += gs(u, 7) >> 8;
+        LOG("秘境：拍 %u 刷守护者%s%s 类号 %d id %u 等级 %d 生命 %d 伤害百分比 %d", t, K.nwave > 1 ? (w == 0 ? "（第 1 波）" : w == 1 ? "（第 2 波）" : "（第 3 波）") : "", nw == 2 ? (i ? "（第二位）" : "（第一位）") : "", K.wcls[w][i], K.guards[i], gs(u, 12), gs(u, 7) >> 8, gs(u, 25)); }
+    atomic_store(&K.gdead, 0); atomic_store(&K.gtotal, n);
+    if (n) { if (w == 0) say(nw == 2 && n == 2 ? "dmRiftSayGuardians" : "dmRiftSayGuardian"); else say("dmRiftSayWave", w + 1, K.nwave); } }
 void dm_rift_tick(uint64_t G, uint64_t player, uint8_t *main_base) {
     B = main_base; if (!G || !player || !B) return;
     atomic_store(&g_merc_req, 0); if (getenv("DM_TEST_MERC_EQUIP") || getenv("DM_TEST_MERC_DUMP")) merc_test(G, player, *(uint32_t *)(uintptr_t)(G + 0x170));
@@ -1013,7 +1293,12 @@ void dm_rift_tick(uint64_t G, uint64_t player, uint8_t *main_base) {
         int st = atomic_load(&K.st);
         maze_restore(G, player);
         if (st == ST_RUN || st == ST_DONE) { region_set(G, 0); if (K.players_old) dm_hud_request_players(K.players_old); atomic_store(&K.st, ST_IDLE); LOG("秘境：换局，%s", st == ST_RUN ? "本次秘境作废" : "结束"); }
-        dm_quiet_difficulty_msg(0); GS.bm_on = 0; shelf_restore(); gamble_restore(); memset(&L, 0, sizeof L); L.G = G; L.player = player; L.eligible = -1; L.lv_prev = -1; L.resume = K.resume_tier; K.resume_tier = 0;   // resume：图用完走的一键重开，到新局才接着开；GS.bm_on = 0：位图属于上一局（已释放），不写回 | resume: the one-tap restart taken when maps ran out continues only once in the new run; GS.bm_on = 0: the bitmap belongs to the previous run (already freed), not written back
+        dm_quiet_difficulty_msg(0); GS.bm_on = 0; shelf_restore(); gamble_restore(); memset(&L, 0, sizeof L);
+        // 测试开关 DM_RIFT_TEST_STALE=1（造现场）：进程里第二局起，换局这一刻先置上「开始第 7 层 / 继续」两个请求，当作上一局结束前界面刚点下、没来得及被取走
+        // Test switch DM_RIFT_TEST_STALE=1 (for staging a scene): from the second game in the process on, set the two requests "start level 7 / continue" at the moment of the game change, as if the UI had just pressed them before the previous game ended and they had not been taken yet
+        { static int games; if (games++ && getenv("DM_RIFT_TEST_STALE")) { atomic_store(&M.req_start, 7); atomic_store(&M.req_cont, 1); LOG("秘境：测试 DM_RIFT_TEST_STALE 换局时置上残留请求（开始 7 / 继续 1）"); } }
+        if (!getenv("DM_RIFT_TEST_STALE_KEEP")) menu_reset();   // 测试开关 DM_RIFT_TEST_STALE_KEEP=1（对照）：不清，重现修正前的行为 | test switch DM_RIFT_TEST_STALE_KEEP=1 (control): do not clear, reproducing the behaviour before the fix
+        L.G = G; L.player = player; L.eligible = -1; L.lv_prev = -1; L.resume = K.resume_tier; K.resume_tier = 0;   // resume：图用完走的一键重开，到新局才接着开；GS.bm_on = 0：位图属于上一局（已释放），不写回 | resume: the one-tap restart taken when maps ran out continues only once in the new run; GS.bm_on = 0: the bitmap belongs to the previous run (already freed), not written back
     }
     L.last_t = t; built_scan(player);
     int lv = unit_level(player); if (!lv || !unit_room(player)) return;
@@ -1042,11 +1327,26 @@ void dm_rift_tick(uint64_t G, uint64_t player, uint8_t *main_base) {
     { static int at = -1, tr; if (at < 0) { const char *e = getenv("DM_RIFT_TEST_START"); at = e ? atoi(e) : 0; const char *c = e ? strchr(e, ':') : NULL; tr = c ? atoi(c + 1) : 1; }   // 测试开关 DM_RIFT_TEST_START=<拍>[:<层>]：人在哈洛加斯时到这一拍直接开这一层（裸宿主上选层页点不了；走的是一键重开后续局的同一句） | Test switch DM_RIFT_TEST_START=<tick>[:<floor>]: while the player is in Harrogath, start that floor directly at that tick (the floor selection page cannot be tapped on the bare host; this goes through the same statement as the follow-up run after a quick restart)
       if (at > 0 && t >= (uint32_t)at && lv == LV_TOWN && L.eligible > 0 && atomic_load(&K.st) == ST_IDLE) { at = 0; LOG("秘境：测试 DM_RIFT_TEST_START 拍 %u 直接开第 %d 层", t, tr); start_rift(G, player, t, tr); return; } }
     { static int at = -1; if (at < 0) { const char *e = getenv("DM_RIFT_TEST_RESTART"); at = e ? atoi(e) : 0; } if (at > 0 && t >= (uint32_t)at) { at = 0; void dm_restart_request(void); LOG("秘境：测试 DM_RIFT_TEST_RESTART 拍 %u 请求一键重开", t); dm_restart_request(); } }   // 测试：拍 N 替玩家一键重开 | Test: at tick N, do a one-tap restart on the player's behalf
-    if (lv != LV_TOWN && atomic_load(&M.menu)) atomic_store(&M.menu, MENU_NONE);   // 离城自动收起 | Closes automatically on leaving town
+    // 离城自动收起；确认页例外——它开在守护者处那张图上，人离开那张图、或这一场已不是「打完待走」才收
+    // Closes automatically on leaving town; the confirmation page is the exception - it opens on the Guardian's map, and closes only when the player leaves that map or this run is no longer "finished, waiting to leave"
+    { int mm = atomic_load(&M.menu); if (mm == MENU_NEXT ? (st != ST_DONE || lv != L.nd_lv || !L.next_door) : (mm && lv != LV_TOWN)) atomic_store(&M.menu, MENU_NONE); }
+    // 确认页点了「继续」：到这里才真的离开这一场。条件再核一遍（面板开着时游戏是暂停的，正常不会变）
+    // "Continue" was pressed on the confirmation page: only here does the player really leave this run. The conditions are checked once more (the game is paused while the panel is open, so they normally do not change)
+    if (atomic_exchange(&M.req_next, 0) && st == ST_DONE && L.next_door && lv == L.nd_lv) { L.next_door = L.town_door = 0; int nt = next_tier(); LOG("秘境：确认离开这一场，开第 %d 层（此刻地上物品 %d 件，不保留）", nt, ground_items(G)); start_rift(G, player, t, nt); return; }
+    // 测试开关 DM_RIFT_TEST_NEXTDOOR=<拍数>[,<拍数>…]：本层结算后过这么多拍，当作玩家碰了守护者处「下一层」那扇门（裸宿主上没法点门）。日志带此刻地上的物品数（验取消后东西还在）
+    // Test switch DM_RIFT_TEST_NEXTDOOR=<ticks>[,<ticks>...]: this many ticks after this level is completed, act as if the player touched the "next level" door at the Guardian (the door cannot be clicked on the bare host). The log includes the number of items on the ground at that moment (to verify they are still there after a cancel)
+    { static uint32_t at[8]; static int n = -1; if (n < 0) { n = 0; const char *e = getenv("DM_RIFT_TEST_NEXTDOOR"); char bf[96]; if (e) { strlcpy(bf, e, sizeof bf); for (char *sv, *k = strtok_r(bf, ",", &sv); k && n < 8; k = strtok_r(NULL, ",", &sv)) at[n++] = (uint32_t)atoi(k); } }
+      static uint32_t d0; if (st != ST_DONE) d0 = 0; else if (!d0) d0 = t;
+      for (int i = 0; i < n; i++) if (at[i] && d0 && t - d0 >= at[i] && L.next_door && lv == L.nd_lv && !atomic_load(&M.menu)) { at[i] = 0; atomic_store(&M.menu, MENU_NEXT); atomic_fetch_add(&g_menu_seq, 1);
+          LOG("秘境：测试 DM_RIFT_TEST_NEXTDOOR 拍 %u（结算后 %u 拍）当作碰了守护者处的门 → 确认页；地上物品 %d 件", t, t - d0, ground_items(G)); break; } }
     { int tq = atomic_exchange(&M.req_start, 0); if (tq > 0 && lv == LV_TOWN && st != ST_RUN) { if (tq > R.unlock) tq = R.unlock; if (tq < 1) tq = 1; LOG("秘境：选层页开始第 %d 层", tq); L.next_door = L.town_door = 0; start_rift(G, player, t, tq); return; } }
+    { static int at = -1; if (at < 0) { const char *e = getenv("DM_RIFT_TEST_SAVE"); at = e ? atoi(e) : 0; } if (at > 0 && t >= (uint32_t)at) { at = 0; int dm_request_save(void); LOG("秘境：测试 DM_RIFT_TEST_SAVE 拍 %u 请游戏存盘 → %d", t, dm_request_save()); } }   // 测试开关 DM_RIFT_TEST_SAVE=<拍>：到这一拍请游戏存一次盘（验放大着的随从生命进不进角色档） | test switch DM_RIFT_TEST_SAVE=<tick>: ask the game to save once at this tick (to check whether boosted minion life gets into the character save)
+    { static int at = -1; if (at < 0) { const char *e = getenv("DM_RIFT_TEST_ABANDON"); at = e ? atoi(e) : 0; } if (at > 0 && t >= (uint32_t)at && st == ST_RUN) { at = 0; LOG("秘境：测试 DM_RIFT_TEST_ABANDON 拍 %u 替玩家放弃本层", t); atomic_store(&M.req_abandon, 1); } }   // 测试开关 DM_RIFT_TEST_ABANDON=<拍>：秘境进行中到这一拍替玩家放弃（裸宿主上点不了「放弃」） | test switch DM_RIFT_TEST_ABANDON=<tick>: during a rift run, abandon on the player's behalf at this tick ("Abandon" cannot be clicked on the bare host)
     if (atomic_exchange(&M.req_abandon, 0) && (st == ST_RUN || st == ST_DONE)) {   // 放弃：本层作废（不涨层、不发奖），写回改过的表，回选层页 | Abandon: this level is void (no level increase, no rewards); write back the modified tables and return to the level selection page
-        region_set(G, 0); if (K.players_old) dm_hud_request_players(K.players_old); K.guard = 0; L.next_door = L.town_door = 0; atomic_store(&K.st, ST_IDLE); st = ST_IDLE;
-        LOG("秘境：放弃第 %d 层", K.tier); atomic_store(&M.menu, MENU_SELECT); return; }
+        region_set(G, 0); if (K.players_old) dm_hud_request_players(K.players_old); K.guard = 0; memset(K.guards, 0, sizeof K.guards); L.next_door = L.town_door = 0; L.nd_lv = 0; atomic_store(&K.st, ST_IDLE); st = ST_IDLE;
+        LOG("秘境：放弃第 %d 层", K.tier); atomic_store(&M.menu, MENU_SELECT);
+        pet_hp_pump(G, player, t);   // 随从生命当拍设回基数，同结算处：放弃后回到选层页会走原版暂停，等下一拍的话要到玩家关掉面板才设回 | minion life is set back to base on this very tick, as at completion: after abandoning, returning to the level-selection page goes through the original's pause, and waiting for the next tick would delay it until the player closes the panel
+        return; }
     if (atomic_exchange(&M.req_cont, 0)) {   // 继续：进行中 = 回到离开时的位置；本层已完成 = 回到守护者处（结算时人站的地方，两扇门就在旁边） | Continue: in progress = back to the position at the time of leaving; this level completed = back to the Guardian's spot (where the player stood at completion, with both portals right beside it)
         // 已完成后点「继续」就该回到战斗终止的地方（从那里捡东西、走红门去下一层）；城门面板不提供「直接开下一层」
         // After completion, tapping "Continue" should return to where the fight ended (pick things up there, take the red portal to the next level); the town
@@ -1070,16 +1370,16 @@ void dm_rift_tick(uint64_t G, uint64_t player, uint8_t *main_base) {
     if ((st == ST_RUN || st == ST_DONE) && in_rift_map(lv)) { int x, y; if (unit_xy(player, &x, &y)) { L.last_lv = lv; L.last_x = x; L.last_y = y; } }
     if (L.gift_due && st == ST_RUN && in_rift_map(lv) && !R.gift) { L.gift_due = 0; R.gift = 1; rec_save(); give_item2(G, player, "jew ", 7, 99, 392 + rnd(8), 0); say("dmRiftSayGift"); }
     { static uint32_t at[16]; static int n = -1; if (n < 0) { n = 0; const char *e = getenv("DM_RIFT_TEST_OPEN"); char b[160]; if (e) { strlcpy(b, e, sizeof b); for (char *sv, *k = strtok_r(b, ",", &sv); k && n < 16; k = strtok_r(NULL, ",", &sv)) at[n++] = (uint32_t)atoi(k); } }
-      for (int i = 0; i < n; i++) if (at[i] && t >= at[i] && lv == LV_TOWN) { at[i] = 0; atomic_store(&M.menu, (st == ST_RUN || (st == ST_DONE && L.next_door)) ? MENU_CHOICE : MENU_SELECT); atomic_fetch_add(&g_menu_seq, 1); LOG("秘境：测试 DM_RIFT_TEST_OPEN 拍 %u 当作点了城里的门 → %s", t, atomic_load(&M.menu) == MENU_CHOICE ? "继续 / 放弃" : "选层页"); } }   // 测试：拍 N 在城里当作点了门（脚本点门会被 NPC / 营地遮挡） | Test: at tick N in town, act as if the door was tapped (a scripted tap on the door gets blocked by NPCs / the camp)
+      for (int i = 0; i < n; i++) if (at[i] && t >= at[i] && lv == LV_TOWN) { at[i] = 0; atomic_store(&M.menu, town_menu(st)); atomic_fetch_add(&g_menu_seq, 1); LOG("秘境：测试 DM_RIFT_TEST_OPEN 拍 %u 当作点了城里的门 → %s", t, atomic_load(&M.menu) == MENU_CHOICE ? "继续 / 放弃" : "选层页"); } }   // 测试：拍 N 在城里当作点了门（脚本点门会被 NPC / 营地遮挡） | Test: at tick N in town, act as if the door was tapped (a scripted tap on the door gets blocked by NPCs / the camp)
     if (L.pend) { uint64_t du = find_unit(G, 2, L.pend); int px, py, dx, dy;
         if (!du || t - L.pend_at > 250) L.pend = 0;
         else if (unit_xy(player, &px, &py) && unit_xy(du, &dx, &dy) && abs(px - dx) <= 4 && abs(py - dy) <= 4) { L.pend = 0;
             int is_next = du && *(uint32_t *)(uintptr_t)(du + 8) == L.next_door;
             if (du && *(uint32_t *)(uintptr_t)(du + 8) == L.town_door) { LOG("秘境：点了守护者处的回城门 → 回哈洛加斯"); L.lv_prev = LV_TOWN; warp(G, player, LV_TOWN); return; }
-            if (is_next) { L.next_door = L.town_door = 0; int nt = next_tier(); LOG("秘境：点了守护者处的门，直接开第 %d 层", nt); start_rift(G, player, t, nt); return; }
+            if (is_next) { atomic_store(&M.menu, MENU_NEXT); atomic_fetch_add(&g_menu_seq, 1); LOG("秘境：点了守护者处的门 → 确认页（要进第 %d 层；门与地上的东西先不动）", next_tier()); return; }
             // 城里的门：没有进行中的秘境 → 选层页；进行中（正在打，或打完还没进下一层）→ 继续 / 放弃
             // The door in town: no rift in progress -> level selection page; in progress (fighting, or finished but not yet entered the next level) -> continue / abandon
-            atomic_store(&M.menu, (st == ST_RUN || (st == ST_DONE && L.next_door)) ? MENU_CHOICE : MENU_SELECT); atomic_fetch_add(&g_menu_seq, 1); LOG("秘境：点城里的门 → %s", atomic_load(&M.menu) == MENU_CHOICE ? "继续 / 放弃" : "选层页"); return; } }
+            atomic_store(&M.menu, town_menu(st)); atomic_fetch_add(&g_menu_seq, 1); LOG("秘境：点城里的门 → %s", atomic_load(&M.menu) == MENU_CHOICE ? "继续 / 放弃" : "选层页"); return; } }
     // 守护者处的两扇门按「类号 + 位置」认、并保持开着：人回城再回来，那张图的房间卸载重建，门还在但单位号变了、模式也回到关着（不可点）——
     // Mac 实测回来后点下一层的门「没有目标，不发令」，就是玩家说的「回去的门也不动」。在这张图里每拍核一遍：单位号对上、模式不是 2 就再开
     // The two doors at the guardian are identified by "class id + position" and kept open: when the player goes back to town and returns, that map's rooms are unloaded and rebuilt; the doors are still there but their unit ids have changed and their mode is back to closed (not clickable) --
@@ -1126,35 +1426,179 @@ void dm_rift_tick(uint64_t G, uint64_t player, uint8_t *main_base) {
     // Newly spawned hostile monsters get their stats changed by level (from level 9). Test switch DM_RIFT_TEST_LOWHP=1: change to 1 life point (hold the main attack button and kill all the way through; verifies scoring / guardian / level increase)
     static int lowhp = -1; if (lowhp < 0) lowhp = getenv("DM_RIFT_TEST_LOWHP") != NULL;
     if (K.tier >= 9 || lowhp) { static uint32_t r_; uint32_t w = atomic_load(&g_newq_w); if (w - r_ > NQ) r_ = w - NQ; int lt = target_level(player);
-        for (; r_ != w; r_++) { uint32_t id = atomic_load(&g_newq[r_ % NQ]); uint64_t u = find_unit(G, 1, id); if (u && id != K.guard) { if (K.tier >= 9) scale_monster(G, u, lt, dm_rift_tier_level(9, gs(player, 12))); if (lowhp) ss(u, 6, 256); dmg_probe_add(id, t); } } }
-    dmg_probe_pump(G, t);
+        for (; r_ != w; r_++) { uint32_t id = atomic_load(&g_newq[r_ % NQ]); uint64_t u = find_unit(G, 1, id); if (u && !is_guard(id) && hi_on("summon", 75) && boss_summon(*(uint32_t *)(uintptr_t)(u + 4))) { static int n, sq = -1; int cur = atomic_load(&g_run_seq); if (cur != sq) { sq = cur; n = 0; }
+            if (n++ < 4) LOG("秘境：首领召唤物 id %u（类号 %u）不按层改，保持原版：等级 %d 生命 %d", id, *(uint32_t *)(uintptr_t)(u + 4), gs(u, 12), gs(u, 7) >> 8); hs_spawn(id, gs(u, 7) >> 8); continue; }
+          if (u && !is_guard(id)) { uint64_t md = rd(u + 0x10); int su = md && (*(uint8_t *)(uintptr_t)(md + 0x1a) & 0x02) && hi_on("su", 75), sm = !su && su_minion(id);   /* 特殊精英本体：生命另乘 SU_HP_X；组里的随从另乘 SU_MINION_X1000 | special elite body: life additionally multiplied by SU_HP_X; minions in the group additionally by SU_MINION_X1000 */
+              if (K.tier >= 9) { if (su) { g_hp_mul = SU_HP_X * 1000; g_hp_soft = SU_HP_SOFT; } else if (sm) g_hp_mul = SU_MINION_X1000; scale_monster(G, u, lt, dm_rift_tier_level(9, gs(player, 12))); g_hp_mul = 1000; g_hp_soft = 0; } if (su) { static int n; if (n++ < 12) LOG("秘境：特殊精英本体 id %u（类号 %u，超级独特号 %d）生命另乘 %d：等级 %d 生命 %d", id, *(uint32_t *)(uintptr_t)(u + 4), *(int16_t *)(uintptr_t)(md + 0x2a), SU_HP_X, gs(u, 12), gs(u, 7) >> 8); } if (lowhp) ss(u, 6, 256); dmg_probe_add(id, t); hs_spawn(id, gs(u, 7) >> 8); } } }
+    dmg_probe_pump(G, t); hs_tick(G, player, t, lv);
+    // 测试开关 DM_RIFT_TEST_PETGOD=1：每 10 拍把秘境图里友方怪物单位（玩家的随从）的当前生命回满——自动局靠随从代打，随从被围死后就没人补最后一下了
+    // Test switch DM_RIFT_TEST_PETGOD=1: every 10 ticks, refill the current life of friendly monster units (the player's minions) in the rift map - unattended runs rely on minions to do the fighting, and once the minions are surrounded and killed nobody lands the last hit
+    { static int on = -1; if (on < 0) on = getenv("DM_RIFT_TEST_PETGOD") != NULL; if (on && t % 10 == 0 && in_rift_map(lv)) for (int b = 0; b < 128; b++) for (uint64_t u = rd(G + 0x2230 + 1 * 0x400 + 8 * b); u; u = rd(u + 0x158)) {
+        uint32_t m = *(uint32_t *)(uintptr_t)(u + 0xc); if (m != 0 && m != 12 && unit_align(u)) ss(u, 6, gs(u, 7)); } }
     // 测试读数 DM_RIFT_TEST_ILVL=1：每 10 秒数一次地上的物品（服务端物品表 G+0x2e30，模式 3），报物品等级（数据块 +0x38）范围——验 B 方案下掉落物品等级跟不跟改过的怪物等级
     // Test readout DM_RIFT_TEST_ILVL=1: every 10 seconds count the items on the ground (server item table G+0x2e30, mode 3) and report the item level (data block +0x38) range -- verifies whether drop item levels follow the modified monster level under plan B
     { static int il = -1; if (il < 0) il = getenv("DM_RIFT_TEST_ILVL") != NULL;
       if (il && t % 250 == 0) { int n = 0, mn = 999, mx = 0; for (int bb = 0; bb < 128; bb++) for (uint64_t it = rd(G + 0x2e30 + 8 * bb); it; it = rd(it + 0x158)) { uint64_t d = rd(it + 0x10); if (!d || *(uint32_t *)(uintptr_t)(it + 0xc) != 3) continue; int v = *(int32_t *)(uintptr_t)(d + 0x38); n++; if (v < mn) mn = v; if (v > mx) mx = v; }
           LOG("秘境：测试读数 拍 %u 地上物品 %d 件，物品等级 %d–%d", t, n, n ? mn : 0, mx); } }
 
+    // 测试开关 DM_RIFT_TEST_TOUR=1：秘境进行中每秒用原版传送把人放到本图房间链里的下一间（中心附近的空地），整张图的房间都激活一遍——验「90 层起不放普通预设怪」要整图的读数
+    // Test switch DM_RIFT_TEST_TOUR=1: during a rift, every second the original teleport puts the player in the next room of this map's room chain (open ground near the centre), so every room of the whole map gets activated - verifying "no ordinary preset monsters from level 90" needs readings from the whole map
+    { static int tour = -1, k; if (tour < 0) tour = getenv("DM_RIFT_TEST_TOUR") != NULL;
+      if (tour && t % 25 == 0 && in_rift_map(lv) && atomic_load(&K.st) == ST_RUN) { uint64_t lvp = level_of(player), r = dm_level_rooms(lvp); int i = 0, nr = 0;
+          for (uint64_t q = r; q && nr < 2000; q = rd(q + 0x48)) nr++;
+          for (; r && i < k % (nr ? nr : 1); r = rd(r + 0x48)) i++;
+          if (r) { int32_t pos[2] = { *(int32_t *)(uintptr_t)(r + 0x60) * 5 + *(int32_t *)(uintptr_t)(r + 0x68) * 5 / 2, *(int32_t *)(uintptr_t)(r + 0x64) * 5 + *(int32_t *)(uintptr_t)(r + 0x6c) * 5 / 2 };
+              uint64_t rs = room_load(G, lvp, pos[0], pos[1]), rr = rs ? free_spot(G, rs, pos) : 0; int ok = rr && dm_teleport(B, G, player, rr, pos[0], pos[1]);
+              static int ln; if (ln++ < 3 || k == nr - 1) LOG("秘境：测试逐间跳 第 %d / %d 间 → %d,%d %s", k + 1, nr, pos[0], pos[1], ok ? "成" : "不成"); }
+          { static uint32_t seen[8192]; static int scls[8192], sfl[8192], ns;   /* 逐间跳全程：本图出现过的怪按单位 id 去重累计；走完一轮后 5 秒按类号报 | over the whole room-by-room jump: monsters seen in this map are accumulated, de-duplicated by unit id; 5 seconds after a full round, reported by class id */
+            for (int b = 0; b < 128; b++) for (uint64_t v = rd(G + 0x2230 + 1 * 0x400 + 8 * b); v; v = rd(v + 0x158)) { uint32_t id = *(uint32_t *)(uintptr_t)(v + 8); if (any_level(v) != lv) continue; int q = 0; for (; q < ns && seen[q] != id; q++) {}
+                if (q == ns && ns < 8192) { uint64_t md = rd(v + 0x10); uint32_t mo = *(uint32_t *)(uintptr_t)(v + 0xc); seen[ns] = id; scls[ns] = *(int32_t *)(uintptr_t)(v + 4); sfl[ns] = (md ? *(uint8_t *)(uintptr_t)(md + 0x1a) : 0) | (mo == 0 || mo == 12 ? 0x100 : 0); ns++; } }
+            if (k == nr + 5) { static int cl[1024], cn[1024], cf[1024]; int nc = 0;
+                for (int q = 0; q < ns; q++) { int j2 = 0; for (; j2 < nc && cl[j2] != scls[q]; j2++) {} if (j2 == nc && nc < 1024) { cl[nc] = scls[q]; cn[nc] = cf[nc] = 0; nc++; } if (j2 < 1024) { cn[j2]++; cf[j2] |= sfl[q]; } }
+                LOG("[逐间跳读数] 关卡 %d 出现过的怪 %d 只、%d 种", lv, ns, nc); for (int j2 = 0; j2 < nc; j2++) LOG("[逐间跳读数] 类号 %d ×%d 标志 0x%03x（0x100 = 有一只首次见到时已是死的）", cl[j2], cn[j2], cf[j2]); } }
+          k++; } }
     // 测试开关 DM_RIFT_TEST_PULL=1：每 3 秒用原版传送 0x7cc530 把人放到一只还活着的敌对怪（客户端认的）旁边——脚本按主攻击键就能一路打（验计分 / 守护者）
     // Test switch DM_RIFT_TEST_PULL=1: every 3 seconds use the original game's teleport 0x7cc530 to put the player next to a still-living hostile monster (as recognized by the client) -- a script only has to press the main attack button to fight all the way through (verifies scoring / guardian)
     { static int pull = -1; if (pull < 0) pull = getenv("DM_RIFT_TEST_PULL") != NULL;
-      if (pull && t % 38 == 0 && in_rift_map(lv) && K.guard && !atomic_load(&K.guard_dead)) { uint64_t g = find_unit(G, 1, K.guard); int x, y; if (g && unit_xy(g, &x, &y)) dm_teleport(B, G, player, unit_room(g), x + 2, y + 2); }
-      else if (pull && t % 38 == 0 && in_rift_map(lv)) { uint32_t w = atomic_load(&g_newq_w); int px, py, bd = 1 << 30, bx = 0, by = 0; unit_xy(player, &px, &py);   // 最近的那只 | The nearest one
-          for (uint32_t k = 0; k < NQ && k < w; k++) { uint64_t u = find_unit(G, 1, atomic_load(&g_newq[(w - 1 - k) % NQ])); if (!u || unit_level(u) != lv) continue; uint32_t m = *(uint32_t *)(uintptr_t)(u + 0xc); if (m == 0 || m == 12) continue;
-              int x, y; if (!unit_xy(u, &x, &y)) continue; int d = abs(x - px) + abs(y - py); if (d < bd) { bd = d; bx = x; by = y; } }
+      if (pull && t % 38 == 0 && in_rift_map(lv) && ((K.guard && !atomic_load(&K.guard_dead)) || K.inv_st[0] == 2 || K.inv_st[1] == 2)) { uint64_t g = 0; for (int i = 0; i < 2 && !g; i++) { uint64_t gu = K.inv_st[i] == 2 ? find_unit(G, 1, K.inv_id[i]) : 0; uint32_t gm = gu ? *(uint32_t *)(uintptr_t)(gu + 0xc) : 0; if (gu && gm != 0 && gm != 12) g = gu; }   /* 在场的闯入首领优先 | an invading boss that is present takes priority */
+          for (int i = 0; i < 3 && !g; i++) { uint64_t gu = K.guards[i] ? find_unit(G, 1, K.guards[i]) : 0; uint32_t gm = gu ? *(uint32_t *)(uintptr_t)(gu + 0xc) : 0; if (gu && gm != 0 && gm != 12) g = gu; } int x, y; if (g && unit_xy(g, &x, &y)) dm_teleport(B, G, player, unit_room(g), x + 2, y + 2); }
+      else if (pull && t % 38 == 0 && in_rift_map(lv)) { uint32_t w = atomic_load(&g_newq_w); int px, py, bd = 1 << 30, bx = 0, by = 0; unit_xy(player, &px, &py);   // 最近的那只；同一只连着 4 次（约 6 秒）都是最近的还没死，就当它打不死（投石车一类的预设单位、卡在墙里的），以后不再找它 | the nearest one; if the same one is the nearest 4 times in a row (about 6 seconds) and still not dead, treat it as unkillable (preset units such as catapults, ones stuck in walls) and never look for it again
+          static uint32_t bl[64], last; static int nbl, rep; uint32_t bid = 0;
+          for (uint32_t k = 0; k < NQ && k < w; k++) { uint32_t id = atomic_load(&g_newq[(w - 1 - k) % NQ]); uint64_t u = find_unit(G, 1, id); if (!u || unit_level(u) != lv) continue; uint32_t m = *(uint32_t *)(uintptr_t)(u + 0xc); if (m == 0 || m == 12) continue;
+              int x, y, skip = 0; for (int q = 0; q < nbl && q < 64; q++) skip |= bl[q] == id; if (skip || !unit_xy(u, &x, &y)) continue; int d = abs(x - px) + abs(y - py); if (d < bd) { bd = d; bx = x; by = y; bid = id; } }
+          if (bid && bid == last) { if (++rep >= 4) { bl[nbl++ % 64] = bid; rep = 0; LOG("秘境：测试拉人 单位 id %u 连着 4 次是最近的还没死，不再找它", bid); } } else { last = bid; rep = 0; }
           if (bd < (1 << 30) && bd > 3) { uint64_t lvp = level_of(player); int32_t pos[2] = { bx + 1, by + 1 }; uint64_t rs = room_at(lvp, pos[0], pos[1]), rr = rs ? free_spot(G, rs, pos) : 0;
-              int ok = dm_teleport(B, G, player, rr, pos[0], pos[1]); static int ln; if (ln++ < 5) LOG("秘境：测试拉人 → %d,%d（最近的怪 %d 格）%s", pos[0], pos[1], bd, ok ? "成" : "不成"); } } }
+              int ok = dm_teleport(B, G, player, rr, pos[0], pos[1]); static int ln; if (ln++ < 5 || ln % 20 == 0) LOG("秘境：测试拉人 → %d,%d（最近的怪 id %u，%d 格）%s", pos[0], pos[1], bid, bd, ok ? "成" : "不成"); }
+          else { static int ln2; if (ln2++ % 20 == 0) LOG("秘境：测试拉人 这一次没拉（最近的怪 id %u，%d 格；新怪队列写到 %u）", bid, bd == 1 << 30 ? -1 : bd, w); } } }
     // 计时
     // Timer
     { uint64_t now = guest_ns();
       if (!atomic_load(&K.timeout) && now - K.t0_ns > (uint64_t)RIFT_SECS * 1000000000ull) { atomic_store(&K.timeout, 1); say("dmRiftSayTimeout"); } }
     // 守护者
     // Guardian
+    inv_gone_pump(G, t);
+    if (in_rift_map(lv) && g_entry_lv != lv) { int ex, ey; if (unit_xy(player, &ex, &ey)) { g_entry_lv = lv; g_entry_x = ex; g_entry_y = ey; } } else if (!in_rift_map(lv)) g_entry_lv = 0;
+    // 特殊精英：每秒看一次要不要放下一组（规则见池那段注释）。「前方」= 玩家最近 2 秒走的方向；八个方向从它起、左右交替着找空地，离人不足 45 格或离本图入口不足 40 格的不要
+    // Special elites: once a second, check whether to place the next group (rules in the comment on the pool). "Ahead" = the direction the player walked in the last 2 seconds; the eight directions are searched for open ground starting from it, alternating left and right; spots less than 45 tiles from the player or less than 40 tiles from this map's entrance are rejected
+    if (t % 25 == 0 && hi_on("su", 75) && atomic_load(&K.st) == ST_RUN && g_entry_lv == lv) { static int hx[2], hy[2], hk; int px, py, live = 0; unit_xy(player, &px, &py);
+        int dx = hx[hk] ? px - hx[hk] : 0, dy = hx[hk] ? py - hy[hk] : 0; hx[hk] = px; hy[hk] = py; hk ^= 1;
+        for (int i = 0; i < 3; i++) { if (!K.su_live[i]) continue; uint64_t u = find_unit(G, 1, K.su_live[i]); uint32_t m = u ? *(uint32_t *)(uintptr_t)(u + 0xc) : 1;
+            if (u && (m == 0 || m == 12)) K.su_live[i] = 0; else if (!u) { if (t - K.su_seen[i] > 750) K.su_live[i] = 0; }   /* 本体死了这一组就算打完；30 秒找不到单位（玩家换了图 / 回了城，房间卸载）也不再占名额 | once the body is dead this group counts as finished; if its unit cannot be found for 30 seconds (the player changed map / went to town, the room was unloaded) it no longer takes up a slot either */
+            else { K.su_seen[i] = t; int x, y; unit_xy(u, &x, &y);   /* 追击（见池那段注释）：本体离玩家 80 格以外满 5 秒，挪到玩家前方约 70 格的空地（随从照原版自己跟着首领） | pursuit (see the comment on the pool): once the body has been more than 80 tiles from the player for 5 seconds, move it to open ground about 70 tiles ahead of the player (the minions follow their boss on their own, as in the original) */
+                if (abs(x - px) + abs(y - py) <= 80) K.su_near[i] = t;
+                else if (t - K.su_near[i] >= 125) { static const int cx[8] = { 70, 50, 0, -50, -70, -50, 0, 50 }, cy[8] = { 0, 50, 70, 50, 0, -50, -70, -50 }; int d0 = rnd(8), best = 0, ok = 0; int32_t pos[2];
+                    if (dx || dy) for (int d = 0; d < 8; d++) { int v = dx * cx[d] + dy * cy[d]; if (v > best) { best = v; d0 = d; } }
+                    for (int k = 0; k < 8 && !ok; k++) { int d = (d0 + (k & 1 ? (k + 1) / 2 : 8 - k / 2)) % 8; pos[0] = px + cx[d]; pos[1] = py + cy[d]; uint64_t rs = room_load(G, level_of(player), pos[0], pos[1]), rr = rs ? free_spot(G, rs, pos) : 0;
+                        if (rr && abs(pos[0] - px) + abs(pos[1] - py) >= 60) ok = dm_teleport(B, G, u, rr, pos[0], pos[1]); }
+                    K.su_near[i] = t; static int n; if (n++ < 8) LOG("秘境：拍 %u 特殊精英（id %u）离玩家 %d 格满 5 秒，%s", t, K.su_live[i], abs(x - px) + abs(y - py), ok ? "挪到玩家前方" : "周围没有空地，下次再挪"); } }
+            live += K.su_live[i] != 0; }
+        if (!K.guard && live < su_cap(K.tier) && K.su_cnt < su_quota(K.tier) && g_near_now < SU_NEAR && t - K.su_last >= 75) {
+            static const int sx[8] = { 70, 50, 0, -50, -70, -50, 0, 50 }, sy[8] = { 0, 50, 70, 50, 0, -50, -70, -50 }; int d0 = rnd(8), best = 0, np = (int)sizeof k_su_pool, baal = 0, row;
+            if (dx || dy) for (int d = 0; d < 8; d++) { int v = dx * sx[d] + dy * sy[d]; if (v > best) { best = v; d0 = d; } }
+            for (int w = 0; w < K.nwave; w++) for (int q = 0; q < K.wn[w]; q++) baal |= K.wcls[w][q] == 544; for (int q = 0; q < K.inv_n; q++) baal |= K.inv_cls[q] == 544;
+            do row = K.su_order[K.su_next++ % np]; while (baal && (row == 24 || row == 36 || row == 38));
+            uint64_t u = 0; int32_t pos[2] = { 0, 0 }; int f_room = 0, f_near = 0, f_fn = 0;
+            for (int k = 0; k < 8 && !u; k++) { int d = (d0 + (k & 1 ? (k + 1) / 2 : 8 - k / 2)) % 8; pos[0] = px + sx[d]; pos[1] = py + sy[d]; uint64_t rs = room_load(G, level_of(player), pos[0], pos[1]), rr = rs ? free_spot(G, rs, pos) : 0;
+                if (!rr) { f_room++; continue; } if (abs(pos[0] - px) + abs(pos[1] - py) < 45 || abs(pos[0] - g_entry_x) + abs(pos[1] - g_entry_y) < 40) { f_near++; continue; } f_fn++;
+                u = su_spawn(G, rr, pos[0], pos[1], row); }
+            static int fails; if (u) fails = 0; else if (++fails < 10) K.su_next--; else fails = 0;   /* 放不成：这一位留着 1 秒后再试；同一位连着 10 次放不成就跳过它，免得一行卡住整场 | could not place it: keep this one and try again in 1 second; after 10 failures in a row for the same one, skip it so that one row does not hold up the whole run */
+            if (!u) { K.su_last = t - 50; static int n; if (n++ % 20 == 0) LOG("秘境：拍 %u 特殊精英（行 %d）这一秒没放成（第 %d 次）：八个方向里没有房间 / 空地的 %d 个、离人或离入口太近的 %d 个、原版函数没刷出来的 %d 个", t, row, n, f_room, f_near, f_fn); }   /* 周围没有合适的空地（或原版函数没刷出来）：这一位留着，1 秒后再试 | no suitable open ground around (or the original function spawned nothing): keep this one and try again in 1 second */
+            else { uint32_t uid = *(uint32_t *)(uintptr_t)(u + 8); int ux = pos[0], uy = pos[1], nm = 0;
+                for (int b = 0; b < 128; b++) for (uint64_t v = rd(G + 0x2230 + 1 * 0x400 + 8 * b); v; v = rd(v + 0x158)) { uint32_t vid = *(uint32_t *)(uintptr_t)(v + 8); uint64_t md = rd(v + 0x10); int x, y;
+                    if (vid > uid && md && (*(uint8_t *)(uintptr_t)(md + 0x1a) & 0x10) && unit_xy(v, &x, &y) && abs(x - ux) + abs(y - uy) <= 15) { g_su_min[g_su_min_w++ % 64] = vid; nm++; } }
+                for (int i = 0; i < 3; i++) if (!K.su_live[i]) { K.su_live[i] = uid; K.su_seen[i] = K.su_near[i] = t; break; } K.su_cnt++; K.su_last = t;
+                LOG("秘境：拍 %u 特殊精英第 %d 组刷出：行 %d 类号 %u id %u 在 %d,%d（离人 %d 格、离入口 %d 格；此前在场 %d 组、40 格内敌对 %d 只；随从 %d 只）", t, K.su_cnt, row, *(uint32_t *)(uintptr_t)(u + 4), *(uint32_t *)(uintptr_t)(u + 8), pos[0], pos[1],
+                    abs(pos[0] - px) + abs(pos[1] - py), abs(pos[0] - g_entry_x) + abs(pos[1] - g_entry_y), live, g_near_now, nm); } } }
+    // 测试读数 DM_RIFT_TEST_GONE=<拍>：退场的闯入首领每 25 拍报一次位置 / 模式 / 生命 / 离人多远；到 <拍> 时把人传到它跟前，并让固定输出替身开始打它（验：退场后它动不动、走过去会不会打起来、打死给不给进度 / 掉不掉东西）
+    // Test readout DM_RIFT_TEST_GONE=<tick>: an invading boss that has left reports its position / mode / life / distance from the player every 25 ticks; at <tick> the player is teleported next to it and the fixed-output stand-in starts hitting it (to verify: whether it moves after leaving, whether walking up to it starts a fight, whether killing it gives progress / drops)
+    { static int at = -1, hit, gx, gy, cls; static uint32_t hit_t; if (at < 0) { const char *e = getenv("DM_RIFT_TEST_GONE"); at = e ? atoi(e) : 0; }
+      // 测试开关 DM_RIFT_TEST_GONEKILL=1：退场后第 10 拍把人传到它跟前、把它当前血置 1（由随从补刀）——验「退场到被真移除之间被打死」给不给进度、掉不掉东西
+      // Test switch DM_RIFT_TEST_GONEKILL=1: at the 10th tick after it leaves, teleport the player next to it and set its current life to 1 (a minion delivers the last hit) - to verify whether "killed between leaving and being truly removed" gives progress or drops anything
+      if (getenv("DM_RIFT_TEST_GONEKILL")) for (int i = 0; i < 2; i++) { static uint32_t t0[2], did[2]; uint64_t u = g_inv_gone[i] ? find_unit(G, 1, g_inv_gone[i]) : 0; if (!u) continue; if (did[i] != g_inv_gone[i]) { did[i] = g_inv_gone[i]; t0[i] = t; }
+          uint32_t m = *(uint32_t *)(uintptr_t)(u + 0xc); int x, y; unit_xy(u, &x, &y);
+          if (t - t0[i] == 10) { LOG("[退场读数] 拍 %u 把人传到退场的闯入首领跟前（它在 %d,%d，进度 %d）", t, x, y, atomic_load(&K.score)); dm_teleport(B, G, player, unit_room(u), x + 2, y + 2); }
+          if (t - t0[i] >= 10 && m != 0 && m != 12) ss(u, 6, 256);
+          if ((m == 0 || m == 12) && t0[i] != 1) { t0[i] = 1; LOG("[退场读数] 拍 %u 退场的闯入首领被打死了（模式 %u），进度 %d", t, m, atomic_load(&K.score)); } }
+      if (at > 0) { for (int i = 0; i < 2; i++) { uint64_t u = g_inv_gone[i] ? find_unit(G, 1, g_inv_gone[i]) : 0; if (g_inv_gone_xy[i][0]) { gx = g_inv_gone_xy[i][0]; gy = g_inv_gone_xy[i][1]; cls = K.inv_cls[i]; } if (!u || t % 25) continue;
+              int x, y, px, py; unit_xy(u, &x, &y); unit_xy(player, &px, &py); LOG("[退场读数] 拍 %u 第 %d 位：位置 %d,%d 模式 %u 生命 %d / %d 离人 %d 格", t, i + 1, x, y, *(uint32_t *)(uintptr_t)(u + 0xc), gs(u, 6) >> 8, gs(u, 7) >> 8, abs(x - px) + abs(y - py)); }
+          if (gx && t >= (uint32_t)at && !hit) { int32_t pos[2] = { gx, gy }; uint64_t rs = room_load(G, level_of(player), gx, gy), rr = rs ? free_spot(G, rs, pos) : 0; hit = 1; hit_t = t; LOG("[退场读数] 拍 %u 把人传到退场落点 %d,%d（%s）", t, gx, gy, rr && dm_teleport(B, G, player, rr, pos[0], pos[1]) ? "成" : "没成"); }
+          if (hit == 1 && t - hit_t >= 150) { hit = 2; int n = 0, px, py; unit_xy(player, &px, &py); for (int b = 0; b < 128; b++) for (uint64_t u = rd(G + 0x2230 + 1 * 0x400 + 8 * b); u; u = rd(u + 0x158)) { int x, y; if ((int)*(uint32_t *)(uintptr_t)(u + 4) == cls && unit_xy(u, &x, &y) && abs(x - px) + abs(y - py) < 80) n++; }
+              LOG("[退场读数] 拍 %u 人已在退场落点 150 拍：80 格内类号 %d 的单位 %d 只（人在 %d,%d）", t, cls, n, px, py); } } }
+    // 测试开关 DM_RIFT_TEST_SUSEQ=<起始拍>:<行号>,<行号>…（特殊精英的验收轮）：秘境进行中从这一拍起，在人旁边用原版函数 main+0x69b310(游戏, 房间, x, y, 行号, 0) 依次刷超级金怪，
+    // 每秒把人放到它旁边（配 DM_RIFT_TEST_LOWHP=1，新刷的怪只剩 1 点血，随从补一下就死）；它死后 40 拍报一行：随从几只、这段时间新掉在地上的物品（类号:品质），再刷下一位。600 拍没死记「没打死」照样往下。
+    // 第六个参数含义没查到，取 0 的依据是探路那一局（行 3，本体 + 8 只随从照表刷出）与这一轮
+    // Test switch DM_RIFT_TEST_SUSEQ=<start tick>:<row>,<row>... (acceptance round for special elites): from this tick during a rift, super uniques are spawned one after another next to the player with the original function main+0x69b310(game, room, x, y, row, 0),
+    // and every second the player is put next to it (with DM_RIFT_TEST_LOWHP=1 a freshly spawned monster has only 1 life left and dies from one hit by a minion); 40 ticks after it dies one line is reported: how many minions, the items newly dropped on the ground in that time (class id:quality), then the next one is spawned. If it is not dead after 600 ticks, "not killed" is recorded and it moves on anyway.
+    // The meaning of the sixth argument was not found; 0 is used on the basis of the exploratory run (row 3, body + 8 minions spawned as in the table) and this round
+    { static int at = -1, rows[66], nr, idx, ph, row, minions; static uint32_t t0, hi, cls;
+      if (at < 0) { const char *e = getenv("DM_RIFT_TEST_SUSEQ"); at = e ? atoi(e) : 0; const char *c = e ? strchr(e, ':') : NULL; char bf[400]; strlcpy(bf, c ? c + 1 : "", sizeof bf); for (char *sv, *k = strtok_r(bf, ",", &sv); k && nr < 66; k = strtok_r(NULL, ",", &sv)) rows[nr++] = atoi(k); }
+      if (at > 0 && idx < nr && in_rift_map(lv) && atomic_load(&K.st) == ST_RUN) {
+          if (ph == 0 && t >= (uint32_t)at && t >= t0 + 10) { row = rows[idx]; int x, y; unit_xy(player, &x, &y); int32_t pos[2] = { 0, 0 }; uint64_t rr = 0, u = 0; hi = 0; minions = 0;
+              for (int b = 0; b < 128; b++) for (uint64_t it = rd(G + 0x2e30 + 8 * b); it; it = rd(it + 0x158)) if (*(uint32_t *)(uintptr_t)(it + 8) > hi) hi = *(uint32_t *)(uintptr_t)(it + 8);
+              for (int d = 0; d < 8 && !u; d++) { static const int ox[8] = { 12, 9, 0, -9, -12, -9, 0, 9 }, oy[8] = { 0, 9, 12, 9, 0, -9, -12, -9 }; pos[0] = x + ox[d]; pos[1] = y + oy[d]; rr = free_spot(G, unit_room(player), pos);   /* 原版函数在同一点试 5 次，那点被残留的随从占着就返回 0：换个方向再试 | the original function tries 5 times at the same point and returns 0 if that point is occupied by leftover minions: try again in another direction */
+                  u = rr ? su_spawn(G, rr, pos[0], pos[1], row) : 0; }
+              if (!u) { LOG("[验收轮] 拍 %u 行 %d 刷不出（房间 %s，函数返回 0）", t, row, rr ? "有" : "无"); idx++; t0 = t; }
+              else { g_suseq_id = *(uint32_t *)(uintptr_t)(u + 8); cls = *(uint32_t *)(uintptr_t)(u + 4); t0 = t; ph = 1; } }
+          else if (ph == 1) { uint64_t u = find_unit(G, 1, g_suseq_id); uint32_t m = u ? *(uint32_t *)(uintptr_t)(u + 0xc) : 0; int dead = !u || m == 0 || m == 12, x, y;
+              if (t - t0 == 20) { int px, py; unit_xy(player, &px, &py); for (int b = 0; b < 128; b++) for (uint64_t v = rd(G + 0x2230 + 1 * 0x400 + 8 * b); v; v = rd(v + 0x158)) { uint64_t md = rd(v + 0x10); if (md && (*(uint8_t *)(uintptr_t)(md + 0x1a) & 0x10) && unit_xy(v, &x, &y) && abs(x - px) + abs(y - py) <= 40) minions++; } }
+              if (!dead && t % 25 == 0 && unit_xy(u, &x, &y)) dm_teleport(B, G, player, unit_room(u), x + 2, y + 2);
+              if (dead || t - t0 > 600) { LOG("[验收轮] 拍 %u 行 %d 类号 %u id %u %s（刷出后 %u 拍），40 格内带随从标志的 %d 只", t, row, cls, g_suseq_id, dead ? "已死" : "【没打死】", t - t0, minions); ph = 2; t0 = t; } }
+          else if (ph == 2 && t - t0 >= 40) { char ln[700]; int o = 0, n = 0; ln[0] = 0;
+              for (int b = 0; b < 128; b++) for (uint64_t it = rd(G + 0x2e30 + 8 * b); it; it = rd(it + 0x158)) { uint64_t d = rd(it + 0x10); if (!d || *(uint32_t *)(uintptr_t)(it + 0xc) != 3 || *(uint32_t *)(uintptr_t)(it + 8) <= hi) continue; n++; if (o < (int)sizeof ln - 16) o += snprintf(ln + o, sizeof ln - o, " %u:%d", *(uint32_t *)(uintptr_t)(it + 4), *(int32_t *)(uintptr_t)d); }
+              LOG("[验收轮] 拍 %u 行 %d 之后新掉在地上的物品 %d 件（类号:品质）：%s", t, row, n, ln); g_suseq_id = 0; ph = 0; t0 = t; if (++idx == nr) LOG("[验收轮] 拍 %u 全部 %d 行走完", t, nr); } } }
+    // 测试开关 DM_RIFT_TEST_SCOREAT=<拍>:<分数>：到这一拍把进度分数直接设成这个数（造「闯入首领还活着时进度满了」这类现场）
+    // Test switch DM_RIFT_TEST_SCOREAT=<tick>:<score>: at this tick set the progress score directly to this number (to stage scenes such as "progress fills while an invading boss is still alive")
+    { static int at = -1, sc; if (at < 0) { const char *e = getenv("DM_RIFT_TEST_SCOREAT"); at = e ? atoi(e) : 0; const char *c = e ? strchr(e, ':') : NULL; sc = c ? atoi(c + 1) : 0; }
+      if (at > 0 && t >= (uint32_t)at && atomic_load(&K.st) == ST_RUN) { at = 0; atomic_store(&K.score, sc); LOG("秘境：测试 DM_RIFT_TEST_SCOREAT 拍 %u 把进度分数设成 %d", t, sc); } }
+    // 闯入首领：进度走到抽好的那一点 → 提示（约 3 秒预警）→ 在离人 36 格左右的空地刷出；生命 = 规则应得值 × 0.30；死了 +12% 进度。
+    // 同一时刻最多一位；守护者出来之后不再预警 / 不再刷（已在场的那位留着，它与守护者不同类号）。它不是结算条件
+    // Invading boss: progress reaches the drawn point -> message (about 3 seconds of warning) -> spawned on open ground about 36 tiles from the player; life = the rule value x 0.30; +12% progress on death.
+    // At most one at a time; after the Guardians appear there are no more warnings / spawns (one already present stays; it has a different class id from the Guardians). It is not a completion condition
+    if (K.inv_n && atomic_load(&K.st) == ST_RUN && in_rift_map(lv)) { int nd = atomic_load(&K.need), busy = 0; for (int i = 0; i < K.inv_n; i++) busy |= K.inv_st[i] == 1 || K.inv_st[i] == 2;
+        for (int i = 0; i < K.inv_n; i++) {
+            if (K.inv_st[i] == 0 && !busy && !K.guard && nd > 0 && atomic_load(&K.score) * 100 >= (long long)nd * K.inv_pct[i]) { K.inv_st[i] = 1; K.inv_t[i] = t; busy = 1; say("dmRiftSayInvader"); LOG("秘境：拍 %u 闯入首领预警（第 %d 位，类号 %d，进度 %d%%）", t, i + 1, K.inv_cls[i], K.inv_pct[i]); }
+            else if (K.inv_st[i] == 1 && K.guard) { K.inv_st[i] = 4; LOG("秘境：守护者已现身，第 %d 位闯入首领作罢", i + 1); }
+            else if (K.inv_st[i] == 1 && t - K.inv_t[i] >= 75) { static const int dx[8] = { 36, 26, 0, -26, -36, -26, 0, 26 }, dy[8] = { 0, 26, 36, 26, 0, -26, -36, -26 }; int x, y; unit_xy(player, &x, &y); uint64_t u = 0; int32_t pos[2] = { 0, 0 };
+                for (int k = 0, d0 = rnd(8); k < 8 && !u; k++) { int d = (d0 + k) % 8; pos[0] = x + dx[d]; pos[1] = y + dy[d]; uint64_t rs = room_load(G, level_of(player), pos[0], pos[1]), rr = rs ? free_spot(G, rs, pos) : 0;
+                    if (!rr || abs(pos[0] - x) + abs(pos[1] - y) < 24) continue;   /* 找到的空地被挪到人跟前就不要 | open ground that got moved right next to the player is not accepted */
+                    u = ((uint64_t (*)(uint64_t, uint64_t, int, int, int, int, int, int, uint64_t))(B + 0x7ce630))(G, rr, 1, K.inv_cls[i], pos[0], pos[1], 1, 0, 0x10); }
+                if (!u) { if (t - K.inv_t[i] > 325) { K.inv_st[i] = 4; LOG("秘境：第 %d 位闯入首领 10 秒内没找到落点，作罢", i + 1); } continue; }
+                K.inv_id[i] = *(uint32_t *)(uintptr_t)(u + 8); K.inv_st[i] = 2;
+                if (K.tier >= 9) { g_hp_mul = 300; scale_monster(G, u, target_level(player) + 3, dm_rift_tier_level(9, gs(player, 12)) + 3); g_hp_mul = 1000; }
+                LOG("秘境：拍 %u 闯入首领刷出（第 %d 位）类号 %d id %u 在 %d,%d（离人 %d 格）等级 %d 生命 %d", t, i + 1, K.inv_cls[i], K.inv_id[i], pos[0], pos[1], abs(pos[0] - x) + abs(pos[1] - y), gs(u, 12), gs(u, 7) >> 8); }
+            else if (K.inv_st[i] == 2) { uint64_t u = find_unit(G, 1, K.inv_id[i]); uint32_t m = u ? *(uint32_t *)(uintptr_t)(u + 0xc) : 1;
+                if (u && (m == 0 || m == 12)) { K.inv_st[i] = 3; int add = nd * 12 / (100 + 12 * K.inv_n); if (add < 1) add = 1; int sc = atomic_fetch_add(&K.score, add) + add;   /* 12% 按上调前的进度需求算 | 12% is computed on the progress requirement before the increase */
+                    LOG("秘境：拍 %u 闯入首领死亡（第 %d 位，类号 %d）→ 进度 +%d，现 %d / %d", t, i + 1, K.inv_cls[i], add, sc, nd); } } } }
     if (!K.guard && atomic_load(&K.score) >= atomic_load(&K.need) && in_rift_map(lv)) {
-        int x, y; unit_xy(player, &x, &y); int32_t pos[2] = { x + 6, y + 6 }; uint64_t rr = free_spot(G, unit_room(player), pos);
-        K.guard_cls = k_guard[rnd(5)];
-        uint64_t u = rr ? ((uint64_t (*)(uint64_t, uint64_t, int, int, int, int, int, int, uint64_t))(B + 0x7ce630))(G, rr, 1, K.guard_cls, pos[0], pos[1], 1, 0, 0x10) : 0;
-        if (u) { K.guard = *(uint32_t *)(uintptr_t)(u + 8); if (lowhp) ss(u, 6, 256); else if (K.tier >= 9) scale_monster(G, u, target_level(player) + 3, dm_rift_tier_level(9, gs(player, 12)) + 3);   // 守护者 = 本层怪物等级 + 3（110 封顶），起算层也按 + 3 算，同吃本层总倍率 | Guardian = this level's monster level + 3 (capped at 110); the baseline level is computed with + 3 as well, and the same total multiplier of this level applies
-            say("dmRiftSayGuardian"); LOG("秘境：拍 %u 刷守护者 类号 %d id %u 等级 %d 生命 %d", t, K.guard_cls, K.guard, gs(u, 12), gs(u, 7) >> 8); } }
-    if (K.guard && !atomic_load(&K.guard_dead)) { uint64_t u = find_unit(G, 1, K.guard);
-        if (u) { uint32_t m = *(uint32_t *)(uintptr_t)(u + 0xc); if (m == 0 || m == 12) { atomic_store(&K.guard_dead, 1); LOG("秘境：拍 %u 守护者死亡", t); finish(G, player, u); } } }
+        // 守护者现身：还在场的闯入首领退场——守护者战期间场上只有守护者。原版没有读到能安全移除一个单位的入口，用已验证过的定点传送把它送到这张图的远处（不触发死亡 / 掉落 / 击杀计数），
+        // 状态记作罢：之后它死不死都不给进度。玩家想要它的进度与掉落，就得在进度满之前解决它
+        // Guardians appear: an invading boss still present leaves - during the Guardian fight only the Guardians are on the field. No entry was found in the original for safely removing a unit, so the already-verified fixed-point teleport sends it far away on this map (no death / drop / kill count is triggered),
+        // and its state is recorded as called off: whether or not it dies afterwards, it gives no progress. A player who wants its progress and drops has to deal with it before progress is full
+        for (int i = 0; i < K.inv_n; i++) { if (K.inv_st[i] == 1) { K.inv_st[i] = 4; continue; } if (K.inv_st[i] != 2) continue;
+            static const int fx[8] = { 150, 106, 0, -106, -150, -106, 0, 106 }, fy[8] = { 0, 106, 150, 106, 0, -106, -150, -106 }; uint64_t iu = find_unit(G, 1, K.inv_id[i]); int px, py, moved = 0; unit_xy(player, &px, &py);
+            for (int k = 0; iu && k < 8 && !moved && !getenv("DM_RIFT_TEST_NOFAR"); k++) { int32_t fp[2] = { px + fx[k], py + fy[k] };   /* 测试开关 DM_RIFT_TEST_NOFAR=1：当作远处没有空地，走兜底 | test switch DM_RIFT_TEST_NOFAR=1: act as if there were no open ground far away, taking the fallback */ uint64_t rs = room_load(G, level_of(player), fp[0], fp[1]), rr = rs ? free_spot(G, rs, fp) : 0;
+                if (rr && abs(fp[0] - px) + abs(fp[1] - py) >= 100 && dm_teleport(B, G, iu, rr, fp[0], fp[1])) { moved = 1; LOG("秘境：拍 %u 守护者现身，闯入首领（第 %d 位，类号 %d）退场到 %d,%d（离人 %d 格），不再给进度", t, i + 1, K.inv_cls[i], fp[0], fp[1], abs(fp[0] - px) + abs(fp[1] - py)); } }
+            if (!moved && iu && g_entry_lv == lv) { int32_t fp[2] = { g_entry_x, g_entry_y }; uint64_t rs = room_load(G, level_of(player), fp[0], fp[1]), rr = rs ? free_spot(G, rs, fp) : 0;   // 兜底：传到玩家进这张图时的落点（一定可达） | fallback: teleport to the point where the player entered this map (always reachable)
+                if (rr && dm_teleport(B, G, iu, rr, fp[0], fp[1])) { moved = 1; LOG("秘境：拍 %u 守护者现身，闯入首领（第 %d 位，类号 %d）远处没有空地，退场到本图入口 %d,%d（离人 %d 格）", t, i + 1, K.inv_cls[i], fp[0], fp[1], abs(fp[0] - px) + abs(fp[1] - py)); } }
+            if (!moved) LOG("【红】秘境：拍 %u 守护者现身，闯入首领（第 %d 位）退场落点与本图入口都没传成，留在场上（作罢，不给进度）", t, i + 1);
+            g_inv_gone[i] = K.inv_id[i]; if (iu) unit_xy(iu, &g_inv_gone_xy[i][0], &g_inv_gone_xy[i][1]); K.inv_st[i] = 4; K.inv_id[i] = 0; say("dmRiftSayInvaderGone"); }
+        guard_wave(G, player, t, lowhp); }
+    // 两波之间：上一波全倒 WAVE_GAP 拍后刷下一波
+    // Between two waves: WAVE_GAP ticks after the previous wave is all down, the next wave is spawned
+    if (K.wave_t && t >= K.wave_t + WAVE_GAP && atomic_load(&K.st) == ST_RUN) { guard_wave(G, player, t, lowhp); K.wave_t = 0; }   /* 先刷、再清「两波之间」：顶部条在两波之间报刚打完的那一波，刷出来才跳到下一波 | spawn first, then clear "between two waves": between waves the top bar reports the wave just finished, and moves to the next wave only once it has spawned */
+    // 测试替身 DM_RIFT_TEST_DUMMY=<每秒点数>：对在场的每位守护者按固定输出扣当前生命（留 1 点，由随从补最后一下）——人物不用真打，用来出「承伤每秒峰值」的相对值
+    // Test stand-in DM_RIFT_TEST_DUMMY=<points per second>: deduct current life from every Guardian present at a fixed output (leaving 1 point, with a minion delivering the last hit) - the character does not have to fight for real; used to obtain relative values of the "per-second peak of damage taken"
+    { static int dps = -1; if (dps < 0) { const char *e = getenv("DM_RIFT_TEST_DUMMY"); dps = e ? atoi(e) : 0; }
+      if (dps > 0) for (int i = 0; i < 2; i++) { uint64_t u = K.inv_st[i] == 2 ? find_unit(G, 1, K.inv_id[i]) : 0; uint32_t m = u ? *(uint32_t *)(uintptr_t)(u + 0xc) : 0; if (!u || m == 0 || m == 12) continue;   /* 在场的闯入首领同样按固定输出扣 | an invading boss that is present is deducted at the fixed output as well */
+          long long h = (long long)gs(u, 6) - (long long)dps * 256 / 25; ss(u, 6, h < 256 ? 256 : (int)h); }
+      if (dps > 0 && K.guard && !atomic_load(&K.guard_dead)) for (int i = 0; i < 3; i++) { uint64_t u = K.guards[i] ? find_unit(G, 1, K.guards[i]) : 0; uint32_t m = u ? *(uint32_t *)(uintptr_t)(u + 0xc) : 0; if (!u || m == 0 || m == 12) continue;
+          long long h = (long long)gs(u, 6) - (long long)dps * 256 / 25; ss(u, 6, h < 256 ? 256 : (int)h); } }
+    // 结算条件：本场刷出的守护者全部死亡。任一位还活着（或还在单位表里没判死）都不结算、不开门
+    // Completion condition: all the Guardians spawned in this run are dead. While any one is alive (or still in the unit table and not judged dead) there is no completion and no door
+    if (K.guard && !atomic_load(&K.guard_dead)) { int alive = 0, deadn = 0; uint64_t last = 0;
+        for (int i = 0; i < 3; i++) { if (!K.guards[i]) continue; uint64_t u = find_unit(G, 1, K.guards[i]); if (!u) { alive++; continue; }   /* 不在单位表里（房间卸载）：不当它死了 | not in the unit table (room unloaded): do not treat it as dead */
+            uint32_t m = *(uint32_t *)(uintptr_t)(u + 0xc); if (m == 0 || m == 12) { last = u; deadn++; static uint32_t said[3]; if (said[i] != K.guards[i]) { said[i] = K.guards[i]; LOG("秘境：拍 %u 守护者死亡（类号 %d id %u）", t, K.gcls[i], K.guards[i]); } } else alive++; }
+        if (!K.wave_t) atomic_store(&K.gdead, deadn);   /* 两波之间 guards 已清空，计数留着上一波的（全倒）给顶部条 | between two waves guards is already cleared; the count keeps the previous wave's (all down) for the top bar */
+        if (!alive && last && K.wave + 1 < K.nwave) { memset(K.guards, 0, sizeof K.guards); K.wave++; K.wave_t = t; LOG("秘境：拍 %u 守护者第 %d 波全部倒下，%d 拍后刷第 %d 波", t, K.wave, WAVE_GAP, K.wave + 1); }
+        else if (!alive && last) { atomic_store(&K.guard_dead, 1); LOG("秘境：拍 %u 守护者全部死亡 → 结算", t); finish(G, player, last); } }
 }
