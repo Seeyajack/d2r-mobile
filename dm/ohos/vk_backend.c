@@ -8,6 +8,7 @@
 #include "vk_backend.h"
 
 #include "dm_log.h"
+#include "nvn_obj.h"       // 3.2 手写命令流要用它的记录格式（op_hdr / p_*）
 #include "nvn_vk.h"
 #include "tri_shaders.h"
 #include "vk_ctx_ohos.h"
@@ -1197,5 +1198,196 @@ int vk_backend_poolmod(char *out, size_t cap) {
         EMIT6("结论：池登记 / 地址反查 / GPU 搬运 / 负向判据全部成立 ⇒ 回放层的池这一层可用");
     *p = 0;
     #undef EMIT6
+    return fails;
+}
+
+// ================= 阶段 3 第二步（3.2）：回放层最小闭环 =================
+// 手写一小段 NVN 命令流（格式见 nvn_obj.h），交给 nvn_vk_exec 回放，离屏读回验证三角形。
+// 与阶段 2 的判据**逐像素相同**（内=着色器色、外=清屏色），区别是这次画面是**从记录流回放出来的**。
+// 着色器走"解析接缝"：探针把阶段 2 那两条 SPIR-V 喂给回放层（生产里这张表由离线链产出）。
+typedef struct { VkImage img; VkBuffer buf; uint32_t w, h; } replay_rb_pack;
+static void rec_replay_rb(VkCommandBuffer cb, void *ud) {
+    replay_rb_pack *d = (replay_rb_pack *)ud;
+    VkBufferImageCopy r = { 0 };
+    r.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    r.imageSubresource.layerCount = 1;
+    r.imageExtent.width = d->w; r.imageExtent.height = d->h; r.imageExtent.depth = 1;
+    vkCmdCopyImageToBuffer(cb, d->img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, d->buf, 1, &r);
+}
+
+// 着色器解析接缝的探针实现：控制段指针当键（0x1 = 顶点、0x2 = 片元）
+static int probe_shader_resolve(const void *control, int stage, nvn_vk_shader *out) {
+    if (control == (const void *)0x1 && stage == 0) { out->spirv = dm_spv_vert; out->nwords = dm_spv_vert_n; return 1; }
+    if (control == (const void *)0x2 && stage == 1) { out->spirv = dm_spv_frag; out->nwords = dm_spv_frag_n; return 1; }
+    return 0;
+}
+
+// 往命令流里写一条记录：{op, size} + 载荷，size 含头且 8 对齐（与 nvn_obj.h 的约定一致）
+static uint8_t *wrec(uint8_t *p, uint32_t op, const void *payload, uint32_t plen) {
+    op_hdr h;
+    h.op = op;
+    h.size = (uint32_t)((sizeof h + plen + 7u) & ~7u);
+    memcpy(p, &h, sizeof h);
+    if (plen) memcpy(p + sizeof h, payload, plen);
+    return p + h.size;
+}
+
+int vk_backend_replay(char *out, size_t cap) {
+    if (!out || cap < 256) return -1;
+    char *p = out, *end = out + cap - 1;
+    int fails = 0;
+    uint64_t t0 = ms_now();
+    #define EMIT7(...) do { int _n = snprintf(p, (size_t)(end - p) + 1, __VA_ARGS__); \
+                            if (_n > 0) { p += _n; if (p > end) p = end; } \
+                            dm_log_printf(__VA_ARGS__); } while (0)
+
+    EMIT7("=== 阶段 3 第二步（3.2）：回放层最小闭环 ===");
+    EMIT7("手写 NVN 命令流 → nvn_vk_exec 回放 → 离屏读回逐像素验证");
+
+    const uint64_t HEAP = 4ull << 30;
+    uint8_t *heap = (uint8_t *)dm_ohos_heap_reserve(HEAP);
+    if (!heap) { EMIT7("❌ 客体堆预留失败：%s", dm_ohos_vk_err()); EMIT7("===== 失败 ====="); *p = 0; return 1; }
+
+    // 一个池：顶点数据放在 +256，渲染目标的"存储"声明在 +4 MiB（图像自建分配，不用它，见 nvn_vk.c 的说明）
+    const uint64_t POOL_SZ = 16ull << 20;
+    uint8_t *pool_base = heap + (1ull << 30);
+    if (nvn_vk_pool_add(pool_base, POOL_SZ)) {
+        EMIT7("❌ 池登记失败：%s", nvn_vk_last_error()); EMIT7("===== 失败 ====="); *p = 0; return 1;
+    }
+    EMIT7("池：%p + %llu MiB（堆偏移 %#llx）", pool_base, (unsigned long long)(POOL_SZ >> 20),
+          (unsigned long long)(1ull << 30));
+
+    // 顶点数据：和阶段 2 同一组三角形顶点（NDC，Vulkan 的 Y 向下 ⇒ 底边在上）
+    const float verts[6] = { -1.f, -1.f,  1.f, -1.f,  0.f, 1.f };
+    uint8_t *vtx = pool_base + 256;
+    memcpy(vtx, verts, sizeof verts);
+
+    // 池对象 / 贴图对象 / 程序对象（都是 nvn_obj.h 的普通结构，探针自己填）
+    static pool_t g_pool;
+    static tex_t  g_tex;
+    static prog_t g_prog;
+    g_pool.magic = MAGIC('P','O','O','L'); g_pool.mem = pool_base; g_pool.size = POOL_SZ;
+    memset(&g_tex, 0, sizeof g_tex);
+    g_tex.magic = MAGIC('T','E','X','0');
+    g_tex.d.target = 1;              // NVN_TEXTURE_TARGET_2D
+    g_tex.d.format = 0x25;           // NVN_FORMAT_RGBA8
+    g_tex.d.width = 64; g_tex.d.height = 64; g_tex.d.depth = 1; g_tex.d.levels = 1;
+    g_tex.mem = pool_base + (4ull << 20); g_tex.pool = &g_pool; g_tex.off = 4ll << 20;
+    g_tex.serial = 1;
+    memset(&g_prog, 0, sizeof g_prog);
+    g_prog.magic = MAGIC('P','R','O','G'); g_prog.nstage = 2; g_prog.serial = 1;
+    g_prog.sd[0].control = (const void *)0x1;   // 键：探针的解析回调认这两个
+    g_prog.sd[1].control = (const void *)0x2;
+    nvn_vk_set_shader_resolver(probe_shader_resolve);
+
+    // 手写命令流
+    static uint8_t stream[4096];
+    uint8_t *w = stream;
+    {
+        p_set_rt rt; memset(&rt, 0, sizeof rt);
+        rt.n = 1; rt.color[0] = &g_tex;
+        w = wrec(w, OP_SET_RT, &rt, sizeof rt);
+
+        p_clear_color cc; memset(&cc, 0, sizeof cc);
+        cc.rgba[0] = 1.f; cc.rgba[3] = 1.f;                 // 清成红（三角形外应读到它）
+        w = wrec(w, OP_CLEAR_COLOR, &cc, sizeof cc);
+
+        p_viewports vp; memset(&vp, 0, sizeof vp);
+        vp.n = 1;
+        vp.v[0][0] = 0; vp.v[0][1] = 0; vp.v[0][2] = 64; vp.v[0][3] = 64; vp.v[0][4] = 0; vp.v[0][5] = 1;
+        w = wrec(w, OP_VIEWPORTS, &vp, sizeof vp);
+
+        p_scissor sc = { 0, 0, 64, 64 };
+        w = wrec(w, OP_SCISSOR, &sc, sizeof sc);
+
+        p_bind_program bp; memset(&bp, 0, sizeof bp);
+        bp.prog = &g_prog; bp.stages = 3;
+        w = wrec(w, OP_BIND_PROGRAM, &bp, sizeof bp);
+
+        p_bind_vattr va; memset(&va, 0, sizeof va);
+        va.first = 0; va.n = 1;
+        va.st[0] = (uint32_t)0x16 | (0u << 8) | (0u << 27);   // fmt=0x16(Float2) offset=0 stream=0
+        w = wrec(w, OP_BIND_VATTR, &va, sizeof va);
+
+        p_bind_vstream vs; memset(&vs, 0, sizeof vs);
+        vs.first = 0; vs.n = 1; vs.st[0].stride = 8; vs.st[0].divisor = 0;
+        w = wrec(w, OP_BIND_VSTREAM, &vs, sizeof vs);
+
+        p_bind_vbuf vb; memset(&vb, 0, sizeof vb);
+        vb.first = 0; vb.n = 1;
+        vb.r[0].address = (NVNbufferAddress)(uintptr_t)vtx; vb.r[0].size = sizeof verts;
+        w = wrec(w, OP_BIND_VBUF, &vb, sizeof vb);
+
+        p_draw dr = { 4, 0, 3 };                              // prim=4(三角形) first=0 count=3
+        w = wrec(w, OP_DRAW, &dr, sizeof dr);
+
+        op_hdr eh = { OP_END, 8 };
+        memcpy(w, &eh, sizeof eh); w += sizeof eh;
+    }
+    EMIT7("命令流：%d 字节", (int)(w - stream));
+
+    // 回放
+    if (nvn_vk_frame_begin() != 0) { EMIT7("❌ 开始回放帧失败：%s", nvn_vk_last_error()); fails++; }
+    else {
+        nvn_vk_exec(stream);
+        if (nvn_vk_frame_end() != 0) { EMIT7("❌ 提交回放帧失败：%s", nvn_vk_last_error()); fails++; }
+    }
+
+    // 读回：目标图像（通道结束已转成 TRANSFER_SRC）→ 主机可见缓冲
+    {
+        VkDevice dev = dm_ohos_vk_device();
+        uint32_t w2 = 0, h2 = 0;
+        VkImage img = nvn_vk_target_image();
+        if (!img || nvn_vk_target_extent(&w2, &h2) != 0) { EMIT7("❌ 拿不到渲染目标图像"); fails++; }
+        else {
+            VkBuffer rb = VK_NULL_HANDLE; VkDeviceMemory rbm = VK_NULL_HANDLE; void *rbm_p = NULL;
+            VkBufferCreateInfo bi = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+            bi.size = (VkDeviceSize)w2 * h2 * 4; bi.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+            if (vkCreateBuffer(dev, &bi, NULL, &rb) != VK_SUCCESS) { EMIT7("❌ 建读回缓冲失败"); fails++; }
+            else {
+                VkMemoryRequirements mr; vkGetBufferMemoryRequirements(dev, rb, &mr);
+                VkMemoryAllocateInfo mi = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+                mi.allocationSize = mr.size; mi.memoryTypeIndex = dm_ohos_heap_mem_type();
+                if (vkAllocateMemory(dev, &mi, NULL, &rbm) != VK_SUCCESS) { EMIT7("❌ 分配读回内存失败"); fails++; }
+                else if (vkBindBufferMemory(dev, rb, rbm, 0) != VK_SUCCESS) { EMIT7("❌ 绑定读回缓冲失败"); fails++; }
+                else if (vkMapMemory(dev, rbm, 0, VK_WHOLE_SIZE, 0, &rbm_p) != VK_SUCCESS) { EMIT7("❌ 映射读回缓冲失败"); fails++; }
+                else {
+                    replay_rb_pack pk = { img, rb, w2, h2 };
+                    if (dm_ohos_vk_oneshot(rec_replay_rb, &pk) != 0) { EMIT7("❌ 读回提交失败"); fails++; }
+                    else {
+                        const uint8_t *pix = (const uint8_t *)rbm_p;
+                        // 与阶段 2 同一组判据点：(32,16) 在三角形内；(0,63) 在左下角，必在三角形外
+                        const uint8_t *in = pix + (16 * w2 + 32) * 4;
+                        const uint8_t *ou = pix + (63 * w2 + 0) * 4;
+                        uint64_t nd = 0, nb = 0, nh = 0, nops = 0, nskip = 0;
+                        nvn_vk_stats(&nd, &nb, &nh, &nops, &nskip);
+                        EMIT7("渲染目标 %ux%u；回放统计：绘制 %llu 次 / 新建管线 %llu / 命中缓存 %llu / 命令 %llu 条 / 未处理 %llu 条",
+                              w2, h2, (unsigned long long)nd, (unsigned long long)nb,
+                              (unsigned long long)nh, (unsigned long long)nops, (unsigned long long)nskip);
+                        EMIT7("三角形内 (32,16) 读到 (%u,%u,%u,%u)，预期蓝 (0,0,255,255)", in[0], in[1], in[2], in[3]);
+                        EMIT7("三角形外 (0,63)  读到 (%u,%u,%u,%u)，预期红 (255,0,0,255)", ou[0], ou[1], ou[2], ou[3]);
+                        int ok_in = in[0] == 0 && in[1] == 0 && in[2] == 255 && in[3] == 255;
+                        int ok_out = ou[0] == 255 && ou[1] == 0 && ou[2] == 0 && ou[3] == 255;
+                        if (!ok_in) { EMIT7("❌ 三角形内颜色不对：回放链（程序/管线/顶点/绘制）有问题"); fails++; }
+                        if (!ok_out) { EMIT7("❌ 三角形外颜色不对：清屏或绘制范围有问题"); fails++; }
+                        EMIT7("%s 回放出来的画面与阶段 2 逐像素一致%s", (ok_in && ok_out) ? "✅" : "❌",
+                              (ok_in && ok_out) ? "——记录流 → 回放 → 出图这条链通了" : "");
+                    }
+                    vkUnmapMemory(dev, rbm);
+                }
+            }
+            if (rb) vkDestroyBuffer(dev, rb, NULL);
+            if (rbm) vkFreeMemory(dev, rbm, NULL);
+        }
+    }
+
+    nvn_vk_pool_del(pool_base);
+    dm_ohos_heap_release();
+
+    EMIT7("");
+    EMIT7("===== 3.2 %s：失败 %d 项（总耗时 %llums）=====",
+          fails ? "未全通过" : "全部通过", fails, (unsigned long long)(ms_now() - t0));
+    *p = 0;
+    #undef EMIT7
     return fails;
 }

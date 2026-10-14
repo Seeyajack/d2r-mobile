@@ -37,9 +37,10 @@ add_library(dmprobe SHARED
 )
 
 target_include_directories(dmprobe PRIVATE
-    ${DM_DIR}/host     # dm.h（module_t）
-    ${DM_DIR}/ohos     # map_image_ohos.h、host_tests.h、dm_log.h、vk_ctx_ohos.h
-    ${DM_DIR}/gfx/nvn  # nvn_vk.h（鸿蒙侧回放层的池模块）
+    ${DM_DIR}/host            # dm.h（module_t）
+    ${DM_DIR}/ohos            # map_image_ohos.h、host_tests.h、dm_log.h、vk_ctx_ohos.h
+    ${DM_DIR}/gfx/nvn         # nvn_vk.h、nvn_obj.h（命令记录格式）
+    ${DM_DIR}/gfx/nvn/include # nvn.h（NVN ABI 类型）
 )
 
 # 官方要求：用 NAPI 要链 libace_napi.z.so；打 hilog 要链 libhilog_ndk.z.so；

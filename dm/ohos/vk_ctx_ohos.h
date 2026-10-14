@@ -31,6 +31,7 @@ VkPhysicalDevice dm_ohos_vk_phys(void);
 VkDevice         dm_ohos_vk_device(void);
 uint32_t         dm_ohos_vk_qfam(void);
 VkQueue          dm_ohos_vk_queue(void);
+VkCommandPool    dm_ohos_vk_pool(void);       // 共享命令池（回放层要自己录一段多命令的缓冲）
 const char      *dm_ohos_vk_err(void);        // 创建失败的原因（没失败就是空串）
 const char      *dm_ohos_vk_devname(void);
 

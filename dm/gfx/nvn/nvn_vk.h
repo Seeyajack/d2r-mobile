@@ -46,6 +46,35 @@ int  nvn_vk_gpu_addr(uint64_t addr, uint64_t len, VkBuffer *buf, uint64_t *off, 
 int          nvn_vk_pool_count(void);
 const char  *nvn_vk_last_error(void);
 
+// ---------------------------------------------------------------- 回放（对标 mtl_exec）
+
+// **着色器解析接缝**：回放层不自己去读表，而是问这个回调"控制段哈希 + 阶段 → SPIR-V 在哪"。
+// 为什么留这道缝：上游 Metal 侧拿的是离线编好的 metallib（`shader_map.tsv` + `dmsh_build.py`），
+// 而 Vulkan 侧要的是 **SPIR-V**——那张表要靠游戏文件才能生成（L3/离线），现在还不存在。
+// 留缝之后，"回放骨架"能立刻验，"着色器表"以后补，两边互不阻塞。
+// 返回 1 = 找到（out 填好），0 = 没有。
+typedef struct { const uint32_t *spirv; uint32_t nwords; } nvn_vk_shader;
+typedef int (*nvn_vk_shader_fn)(const void *control, int stage, nvn_vk_shader *out);
+void nvn_vk_set_shader_resolver(nvn_vk_shader_fn fn);
+
+// 一次"回放提交"：begin 拿一个命令缓冲开始录制，exec 往里录，end 提交并等完成。
+// 对标上游：mtl_exec 录进"当前提交"，提交点由外层管。0 = 成功。
+int  nvn_vk_frame_begin(void);
+int  nvn_vk_frame_end(void);
+
+// 把一段命令流（handle = 段首地址，格式见 nvn_obj.h）回放成 Vulkan 命令。对标 mtl_exec。
+void nvn_vk_exec(const uint8_t *handle);
+
+// 统计（判据用）：绘制次数 / 新建管线数 / 命中缓存数 / 走过的命令条数 / 未处理的命令条数。
+void nvn_vk_stats(uint64_t *draws, uint64_t *pso_built, uint64_t *pso_hit, uint64_t *ops, uint64_t *ops_skipped);
+void nvn_vk_stats_reset(void);
+
+// 当前渲染目标的 Vulkan 图像（读回 / 将来的出图用）。没设过渲染目标时返回 VK_NULL_HANDLE。
+// 通道结束时它处于 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL。
+VkImage       nvn_vk_target_image(void);
+int           nvn_vk_target_extent(uint32_t *w, uint32_t *h);
+VkImageLayout nvn_vk_target_layout(void);
+
 #ifdef __cplusplus
 }
 #endif

@@ -83,3 +83,11 @@ int     vk_backend_heapreserve(char *out, size_t cap);
 // Phase 3 step 1 (3.1-C): the pool module -- register pools, look addresses back up, verify the GPU
 // can actually move data through them, plus one negative case.
 int     vk_backend_poolmod(char *out, size_t cap);
+
+// 阶段 3 第二步（3.2）：**回放层最小闭环**。手写一小段 NVN 命令流（`nvn_obj.h` 的记录格式），
+// 交给 `nvn_vk_exec` 回放，离屏读回逐像素验证三角形——判据与阶段 2 相同，但画面是"从记录流回放出来的"。
+// 着色器走"解析接缝"（`nvn_vk_set_shader_resolver`）：探针喂阶段 2 那两条 SPIR-V，
+// 生产里这张表由离线链产出（Maxwell → SPIR-V）。
+// Phase 3 step 2: the minimal replay loop -- a hand-written NVN command stream replayed into Vulkan,
+// verified pixel by pixel. Shaders come through the resolver seam.
+int     vk_backend_replay(char *out, size_t cap);

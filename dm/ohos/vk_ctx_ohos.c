@@ -101,6 +101,7 @@ VkPhysicalDevice dm_ohos_vk_phys(void)     { ensure(); return g_ctx.phys; }
 VkDevice         dm_ohos_vk_device(void)   { ensure(); return g_ctx.dev; }
 uint32_t         dm_ohos_vk_qfam(void)     { ensure(); return g_ctx.qfam; }
 VkQueue          dm_ohos_vk_queue(void)    { ensure(); return g_ctx.queue; }
+VkCommandPool    dm_ohos_vk_pool(void)     { ensure(); return g_ctx.pool; }
 const char      *dm_ohos_vk_err(void)      { return g_ctx.err; }
 const char      *dm_ohos_vk_devname(void)  { return g_ctx.devname; }
 
