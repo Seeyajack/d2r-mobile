@@ -100,31 +100,17 @@ static void emit_log_only(sink_t *s, const char *line) {
     if (s->log) { fputs("        ", s->log); fputs(line, s->log); fputc('\n', s->log); fflush(s->log); }
 }
 
-// ---- 崩了怎么办：只做异步信号安全的事（open/write/close），写一行谁崩的，然后退出 ----
-static void wstr(int fd, const char *s) { if (s) { size_t n = strlen(s); if (n) { ssize_t r = write(fd, s, n); (void)r; } } }
-
-static void on_fatal(int sig) {
-    int fd = open(g_logpath, O_WRONLY | O_APPEND);
-    if (fd >= 0) {
-        wstr(fd, "@CRASH ");
-        wstr(fd, g_cur_name ? g_cur_name : "?");
-        wstr(fd, sig == SIGABRT ? " SIGABRT\n" : sig == SIGSEGV ? " SIGSEGV\n" :
-                 sig == SIGBUS ? " SIGBUS\n" : " SIG\n");
-        close(fd);
-    }
-    _exit(3);
-}
-
-static void arm_fatal_handlers(void) {
-    struct sigaction sa;
-    memset(&sa, 0, sizeof sa);
-    sa.sa_handler = on_fatal;
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = SA_RESETHAND;              // 处理函数自己再出事就别再进来
-    sigaction(SIGABRT, &sa, NULL);
-    sigaction(SIGSEGV, &sa, NULL);
-    sigaction(SIGBUS, &sa, NULL);
-}
+// ---- 为什么这里**不**装 SIGABRT/SIGSEGV/SIGBUS 处理函数 ----
+// 第一版装过：崩了就往日志写一行 @CRASH <名字> 再 _exit。真机上撞出一个反例：
+// t_hid_script 里有一条检查靠 **fork 出的子进程被 abort() 杀掉（WTERMSIG == SIGABRT）** 来判定
+// "墙钟兜底生效"。子进程继承了我们的处理函数后，abort() 被它截走、变成 _exit(3) 的**正常退出**，
+// WIFSIGNALED 不再成立 ⇒ 检查失败。宿主自己明明走到了 die()（日志里有 FATAL 墙钟兜底超时）。
+// 所以：进程崩掉交给 **@BEGIN 探测**（开跑前写 @BEGIN、没有配对的 @RESULT 就是它）——
+// 那套机制不改变进程的死法，测试的信号语义保持原样。
+// Why no SIGABRT/SIGSEGV/SIGBUS handlers here: v1 installed them to log @CRASH and _exit. That broke
+// t_hid_script, one of whose checks requires a forked child to be *killed by* SIGABRT; the inherited
+// handler turned abort() into a normal _exit(3), so WIFSIGNALED no longer held. Process death is
+// detected by the @BEGIN marker instead, which does not change how the process dies.
 
 // ---- 续跑：先读日志，出过结果（或上次跑死在这里）的单测就不再跑 ----
 // 三种标记：
@@ -336,8 +322,6 @@ int dm_host_tests_run(const char *logpath, const char *filter, char *out, size_t
     char *finished = (char *)calloc((size_t)dm_host_tests_count, 1);
     if (!only_named && started && finished) load_done(g_logpath, started, finished, dm_host_tests_count);
     s.log = fopen(g_logpath, "a");
-
-    arm_fatal_handlers();
 
     char dir[1024] = { 0 };
     int have_dir = (self_dir(dir, sizeof dir) == 0);
