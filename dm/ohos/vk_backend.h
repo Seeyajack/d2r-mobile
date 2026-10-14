@@ -50,3 +50,22 @@ int     vk_backend_smoke(char *out, size_t cap);
 // Phase 2: load hand-assembled SPIR-V, build a graphics pipeline, draw a triangle and verify pixels --
 // proving SPIR-V (what the offline chain produces) feeds Vulkan directly, skipping MSL entirely.
 int     vk_backend_shader(char *out, size_t cap);
+
+// 阶段 3 前置：**内存池零拷贝的平台能力验证**。上游用 newBufferWithBytesNoCopy 把游戏内存池包成
+// 零拷贝缓冲；本机没有 VK_EXT_external_memory_host，所以走"宿主自己分配"那条路——让客体堆的
+// CPU 映射本身就是 Vulkan 内存的映射。本探针在真机上验这条路的两个前提：
+//   ① 规模：能否一次分配并映射「客体堆量级」（约 3.7 GiB）的 HOST_VISIBLE|DEVICE_LOCAL 内存；
+//   ② 机制：CPU 写进去的数据，GPU 经缓冲是否真的看得到（CPU 写 → GPU copy → CPU 读，逐字节比对）。
+// 报告写进 out（含结尾 0）；返回 0 = 全过，非 0 = 有问题（细节在报告里）。
+// Phase 3 prerequisite: verify the two premises of the "host allocates" zero-copy route on a real
+// device -- (1) can a guest-heap-sized (~3.7 GiB) HOST_VISIBLE|DEVICE_LOCAL allocation be mapped,
+// (2) does the GPU really see what the CPU wrote (CPU write -> GPU copy -> CPU read, byte compared).
+int     vk_backend_memprobe(char *out, size_t cap);
+
+// 阶段 3 第一步原型（3.1-A）：**池零拷贝**。造一块"模拟客体堆"（Vulkan 分配 + 映射），从中切两个池
+// 各建 `VkBuffer` 绑到池偏移上（对标 `nvn_mtl.m` 的 `mtl_pool_add`），然后验三件事：
+//   ① 缓冲对齐要求（池偏移的约束）；② 缓冲设备地址的线性不变式（GPU−CPU 是常数，`mtl_gpu_addr` 靠它）；
+//   ③ CPU 写池 A → GPU copy → CPU 读池 B 逐字节一致（池切片真的能被 GPU 读写）。
+// 全部在探针内，不动任何上游文件。返回 0 = 全过。
+// Phase 3 step 1 prototype: the pool zero-copy path, entirely inside the probe (no upstream changes).
+int     vk_backend_poolproto(char *out, size_t cap);

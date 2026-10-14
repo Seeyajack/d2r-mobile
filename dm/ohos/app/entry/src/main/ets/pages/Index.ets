@@ -100,6 +100,28 @@ struct Index {
           }
         })
 
+      Button('内存池零拷贝（阶段3 前置：规模+机制）')
+        .width('100%')
+        .onClick(() => {
+          try {
+            const ctx = getContext(this) as common.UIAbilityContext;
+            this.result = dmprobe.runVkMemProbe(ctx.filesDir);
+          } catch (err) {
+            this.result = '调用原生模块失败：' + JSON.stringify(err);
+          }
+        })
+
+      Button('池零拷贝原型（3.1-A：池切片+设备地址）')
+        .width('100%')
+        .onClick(() => {
+          try {
+            const ctx = getContext(this) as common.UIAbilityContext;
+            this.result = dmprobe.runVkPoolProto(ctx.filesDir);
+          } catch (err) {
+            this.result = '调用原生模块失败：' + JSON.stringify(err);
+          }
+        })
+
       TextInput({ text: this.testFilter, placeholder: '单测筛选：留空=续跑，*=重头跑，或填单测名' })
         .width('100%')
         .onChange((v: string) => { this.testFilter = v; })

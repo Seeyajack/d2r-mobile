@@ -124,13 +124,41 @@ static napi_value RunVkShader(napi_env env, napi_callback_info info) {
     return ret;
 }
 
+static napi_value RunVkMemProbe(napi_env env, napi_callback_info info) {
+    // 阶段 3 前置：内存池零拷贝的平台能力验证（规模 + 机制）。
+    char files_dir[1024];
+    Arg0String(env, info, files_dir, sizeof files_dir);
+    napi_value ret = NULL;
+    char *buf = (char *)malloc(VKSMOKE_BUF);
+    if (!buf) { napi_create_string_utf8(env, "内存不足", NAPI_AUTO_LENGTH, &ret); return ret; }
+    vk_backend_memprobe(buf, VKSMOKE_BUF);
+    napi_create_string_utf8(env, buf, NAPI_AUTO_LENGTH, &ret);
+    free(buf);
+    return ret;
+}
+
+static napi_value RunVkPoolProto(napi_env env, napi_callback_info info) {
+    // 阶段 3 第一步原型（3.1-A）：池零拷贝（模拟客体堆 + 池切片 + 设备地址线性 + GPU 读写）。
+    char files_dir[1024];
+    Arg0String(env, info, files_dir, sizeof files_dir);
+    napi_value ret = NULL;
+    char *buf = (char *)malloc(VKSMOKE_BUF);
+    if (!buf) { napi_create_string_utf8(env, "内存不足", NAPI_AUTO_LENGTH, &ret); return ret; }
+    vk_backend_poolproto(buf, VKSMOKE_BUF);
+    napi_create_string_utf8(env, buf, NAPI_AUTO_LENGTH, &ret);
+    free(buf);
+    return ret;
+}
+
 static napi_value Init(napi_env env, napi_value exports) {
     napi_property_descriptor desc[] = {
-        { "runProbes",     NULL, RunProbes,     NULL, NULL, NULL, napi_default, NULL },
-        { "runVkProbe",    NULL, RunVkProbe,    NULL, NULL, NULL, napi_default, NULL },
-        { "runHostTests",  NULL, RunHostTests,  NULL, NULL, NULL, napi_default, NULL },
-        { "runVkSmoke",    NULL, RunVkSmoke,    NULL, NULL, NULL, napi_default, NULL },
-        { "runVkShader",   NULL, RunVkShader,   NULL, NULL, NULL, napi_default, NULL },
+        { "runProbes",      NULL, RunProbes,      NULL, NULL, NULL, napi_default, NULL },
+        { "runVkProbe",     NULL, RunVkProbe,     NULL, NULL, NULL, napi_default, NULL },
+        { "runHostTests",   NULL, RunHostTests,   NULL, NULL, NULL, napi_default, NULL },
+        { "runVkSmoke",     NULL, RunVkSmoke,     NULL, NULL, NULL, napi_default, NULL },
+        { "runVkShader",    NULL, RunVkShader,    NULL, NULL, NULL, napi_default, NULL },
+        { "runVkMemProbe",  NULL, RunVkMemProbe,  NULL, NULL, NULL, napi_default, NULL },
+        { "runVkPoolProto", NULL, RunVkPoolProto, NULL, NULL, NULL, napi_default, NULL },
     };
     napi_define_properties(env, exports, sizeof desc / sizeof desc[0], desc);
     return exports;

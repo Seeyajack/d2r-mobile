@@ -134,9 +134,15 @@ vk_ctx *vk_backend_init(char *err, size_t errcap) {
     VkDeviceCreateInfo di = { VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO };
     di.queueCreateInfoCount = 1; di.pQueueCreateInfos = &qi;
     // 阶段 2 起要 dynamic rendering（Vulkan 1.3 核心特性）：不开这个特性，vkCmdBeginRendering 就用不了。
-    // dynamic rendering is a Vulkan 1.3 core feature; without enabling it here vkCmdBeginRendering is invalid.
+    // 阶段 3 起要缓冲设备地址（着色器里的 SBUFP/UBOP，以及池的 GPU 地址反查）：能力探测已确认本设备支持。
+    // dynamic rendering is a Vulkan 1.3 core feature; buffer device address is needed from phase 3 on
+    // (SBUFP/UBOP in shaders, and the GPU-address lookup of memory pools) -- the capability probe
+    // confirmed this device supports it.
+    VkPhysicalDeviceVulkan12Features f12 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES };
+    f12.bufferDeviceAddress = VK_TRUE;
     VkPhysicalDeviceVulkan13Features f13 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES };
     f13.dynamicRendering = VK_TRUE;
+    f13.pNext = &f12;
     di.pNext = &f13;
     r = vkCreateDevice(c->phy, &di, NULL, &c->dev);
     if (r != VK_SUCCESS) { set_err(err, errcap, "vkCreateDevice", r); vk_backend_shutdown(c); return NULL; }
@@ -546,5 +552,392 @@ done:
     EMIT2("===== SPIR-V 直通%s：失败 %d 项（总耗时 %llums）=====",
           fails ? "失败" : "全部通过", fails, (unsigned long long)(ms_now() - t0));
     *p = 0;
+    return fails;
+}
+
+// ================= 阶段 3 前置：内存池零拷贝的平台能力验证 =================
+// 上游 Metal 侧用 newBufferWithBytesNoCopy 把游戏的内存池包成零拷贝缓冲
+// （nvn_mtl.m 的 mtl_pool_add / mtl_addr / mtl_gpu_addr）。Vulkan 侧本机没有
+// VK_EXT_external_memory_host，走的是"宿主自己分配"那条路：**让客体堆的 CPU 映射本身就是
+// Vulkan 内存的映射**——客体堆由宿主 mmap 预留、SetHeapSize 只是 mprotect 开放
+// （hle_svc.c 的 mem_init / SetHeapSize），宿主完全说了算，所以这条路成立。
+// 这条路要两个前提，本探针逐条在真机上验：
+//   ① 规模：能否一次分配并映射「客体堆量级」（约 3.7 GiB）的 HOST_VISIBLE|DEVICE_LOCAL 内存；
+//   ② 机制：CPU 写进去的数据，GPU 经缓冲是否真的看得到。
+// 判据都是逐字节的——"没报错"不算通过（清屏色漏 alpha 那类问题就是这么抓的）。
+// Upstream wraps game memory pools into zero-copy Metal buffers via newBufferWithBytesNoCopy. There is
+// no VK_EXT_external_memory_host here, so the route is "the host allocates": make the guest heap's CPU
+// mapping BE the Vulkan memory. Two premises are verified here, both byte-exact.
+typedef struct { VkBuffer a, b; VkDeviceSize n; } memb_copy_pack;
+
+static void rec_copy_buf(VkCommandBuffer cb, void *ud) {
+    memb_copy_pack *d = (memb_copy_pack *)ud;
+    VkBufferCopy cp = { 0, 0, d->n };
+    vkCmdCopyBuffer(cb, d->a, d->b, 1, &cp);
+}
+
+int vk_backend_memprobe(char *out, size_t cap) {
+    if (!out || cap < 256) return -1;
+    char *p = out, *end = out + cap - 1;
+    int fails = 0;
+    uint64_t t0 = ms_now();
+    #define EMIT3(...) do { int _n = snprintf(p, (size_t)(end - p) + 1, __VA_ARGS__); \
+                            if (_n > 0) { p += _n; if (p > end) p = end; } \
+                            dm_log_printf(__VA_ARGS__); } while (0)
+
+    EMIT3("=== 内存池零拷贝的平台能力验证（阶段 3 前置）===");
+    EMIT3("回答两件事：① 规模（客体堆整块能否落在 Vulkan 内存里）；② 机制（CPU 写的数据 GPU 看不看得到）");
+
+    char err[256] = "";
+    vk_ctx *c = vk_backend_init(err, sizeof err);
+    if (!c) { EMIT3("❌ 初始化失败：%s", err); EMIT3("===== 失败 ====="); return 1; }
+    EMIT3("设备：%s", c->devname);
+
+    VkPhysicalDeviceMemoryProperties mp;
+    vkGetPhysicalDeviceMemoryProperties(c->phy, &mp);
+
+    EMIT3("---- 内存堆 %u 个 ----", mp.memoryHeapCount);
+    for (uint32_t i = 0; i < mp.memoryHeapCount && i < 8; i++)
+        EMIT3("  堆 %u: %.0f MiB  %s", i, mp.memoryHeaps[i].size / 1048576.0,
+              (mp.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) ? "（显存）" : "（系统内存）");
+
+    EMIT3("---- 内存类型 %u 个 ----", mp.memoryTypeCount);
+    for (uint32_t i = 0; i < mp.memoryTypeCount && i < 16; i++) {
+        VkMemoryPropertyFlags f = mp.memoryTypes[i].propertyFlags;
+        EMIT3("  %2u: 堆 %u  %s%s%s%s  属性 %#x", (unsigned)i, mp.memoryTypes[i].heapIndex,
+              (f & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) ? "显存本地 " : "",
+              (f & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) ? "CPU可写 " : "",
+              (f & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) ? "一致 " : "",
+              (f & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) ? "CPU缓存" : "",
+              (unsigned)f);
+    }
+
+    // 候选：CPU 可写 + 显存本地（零拷贝缓冲的前提）。优先挑一致内存（免 flush）。
+    int cand = -1, cand_coh = 0;
+    for (uint32_t i = 0; i < mp.memoryTypeCount; i++) {
+        VkMemoryPropertyFlags f = mp.memoryTypes[i].propertyFlags;
+        if ((f & (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT))
+            != (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) continue;
+        int coh = (f & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) != 0;
+        if (cand < 0 || (coh && !cand_coh)) { cand = (int)i; cand_coh = coh; }
+    }
+    if (cand < 0) {
+        EMIT3("❌ 没有「CPU 可写 + 显存本地」的内存类型 —— 零拷贝这条路要另想（与能力探测结论矛盾，要复查）");
+        fails++;
+        goto done;
+    }
+    EMIT3("选用内存类型 %u（%s）", (unsigned)cand,
+          cand_coh ? "一致内存，不需要 flush" : "非一致内存，需要 flush/invalidate");
+
+    // ---- ① 规模：能否一次分配并映射客体堆那么大的内存 ----
+    EMIT3("");
+    EMIT3("---- ① 规模：分配并映射「客体堆」量级的内存 ----");
+    EMIT3("  参照：客体堆 = g_as+0x40000000，容量 4 GB，游戏实际报到约 3.7 GB（hle_svc.c）");
+    EMIT3("  （最后一项是重头戏：若整机内存吃紧，App 有可能被系统结束，前面的读数已进 hilog）");
+    {
+        static const uint64_t sizes[]  = { 64ull << 20, 256ull << 20, 1024ull << 20, 2048ull << 20, 3728ull << 20 };
+        static const char *labels[]    = { "64 MiB（冒烟）", "256 MiB", "1 GiB", "2 GiB", "3.7 GiB（客体堆量级）" };
+        for (unsigned s = 0; s < sizeof sizes / sizeof sizes[0]; s++) {
+            uint64_t sz = sizes[s];
+            VkMemoryAllocateInfo mi = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+            mi.allocationSize = sz; mi.memoryTypeIndex = (uint32_t)cand;
+            uint64_t a = ms_now();
+            VkDeviceMemory m = NULL;
+            VkResult r = vkAllocateMemory(c->dev, &mi, NULL, &m);
+            if (r != VK_SUCCESS) {
+                EMIT3("  ❌ %s：分配失败（VkResult=%d，%llums）", labels[s], (int)r,
+                      (unsigned long long)(ms_now() - a));
+                fails++;
+                continue;
+            }
+            void *q = NULL;
+            r = vkMapMemory(c->dev, m, 0, VK_WHOLE_SIZE, 0, &q);
+            if (r != VK_SUCCESS) {
+                EMIT3("  ⚠ %s：分配成功但映射失败（VkResult=%d）", labels[s], (int)r);
+                vkFreeMemory(c->dev, m, NULL); fails++;
+                continue;
+            }
+            volatile uint8_t *v = (volatile uint8_t *)q;
+            v[0] = 0x5a; v[sz / 2] = 0x3c; v[sz - 1] = 0xa5;
+            int rd = (v[0] == 0x5a && v[sz / 2] == 0x3c && v[sz - 1] == 0xa5);
+            EMIT3("  %s %s：分配 + 映射成功，地址 %p，首/中/尾读写%s（%llums）",
+                  rd ? "✅" : "⚠", labels[s], q, rd ? "一致" : "不一致",
+                  (unsigned long long)(ms_now() - a));
+            if (!rd) fails++;
+            vkUnmapMemory(c->dev, m);
+            vkFreeMemory(c->dev, m, NULL);
+        }
+    }
+
+    // ---- ② 机制：CPU 写 → GPU copy → CPU 读，逐字节比对 ----
+    EMIT3("");
+    EMIT3("---- ② 机制：CPU 写进零拷贝缓冲，GPU 看不看得到 ----");
+    EMIT3("  做法：同一块内存上建两个缓冲 A/B（B 落在非零偏移，检验池切片要的偏移对齐），");
+    EMIT3("        CPU 写 A → vkCmdCopyBuffer A→B（GPU 执行）→ CPU 读 B 逐字节比对");
+    {
+        const VkDeviceSize CHUNK = 64 * 1024;
+        VkBuffer A = NULL, B = NULL; VkDeviceMemory dm = NULL; void *q = NULL;
+        VkBufferCreateInfo bci = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+        bci.size = CHUNK;
+        bci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        VkResult r = vkCreateBuffer(c->dev, &bci, NULL, &A);
+        if (r != VK_SUCCESS) { EMIT3("  ❌ 建缓冲 A 失败（VkResult=%d）", (int)r); fails++; }
+        else {
+            VkMemoryRequirements mr; vkGetBufferMemoryRequirements(c->dev, A, &mr);
+            EMIT3("  缓冲内存需求：size=%llu 对齐=%llu；候选类型在 memoryTypeBits 里：%s",
+                  (unsigned long long)mr.size, (unsigned long long)mr.alignment,
+                  (mr.memoryTypeBits & (1u << cand)) ? "是" : "否");
+            if (!(mr.memoryTypeBits & (1u << cand))) { EMIT3("  ❌ 候选类型不能绑这个缓冲"); fails++; }
+            else {
+                VkDeviceSize offB = (mr.size + mr.alignment - 1) / mr.alignment * mr.alignment;
+                VkMemoryAllocateInfo mi = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+                mi.allocationSize = offB + mr.size; mi.memoryTypeIndex = (uint32_t)cand;
+                r = vkAllocateMemory(c->dev, &mi, NULL, &dm);
+                if (r != VK_SUCCESS) { EMIT3("  ❌ 分配失败（VkResult=%d）", (int)r); fails++; }
+                else if (vkCreateBuffer(c->dev, &bci, NULL, &B) != VK_SUCCESS) { EMIT3("  ❌ 建缓冲 B 失败"); fails++; }
+                else if (vkBindBufferMemory(c->dev, A, dm, 0) != VK_SUCCESS) { EMIT3("  ❌ 绑定 A 失败"); fails++; }
+                else if (vkBindBufferMemory(c->dev, B, dm, offB) != VK_SUCCESS) {
+                    EMIT3("  ❌ 绑定 B 到非零偏移 %llu 失败（池切片要用非零偏移绑定）",
+                          (unsigned long long)offB);
+                    fails++;
+                }
+                else if (vkMapMemory(c->dev, dm, 0, VK_WHOLE_SIZE, 0, &q) != VK_SUCCESS) {
+                    EMIT3("  ❌ 映射失败"); fails++;
+                }
+                else {
+                    EMIT3("  缓冲 A 偏移 0，缓冲 B 偏移 %llu（同一块内存）", (unsigned long long)offB);
+                    uint8_t *a = (uint8_t *)q, *b = (uint8_t *)q + offB;
+                    for (VkDeviceSize i = 0; i < CHUNK; i++) a[i] = (uint8_t)(i * 131u + 7u);
+                    if (!cand_coh) {
+                        VkMappedMemoryRange rng = { VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE };
+                        rng.memory = dm; rng.offset = 0; rng.size = VK_WHOLE_SIZE;
+                        VkResult fr = vkFlushMappedMemoryRanges(c->dev, 1, &rng);
+                        EMIT3("  非一致内存：vkFlushMappedMemoryRanges %s", fr == VK_SUCCESS ? "成功" : "失败");
+                    }
+                    memb_copy_pack pk = { A, B, CHUNK };
+                    if (one_shot(c, rec_copy_buf, &pk) != 0) { EMIT3("  ❌ copy 提交失败"); fails++; }
+                    else {
+                        if (!cand_coh) {
+                            VkMappedMemoryRange rng = { VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE };
+                            rng.memory = dm; rng.offset = 0; rng.size = VK_WHOLE_SIZE;
+                            vkInvalidateMappedMemoryRanges(c->dev, 1, &rng);
+                        }
+                        VkDeviceSize bad = 0, first = (VkDeviceSize)-1;
+                        for (VkDeviceSize i = 0; i < CHUNK; i++)
+                            if (b[i] != (uint8_t)(i * 131u + 7u)) {
+                                if (first == (VkDeviceSize)-1) first = i;
+                                bad++;
+                            }
+                        if (bad)
+                            EMIT3("  ❌ 逐字节比对：%llu 字节里 %llu 个不符（首个不符在偏移 %llu）",
+                                  (unsigned long long)CHUNK, (unsigned long long)bad, (unsigned long long)first);
+                        else
+                            EMIT3("  ✅ 逐字节比对：%llu 字节全部一致 —— CPU 写的数据 GPU 确实看得到，零拷贝机制成立",
+                                  (unsigned long long)CHUNK);
+                        if (bad) fails++;
+                    }
+                }
+            }
+        }
+        if (q) vkUnmapMemory(c->dev, dm);
+        if (A) vkDestroyBuffer(c->dev, A, NULL);
+        if (B) vkDestroyBuffer(c->dev, B, NULL);
+        if (dm) vkFreeMemory(c->dev, dm, NULL);
+    }
+
+done:
+    vk_backend_shutdown(c);
+    EMIT3("");
+    EMIT3("===== 内存池零拷贝验证%s：失败 %d 项（总耗时 %llums）=====",
+          fails ? "未全通过" : "全部通过", fails, (unsigned long long)(ms_now() - t0));
+    if (!fails)
+        EMIT3("结论：两条前提都成立 ⇒ 阶段 3 可走「客体堆的 CPU 映射即 Vulkan 内存」的零拷贝路线");
+    *p = 0;
+    #undef EMIT3
+    return fails;
+}
+
+// ================= 阶段 3 第一步（3.1-A）：池零拷贝原型 =================
+// 不动任何上游文件，只在探针里把「游戏内存池 → VkBuffer」这条链走通：
+//   ① 造一块「模拟客体堆」——就是 3.1-B 要给游戏当堆的那块内存：Vulkan 分配 + 映射；
+//   ② 从中切两个「池」，各建 VkBuffer 绑到池的偏移上（对标 nvn_mtl.m 的 mtl_pool_add）；
+//   ③ 用缓冲设备地址验证「线性映射」：GPU 地址 − 池的 CPU 地址 应当是个常数
+//      ——上游 mtl_gpu_addr 的语义正是 gpu = pool.gpu + off，靠的就是这个不变式；
+//   ④ CPU 写池 A → vkCmdCopyBuffer A→B → CPU 读池 B，逐字节比对
+//      ——证明池切片真的能被 GPU 读写，不只是"能建出来"。
+// 对齐要求、设备地址差、耗时都打出来，供 3.1-B / 3.1-C 直接用。
+// Prototype of the pool zero-copy path, entirely inside the probe: no upstream file is touched.
+// Criteria are byte-exact; alignment, device-address delta and timings are printed for 3.1-B/C.
+int vk_backend_poolproto(char *out, size_t cap) {
+    if (!out || cap < 256) return -1;
+    char *p = out, *end = out + cap - 1;
+    int fails = 0;
+    uint64_t t0 = ms_now();
+    #define EMIT4(...) do { int _n = snprintf(p, (size_t)(end - p) + 1, __VA_ARGS__); \
+                            if (_n > 0) { p += _n; if (p > end) p = end; } \
+                            dm_log_printf(__VA_ARGS__); } while (0)
+
+    EMIT4("=== 阶段 3 第一步原型（3.1-A）：内存池零拷贝 ===");
+    EMIT4("把「游戏内存池 → VkBuffer」这条链走通（模拟客体堆；不动任何上游文件）");
+
+    char err[256] = "";
+    vk_ctx *c = vk_backend_init(err, sizeof err);
+    if (!c) { EMIT4("❌ 初始化失败：%s", err); EMIT4("===== 失败 ====="); return 1; }
+    EMIT4("设备：%s", c->devname);
+
+    PFN_vkGetBufferDeviceAddress pGetBDA =
+        (PFN_vkGetBufferDeviceAddress)vkGetDeviceProcAddr(c->dev, "vkGetBufferDeviceAddress");
+    if (!pGetBDA) {
+        EMIT4("❌ 拿不到 vkGetBufferDeviceAddress（缓冲设备地址不可用）—— 3.1-C 的地址反查要另想");
+        vk_backend_shutdown(c); EMIT4("===== 失败 ====="); *p = 0; return 1;
+    }
+
+    // 内存类型：CPU 可写 + 显存本地 + 一致（与 3.1-B 要用的同一个）
+    VkResult r;
+    uint32_t mt = find_mem_type(c, 0xFFFFFFFFu,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT |
+        VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &r);
+    if (r != VK_SUCCESS) {
+        EMIT4("❌ 找不到「CPU 可写 + 显存本地 + 一致」的内存类型");
+        vk_backend_shutdown(c); EMIT4("===== 失败 ====="); *p = 0; return 1;
+    }
+    EMIT4("内存类型 %u（显存本地 + CPU 可写 + 一致）", mt);
+
+    // ---- 缓冲对齐要求：池的偏移必须按它对齐（池切片的关键约束）----
+    EMIT4("---- 缓冲对齐要求（池偏移要按 alignment 对齐）----");
+    {
+        static const VkDeviceSize szs[] = { 64u << 10, 1u << 20, 16u << 20 };
+        for (unsigned i = 0; i < 3; i++) {
+            VkBufferCreateInfo bi = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+            bi.size = szs[i];
+            bi.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                       VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+            VkBuffer b = NULL;
+            if (vkCreateBuffer(c->dev, &bi, NULL, &b) != VK_SUCCESS) {
+                EMIT4("  ⚠ %llu KiB：建缓冲失败", (unsigned long long)(szs[i] >> 10));
+                continue;
+            }
+            VkMemoryRequirements mr;
+            vkGetBufferMemoryRequirements(c->dev, b, &mr);
+            EMIT4("  %6llu KiB 的缓冲：alignment=%llu，类型 %u %s memoryTypeBits",
+                  (unsigned long long)(szs[i] >> 10), (unsigned long long)mr.alignment, mt,
+                  (mr.memoryTypeBits & (1u << mt)) ? "在" : "不在");
+            vkDestroyBuffer(c->dev, b, NULL);
+        }
+    }
+
+    // ---- ① 模拟客体堆 ----
+    const VkDeviceSize HEAP_SZ = 32ull << 20;
+    VkDeviceMemory heap_mem = NULL;
+    void *heap = NULL;
+    {
+        VkMemoryAllocateInfo mi = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+        mi.allocationSize = HEAP_SZ; mi.memoryTypeIndex = mt;
+        r = vkAllocateMemory(c->dev, &mi, NULL, &heap_mem);
+        if (r != VK_SUCCESS) {
+            EMIT4("❌ 模拟客体堆分配失败（VkResult=%d）", (int)r);
+            vk_backend_shutdown(c); EMIT4("===== 失败 ====="); *p = 0; return 1;
+        }
+        r = vkMapMemory(c->dev, heap_mem, 0, VK_WHOLE_SIZE, 0, &heap);
+        if (r != VK_SUCCESS) {
+            EMIT4("❌ 模拟客体堆映射失败（VkResult=%d）", (int)r);
+            vkFreeMemory(c->dev, heap_mem, NULL); vk_backend_shutdown(c);
+            EMIT4("===== 失败 ====="); *p = 0; return 1;
+        }
+        EMIT4("① 模拟客体堆：%llu MiB，CPU 映射地址 %p",
+              (unsigned long long)(HEAP_SZ >> 20), heap);
+    }
+
+    // ---- ② 两个池 ----
+    typedef struct { const char *name; VkDeviceSize off, sz; VkBuffer buf; uint64_t gpu, delta; } pool_ent_;
+    pool_ent_ pool[2] = {
+        { "池A", 0,          1ull << 20, NULL, 0, 0 },
+        { "池B", 2ull << 20, 1ull << 20, NULL, 0, 0 },
+    };
+    EMIT4("② 从堆里切两个池，各建一个 VkBuffer 绑到池偏移上");
+    for (int i = 0; i < 2; i++) {
+        VkBufferCreateInfo bi = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+        bi.size = pool[i].sz;
+        bi.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                   VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+        if (vkCreateBuffer(c->dev, &bi, NULL, &pool[i].buf) != VK_SUCCESS) {
+            EMIT4("  ❌ %s：建缓冲失败", pool[i].name); fails++; continue;
+        }
+        VkMemoryRequirements mr;
+        vkGetBufferMemoryRequirements(c->dev, pool[i].buf, &mr);
+        if (pool[i].off % mr.alignment) {
+            EMIT4("  ❌ %s：池偏移 %llu 不是 alignment %llu 的整数倍",
+                  pool[i].name, (unsigned long long)pool[i].off, (unsigned long long)mr.alignment);
+            fails++; continue;
+        }
+        r = vkBindBufferMemory(c->dev, pool[i].buf, heap_mem, pool[i].off);
+        if (r != VK_SUCCESS) {
+            EMIT4("  ❌ %s：绑定到堆偏移 %llu 失败（VkResult=%d）",
+                  pool[i].name, (unsigned long long)pool[i].off, (int)r);
+            fails++; continue;
+        }
+        VkBufferDeviceAddressInfo ai = { VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO };
+        ai.buffer = pool[i].buf;
+        pool[i].gpu = pGetBDA(c->dev, &ai);
+        uint64_t cpu = (uint64_t)(uintptr_t)heap + pool[i].off;
+        pool[i].delta = (uint64_t)((int64_t)pool[i].gpu - (int64_t)cpu);
+        EMIT4("  ✅ %s：堆偏移 %llu，CPU %p，GPU %#llx，GPU−CPU = %lld",
+              pool[i].name, (unsigned long long)pool[i].off, (void *)(uintptr_t)cpu,
+              (unsigned long long)pool[i].gpu, (long long)(int64_t)pool[i].delta);
+    }
+
+    // ---- ③ 线性映射不变式 ----
+    EMIT4("③ 线性映射不变式（上游 mtl_gpu_addr 的 gpu = pool.gpu + off 靠的就是它）");
+    if (pool[0].buf && pool[1].buf) {
+        if (pool[0].delta == pool[1].delta)
+            EMIT4("  ✅ 两个池的 GPU−CPU 差相同（%lld）⇒ 地址反查可线性推导",
+                  (long long)(int64_t)pool[0].delta);
+        else {
+            EMIT4("  ❌ 两个池的 GPU−CPU 差不同（%lld vs %lld）⇒ 不能线性推导",
+                  (long long)(int64_t)pool[0].delta, (long long)(int64_t)pool[1].delta);
+            fails++;
+        }
+    } else { EMIT4("  ⚠ 有池没建起来，跳过"); fails++; }
+
+    // ---- ④ CPU 写池A → GPU copy → CPU 读池B ----
+    EMIT4("④ CPU 写池 A → vkCmdCopyBuffer A→B（GPU 执行）→ CPU 读池 B 逐字节比对");
+    if (pool[0].buf && pool[1].buf) {
+        const VkDeviceSize N = 256u << 10;
+        uint8_t *a = (uint8_t *)heap + pool[0].off;
+        uint8_t *b = (uint8_t *)heap + pool[1].off;
+        for (VkDeviceSize i = 0; i < N; i++) a[i] = (uint8_t)(i * 97u + 11u);
+        memb_copy_pack pk = { pool[0].buf, pool[1].buf, N };
+        uint64_t t1 = ms_now();
+        if (one_shot(c, rec_copy_buf, &pk) != 0) { EMIT4("  ❌ copy 提交失败"); fails++; }
+        else {
+            VkDeviceSize bad = 0, first = (VkDeviceSize)-1;
+            for (VkDeviceSize i = 0; i < N; i++)
+                if (b[i] != (uint8_t)(i * 97u + 11u)) {
+                    if (first == (VkDeviceSize)-1) first = i;
+                    bad++;
+                }
+            if (bad) {
+                EMIT4("  ❌ %llu 字节里 %llu 个不符（首个在偏移 %llu）",
+                      (unsigned long long)N, (unsigned long long)bad, (unsigned long long)first);
+                fails++;
+            } else {
+                EMIT4("  ✅ %llu 字节全部一致（%llums）——池切片真的能被 GPU 读写",
+                      (unsigned long long)N, (unsigned long long)(ms_now() - t1));
+            }
+        }
+    }
+
+    for (int i = 0; i < 2; i++) if (pool[i].buf) vkDestroyBuffer(c->dev, pool[i].buf, NULL);
+    if (heap) vkUnmapMemory(c->dev, heap_mem);
+    if (heap_mem) vkFreeMemory(c->dev, heap_mem, NULL);
+    vk_backend_shutdown(c);
+
+    EMIT4("");
+    EMIT4("===== 3.1-A %s：失败 %d 项（总耗时 %llums）=====",
+          fails ? "未全通过" : "全部通过", fails, (unsigned long long)(ms_now() - t0));
+    if (!fails)
+        EMIT4("结论：池切片（VkBuffer 绑非零偏移）+ 线性设备地址 + GPU 读写全部成立 ⇒ 3.1-B/C 可照此实现");
+    *p = 0;
+    #undef EMIT4
     return fails;
 }
