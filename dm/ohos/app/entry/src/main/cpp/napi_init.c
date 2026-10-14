@@ -2,6 +2,7 @@
 // ArkTS 侧用法：import dmprobe from 'libdmprobe.so';  dmprobe.runProbes()  /  dmprobe.runVkProbe()
 #include <napi/native_api.h>
 #include <ace/xcomponent/native_interface_xcomponent.h>
+#include <stdio.h>          // snprintf：拼单测日志路径要用（少了它只是隐式声明，编译器当它返回 int）
 #include <stdlib.h>
 #include <string.h>
 
