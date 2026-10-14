@@ -290,6 +290,24 @@ static void precheck(sink_t *s, const char *logdir) {
     emit(s, "  lstat(不存在) rc=%d errno=%d（%s）", lr, errno,
          errno == ENOENT ? "ENOENT，符合期待" : "**不是 ENOENT**");
 
+    // 3c) 宿主文件系统**分不分大小写**：hle_fs 的"别名"机制（.dm-case-N + xattr 存客体名）
+    //     只在**不分大小写**的宿主文件系统上才会启用（APFS 缺省不分大小写，游戏路径分大小写）。
+    //     若鸿蒙的数据目录本身分大小写，这套机制整段休眠——t_fs_case 里靠"先造 plain 再建 PLAIN
+    //     制造冲突、再注入元数据写失败看回滚"的那 6 项就**结构性跑不到**，不是缺陷。
+    char cf[1200], cl[1200];
+    snprintf(cf, sizeof cf, "%s/.case-probe-XyZ", logdir);
+    snprintf(cl, sizeof cl, "%s/.case-probe-xyz", logdir);
+    fp = fopen(cf, "w");
+    if (fp) {
+        fclose(fp);
+        struct stat st3;
+        int ci = (stat(cl, &st3) == 0);
+        emit(s, "  文件系统大小写：%s", ci
+             ? "**不敏感**（别名机制会启用）"
+             : "敏感（别名机制整段休眠 ⇒ t_fs_case 里那 6 项别名回滚检查结构性跑不到）");
+        unlink(cf);
+    }
+
     // 4) fork 能不能用（t_hid_script 有两条检查靠 fork + 等子进程被信号杀掉）
     errno = 0;
     pid_t pid = fork();
