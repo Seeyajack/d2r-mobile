@@ -111,12 +111,26 @@ static napi_value RunVkSmoke(napi_env env, napi_callback_info info) {
     return ret;
 }
 
+static napi_value RunVkShader(napi_env env, napi_callback_info info) {
+    // 图形层阶段 2：SPIR-V 直通（手写 SPIR-V 着色器画三角形 + 读回验证）。
+    char files_dir[1024];
+    Arg0String(env, info, files_dir, sizeof files_dir);
+    napi_value ret = NULL;
+    char *buf = (char *)malloc(VKSMOKE_BUF);
+    if (!buf) { napi_create_string_utf8(env, "内存不足", NAPI_AUTO_LENGTH, &ret); return ret; }
+    vk_backend_shader(buf, VKSMOKE_BUF);
+    napi_create_string_utf8(env, buf, NAPI_AUTO_LENGTH, &ret);
+    free(buf);
+    return ret;
+}
+
 static napi_value Init(napi_env env, napi_value exports) {
     napi_property_descriptor desc[] = {
         { "runProbes",     NULL, RunProbes,     NULL, NULL, NULL, napi_default, NULL },
         { "runVkProbe",    NULL, RunVkProbe,    NULL, NULL, NULL, napi_default, NULL },
         { "runHostTests",  NULL, RunHostTests,  NULL, NULL, NULL, napi_default, NULL },
         { "runVkSmoke",    NULL, RunVkSmoke,    NULL, NULL, NULL, napi_default, NULL },
+        { "runVkShader",   NULL, RunVkShader,   NULL, NULL, NULL, napi_default, NULL },
     };
     napi_define_properties(env, exports, sizeof desc / sizeof desc[0], desc);
     return exports;

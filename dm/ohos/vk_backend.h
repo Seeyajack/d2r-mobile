@@ -42,3 +42,11 @@ long    vk_backend_readback(vk_ctx *ctx, vk_rt *rt, void *buf, size_t cap);
 // 报告写进 out（设备名/驱动/API 版本/耗时/逐项结论），含结尾 0。
 // 返回 0 = 全对；非 0 = 有问题（细节在报告里）。
 int     vk_backend_smoke(char *out, size_t cap);
+
+// 阶段 2：**SPIR-V 直通**——加载手写 SPIR-V 的顶点/片元着色器，建图形管线画一个三角形，
+// 读回验证"三角形内 = 着色器颜色、三角形外 = 清屏色"。
+// 证明"游戏着色器同源的语言（SPIR-V）不经翻译直接进 Vulkan"——上游离线链 Maxwell→SPIR-V 的
+// 产物可以直接喂给 vkCreateShaderModule，Metal 那条路里的 spirv-cross/MSL/metallib 三个环节整段跳过。
+// Phase 2: load hand-assembled SPIR-V, build a graphics pipeline, draw a triangle and verify pixels --
+// proving SPIR-V (what the offline chain produces) feeds Vulkan directly, skipping MSL entirely.
+int     vk_backend_shader(char *out, size_t cap);
