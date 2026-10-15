@@ -388,6 +388,19 @@ def site_pcrel(ins):
     emit(LDP(S, T, 31, -16)); emit(B(here(), ins.address + 4))
     return start
 
+def site_br_plain(ins):
+    """br x18（相对偏移表式，如旷野之息）：x18 已由游戏算好目标，槽恢复真值后原样跳。
+    借 x16/x17 → K18 槽取真 x18 装进 x17 → 恢复 x16 → mov x18,x17（顺带还原游戏视角 x18）→ 恢复 x17 → br x18。
+    不需要 (基址,条数)：目标不落在一块可枚举的落地垫里（偏移任意），但槽值本身就是目标。"""
+    start = here()
+    emit(STUR(16, 31, -16)); emit(STUR(17, 31, -24))
+    emit(mrs_tp(17)); emit_slot_addr(17, 16, 'K18'); emit(LDRX(17, 17))
+    emit(LDUR(16, 31, -16))
+    emit(0xAA0003E0 | (17 << 16) | 18)      # orr x18, xzr, x17 ＝ mov x18, x17
+    emit(LDUR(17, 31, -24))
+    emit(BR(18))
+    return start
+
 def site_br(ins, base, count):
     """跳转表 br x18：目标 = base + 4i。x16 暂存红区 → 等距落地垫 → 恢复 x16 → 原目标。 | Jump table br x18: target = base + 4i. Stash x16 in the red zone → equally spaced landing pads → restore x16 → original target."""
     start = here()
@@ -570,6 +583,19 @@ def func_of(a):
     i = bisect.bisect_right(starts, a) - 1
     return (starts[i], starts[i + 1] if i + 1 < len(starts) else TEXT_END) if i >= 0 else (a, a + 4)
 done = set(); windows = []; jumps = {}
+br_plain = set(); unresolved = []
+
+def recognize_offset_form(insl, j):
+    """B 式（相对偏移表，如旷野之息）：br x18 ← add x18,x18,xT ← ldrsw x18,[xT,x18,lsl#2] ← xT=adrp+add。
+    只判形态，不取 (基址,条数)——site_br_plain 不需要它们。"""
+    lo = max(0, j - 32)
+    has_add = has_ldrsw = has_adrp = False
+    for p in insl[lo:j][::-1]:
+        if p.mnemonic == 'add' and p.op_str.startswith('x18, x18, x'): has_add = True
+        if p.mnemonic == 'ldrsw' and p.op_str.startswith('x18,') and 'lsl #2' in p.op_str: has_ldrsw = True
+        if p.mnemonic == 'adrp': has_adrp = True
+        if has_add and has_ldrsw and has_adrp: return True
+    return False
 funcs = sorted({func_of(a) for a, (k, _) in kinds.items() if k == 'x18'})
 for fa, fb in funcs:
     insl = list(md.disasm(bytes(IMG[fa:fb]), fa))
@@ -579,9 +605,16 @@ for fa, fb in funcs:
     for j, ins in enumerate(insl):
         if ins.mnemonic == 'br' and ins.op_str == 'x18':
             base = width = None
-            ctx = insl[max(0, j - 8):j]
+            # 窗口 8→16：旷野之息的建表与 br x18 之间隔着 8+ 条 mov，8 条看不见
+            ctx = insl[max(0, j - 16):j]
             for p in reversed(ctx):
-                if p.mnemonic == 'adr' and p.op_str.startswith('x18,'): base = p.operands[1].imm; break
+                if base: break
+                if p.mnemonic == 'adr' and p.op_str.startswith('x18,'):
+                    base = p.operands[1].imm; break
+                # adrp xM,页 + add x18,xM,#off 组合（capstone 已把页地址解析进 add 的立即数）
+                if p.mnemonic == 'add' and p.op_str.startswith('x18, x') and '#0x' in p.op_str:
+                    r1 = p.reg_name(p.operands[1].reg)
+                    if r1 != 'x18': base = p.operands[2].imm; break
             for p in reversed(ctx):
                 if p.mnemonic == 'add' and p.op_str.startswith('x18, x18,') and 'lsl #2' in p.op_str:
                     idx = num(p.reg_name(p.operands[2].reg))
@@ -590,8 +623,14 @@ for fa, fb in funcs:
                         if q.mnemonic in ('ldrh', 'ldrsh') and num(q.reg_name(q.operands[0].reg)) == idx: width = 65536
                         if width: break
                     break
-            assert base and width, f'jump table {ins.address:x}'
-            jumps[ins.address] = (base, width)
+            if base and width:
+                jumps[ins.address] = (base, width)          # A 式：表 = B 指令表（site_br 落地垫）
+            elif recognize_offset_form(insl, j):
+                br_plain.add(ins.address)                   # B 式：相对偏移表（site_br_plain）
+            else:
+                # 不中止：原样保留 + 登记（报告里逐条给出），未决可见比静默错好
+                unresolved.append((ins.address, [(x.address, x.mnemonic, x.op_str)
+                                                 for x in insl[max(0, j - 16):j + 1]]))
     # 不许有跳转落进窗口中间
     # No jump may land in the middle of a window
     inwin = {x.address for wseg in ws for x in wseg}; heads = {wseg[0].address for wseg in ws}
@@ -603,13 +642,16 @@ for fa, fb in funcs:
 def put_branch(at, to): struct.pack_into('<I', IMG, at, B(at, to))
 for wseg in windows:
     st, lo, hi = site_window(wseg); stat('window'); put_branch(lo, st)
+unresolved_set = {u[0] for u in unresolved}
 for a in sorted(kinds):
     if a in done: continue
     k, arg = kinds[a]
     ins = dis(struct.unpack_from('<I', IMG, a)[0], a)
     if k == 'x18':
         m = ins.mnemonic
-        if m == 'br': st = site_br(ins, *jumps[a]); stat('br')
+        if m == 'br':
+            if a in unresolved_set: continue       # 未识别：原样保留（unresolved.tsv 有档），不重写不落地
+            st = (site_br_plain(ins) if a in br_plain else site_br(ins, *jumps[a])); stat('br')
         elif m in ('cbz', 'cbnz', 'tbz', 'tbnz'): st = site_cond(ins); stat('cond')
         elif m in ('adr', 'adrp'): st = site_pcrel(ins); stat('pcrel')
         elif m in ('blr', 'ret', 'b', 'bl') or (m == 'ldr' and '[' not in ins.op_str): raise RuntimeError(f'{a:x} {m} {ins.op_str}')
@@ -860,6 +902,12 @@ if RULE_RUN:
 os.makedirs(outdir, exist_ok=True)
 P = lambda ext: os.path.join(outdir, f'{NAME}.{ext}')
 open(P('patched.bin'), 'wb').write(IMG + bytearray(PATCH_OFF - len(IMG)) + patch)
+with open(os.path.join(outdir, f'{NAME}.unresolved.tsv'), 'w', encoding='utf-8') as f:
+    f.write('# 未能按已知形态识别的 br x18（已原样保留，运行到它会读未重定位的 x18 —— 待人工处理）\n')
+    f.write('# Unrecognized br x18 sites (kept as-is; reaching one reads an unrelocated x18 -- needs manual work)\n')
+    f.write(f'# 共 {len(unresolved)} 处\n# address\tcontext(前 16 条反汇编)\n')
+    for a, ctx in unresolved:
+        f.write(f'{a:#x}\t' + ' ; '.join(f'{ca:#x} {m} {o}' for ca, m, o in ctx) + '\n')
 import hashlib
 with open(os.path.join(outdir, 'build_src.sha256'), 'w') as f:
     f.write(hashlib.sha256(open(os.path.abspath(__file__), 'rb').read()).hexdigest() + '  patch_nso.py\n')
@@ -892,7 +940,8 @@ with open(P('params.tsv'), 'w') as f:
 with open(P('obs.tsv'), 'w') as f:
     f.write(f'# BUILD_ID\t{BUILD_ID}\n')
     for off, oid, ow, why in obs: f.write(f'{off:#x}\t{oid}\t{ow}\t{why}\n')
-print(NAME, stats, 'cuts', len(cuts), 'obs', len(obs), 'patch', len(patch), 'PATCH_OFF', hex(PATCH_OFF), 'slot_refs', len(fix), 'gates', len(gates))
+print(NAME, stats, 'cuts', len(cuts), 'obs', len(obs), 'patch', len(patch), 'PATCH_OFF', hex(PATCH_OFF), 'slot_refs', len(fix), 'gates', len(gates),
+      '| 跳转表 A 式', len(jumps), '/ B 式', len(br_plain), '/ 未决', len(unresolved))
 # 启动块清单随 main 出：取仓库版本化数据 dm/data/bootlist_<main 构建号>.tsv 原样拷进产物目录并写 sha256（清单入库、不每版重录；
 # 记录本身有竞态——同产物三次记录块集合 5292 / 5114 / 5281、发起线程亦有不同——重录只在构建号变化或主动改进时做，提交附 mini A/B）
 # The boot block list ships with main: take the repository's versioned data dm/data/bootlist_<main build ID>.tsv, copy it as is into the build output directory and write its sha256 (the list is checked in, not re-recorded for every version;
