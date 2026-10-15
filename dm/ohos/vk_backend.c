@@ -3507,19 +3507,6 @@ int vk_backend_onscreen_replay(char *out, size_t cap) {
 // 为什么叫"零成本"：两条都只是查询与一次采样，不动渲染管线、不依赖游戏文件。
 // 为什么"实测"不"查文档"：文档说的是规范允许什么；我们要的是**这台设备上到底是哪一种行为**。
 
-// 读 /proc/self/statm 的第 2 个字段（常驻页数）→ 字节。读不到返回 0。
-static uint64_t rss_bytes(void) {
-    FILE *f = fopen("/proc/self/statm", "r");
-    if (!f) return 0;
-    unsigned long size = 0, resident = 0;
-    int n = fscanf(f, "%lu %lu", &size, &resident);
-    fclose(f);
-    if (n < 2) return 0;
-    long ps = sysconf(_SC_PAGESIZE);
-    if (ps <= 0) ps = 4096;
-    return (uint64_t)resident * (uint64_t)ps;
-}
-
 // 从 /proc/meminfo 取一个字段（KB）；取不到返回 0
 static uint64_t meminfo_kb(const char *key) {
     FILE *f = fopen("/proc/meminfo", "r");
@@ -3630,53 +3617,55 @@ int vk_backend_zero_cost(char *out, size_t cap) {
 #endif
 
     // ---------- ② 4 GiB 客体堆的提交行为 ----------
+    // ⚠ 指标教训（上一轮踩的）：客体堆是 **DEVICE_LOCAL 统一内存**，设备内存页**不计入进程 RSS**
+    //（上一轮实测：预留 4 GiB 后 RSS 反而 -12.7 MiB、摸 4096 页 +0.0 ⇒ 用 RSS 判断注定"没测出来"）。
+    // 这里改用**系统级 MemAvailable 差值**：设备内存真被提交，系统可用量就会掉；
+    // 若是专用区（不占系统内存），它纹丝不动 —— 那本身也是内存账的重要事实。
     OS_EMIT(em, "");
-    OS_EMIT(em, "---- ② 预留的 4 GiB 客体堆是不是懒提交（决定内存账按满额算还是按实际用量算）----");
+    OS_EMIT(em, "---- ② 预留的 4 GiB 客体堆是不是懒提交（指标：系统可用内存差值）----");
     {
-        uint64_t mt = meminfo_kb("MemTotal"), ma = meminfo_kb("MemAvailable");
-        if (mt) OS_EMIT(em, "  机器内存：总 %.2f GiB，当前可用 %.2f GiB",
-                        (double)mt / 1048576.0, (double)ma / 1048576.0);
+        uint64_t mt = meminfo_kb("MemTotal");
+        if (mt) OS_EMIT(em, "  机器内存：总 %.2f GiB", (double)mt / 1048576.0);
     }
-
-    uint64_t rss0 = rss_bytes();
+    uint64_t avail0 = meminfo_kb("MemAvailable");
     void *heap = dm_ohos_heap_reserve(4ull << 30);
     uint64_t heap_sz = dm_ohos_heap_size();
-    uint64_t rss1 = rss_bytes();
+    uint64_t avail1 = meminfo_kb("MemAvailable");
     if (!heap) {
         OS_EMIT(em, "❌ 客体堆预留失败：%s", dm_ohos_vk_err()); fails++;
     } else {
-        OS_EMIT(em, "  预留 %llu MiB，CPU 映射 %p",
-                (unsigned long long)(heap_sz >> 20), heap);
-        OS_EMIT(em, "  进程常驻内存（RSS）：预留前 %.1f MiB → 预留后 %.1f MiB（差 %+.1f MiB）",
-                (double)rss0 / 1048576.0, (double)rss1 / 1048576.0,
-                ((double)rss1 - (double)rss0) / 1048576.0);
+        OS_EMIT(em, "  预留 %llu MiB，CPU 映射 %p", (unsigned long long)(heap_sz >> 20), heap);
+        OS_EMIT(em, "  系统可用：预留前 %.2f GiB → 预留后 %.2f GiB（%+.1f MiB）",
+                (double)avail0 / 1048576.0, (double)avail1 / 1048576.0,
+                ((double)avail1 - (double)avail0) / 1024.0);
 
-        // 每 1 MiB 摸一页（0.4 MiB → 4 GiB 共 4096 页）：摸过之后那些页才算真的占住物理内存。
-        // 不整块摸：4 GiB 全摸会把设备内存一次性压满，没必要也不安全。
-        const uint64_t STEP = 1ull << 20;
+        // 每 256 KiB 摸一页（16384 页 = 64 MiB 已提交）—— 比"每 1 MiB 一页"信号更强，仍然安全
+        const uint64_t STEP = 1ull << 18;
         uint64_t pages = 0;
-        for (uint64_t off = 0; off + STEP <= heap_sz; off += STEP) {
+        for (uint64_t off = 0; off + 4096 <= heap_sz; off += STEP) {
             ((volatile uint8_t *)heap)[off] = 0x5A;
             pages++;
         }
-        ((volatile uint8_t *)heap)[heap_sz - 1] = 0x5A;   // 顺带确认最后一页也能写
-        uint64_t rss2 = rss_bytes();
-        OS_EMIT(em, "  摸过 %llu 页（每 1 MiB 摸一页，共 %llu MiB）之后 RSS：%.1f MiB（又 %+.1f MiB）",
-                (unsigned long long)pages, (unsigned long long)(pages),
-                (double)rss2 / 1048576.0, ((double)rss2 - (double)rss1) / 1048576.0);
+        ((volatile uint8_t *)heap)[heap_sz - 1] = 0x5A;
+        uint64_t avail2 = meminfo_kb("MemAvailable");
+        OS_EMIT(em, "  摸 %llu 页（≈ %llu MiB 已提交）后：系统可用 %.2f GiB（%+.1f MiB）",
+                (unsigned long long)pages, (unsigned long long)(pages * 4096 / 1048576),
+                (double)avail2 / 1048576.0, ((double)avail2 - (double)avail1) / 1024.0);
 
-        double grow1 = ((double)rss1 - (double)rss0) / 1048576.0;   // 预留即涨
-        double grow2 = ((double)rss2 - (double)rss1) / 1048576.0;   // 摸过才涨
+        double drop_reserve = ((double)avail0 - (double)avail1) / 1024.0;   // 预留就掉多少（MiB，正=掉了）
+        double drop_touch   = ((double)avail1 - (double)avail2) / 1024.0;   // 摸过才掉多少（MiB，正=掉了）
         OS_EMIT(em, "");
-        if (grow1 > 2048.0) {
-            OS_EMIT(em, "  结论：**分配即占满**（预留就涨了 %.0f MiB）⇒ 内存账要**按满额**算。", grow1);
-        } else if (grow2 > 4.0) {
-            OS_EMIT(em, "  结论：**懒提交**（预留只涨 %.1f MiB，摸过才涨 %.1f MiB）⇒ 内存账可**按实际用量**算；"
-                        "没摸到的部分不占物理内存。", grow1, grow2);
-            OS_EMIT(em, "  （这一条对「4 GiB 能不能常在」很重要：它是「地址空间」而不是「已经花掉的内存」）");
+        if (drop_reserve > 2048.0) {
+            OS_EMIT(em, "  结论：**分配即占满**（预留就掉 %.0f MiB）⇒ 内存账要**按满额**算。", drop_reserve);
+        } else if (drop_touch > 32.0) {
+            OS_EMIT(em, "  结论：**懒提交**（预留只掉 %.1f MiB，摸过才掉 %.1f MiB ≈ 触摸量）"
+                        "⇒ 内存账可**按实际用量**算；没摸到的部分不占系统内存。", drop_reserve, drop_touch);
+        } else if (drop_reserve < 128.0 && drop_touch < 32.0) {
+            OS_EMIT(em, "  结论：**这块内存不占系统内存**（预留/摸过都不掉，%.1f / %.1f MiB）"
+                        "⇒ 它是专用区（独立计量），内存账要**单列**，不能与系统内存混算。", drop_reserve, drop_touch);
         } else {
-            OS_EMIT(em, "  结论：预留几乎没涨、摸过的也没明显涨（grow1=%.1f、grow2=%.1f MiB）——"
-                        "可能 /proc/self/statm 读数不可靠，**如实记为没测出来**。", grow1, grow2);
+            OS_EMIT(em, "  结论：读数在噪声区（%.1f / %.1f MiB）—— **如实记为没测出来**，待换更细的口径重测。",
+                    drop_reserve, drop_touch);
             fails++;
         }
     }
