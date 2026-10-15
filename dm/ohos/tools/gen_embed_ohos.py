@@ -23,6 +23,8 @@
 #                  产物自包含、可提交进仓库（真机测试用）；连续零字节用 .space 压缩。
 #   --layout-header <输出.h>  把 fixups 表头（PATCH_OFF/TEXT_END/…）写成 #define，
 #                  供探针组装 module_t（运行时装载要用这些布局常数）。
+#   --gates-header <输出.h>   把 <名>.gates.tsv（门表：返回点/kind/arg/原指令）写成登记表数组，
+#                  供探针在装载后逐条 gate_register（执行链的门回路验证用）。
 import os
 import sys
 
@@ -119,10 +121,14 @@ def gen_one(out_dir, name, asm, embed_bytes):
 def main():
     argv = sys.argv[1:]
     embed_bytes = '--embed-bytes' in argv
-    layout_hdr = None
+    layout_hdr = gates_hdr = None
     if '--layout-header' in argv:
         k = argv.index('--layout-header')
         layout_hdr = argv[k + 1]
+        del argv[k:k + 2]
+    if '--gates-header' in argv:
+        k = argv.index('--gates-header')
+        gates_hdr = argv[k + 1]
         del argv[k:k + 2]
     if embed_bytes:
         argv.remove('--embed-bytes')
@@ -167,6 +173,33 @@ def main():
         with open(layout_hdr, 'w', encoding='utf-8') as f:
             f.write('\n'.join(lines) + '\n')
         print(f'已写出 {layout_hdr}')
+
+    if gates_hdr:
+        # 门表登记数组：{返回点（分派键，门块内 blr 之后）, 原指令地址, kind 码, arg}
+        # kind 码与 hle.c 的枚举一致：0=svc 1=cntpct 2=cntvct。调用方按码转回字符串给 gate_register。
+        glines = ['// 【生成文件】由 gen_embed_ohos.py --gates-header 生成，勿手改。',
+                  '// 来源：各模块 <名>.gates.tsv（改写器输出的门表）。',
+                  '#pragma once', '']
+        for n in names:
+            gp = os.path.join(out_dir, f'{n}.gates.tsv')
+            gates = []
+            for ln in open(gp, encoding='utf-8'):
+                if ln.startswith('#') or not ln.strip(): continue
+                w = ln.split()
+                if len(w) >= 4:
+                    kind = {'svc': 0, 'cntpct': 1, 'cntvct': 2}.get(w[1], -1)
+                    gates.append((int(w[0], 16), kind, int(w[2]), int(w[3], 16)))
+            up = n.upper()
+            glines.append(f'#define DM_GATES_{up}_N {len(gates)}')
+            glines.append('static const struct { uint64_t ret; uint64_t orig; int kind; int arg; } '
+                          f'DM_GATES_{up}[] = ' + '{')
+            for ret, kind, arg, orig in gates:
+                glines.append(f'    {{{ret:#x}, {orig:#x}, {kind}, {arg}}},')
+            glines.append('};')
+            glines.append('')
+        with open(gates_hdr, 'w', encoding='utf-8') as f:
+            f.write('\n'.join(glines) + '\n')
+        print(f'已写出 {gates_hdr}')
 
 
 if __name__ == '__main__':

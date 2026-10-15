@@ -18,6 +18,7 @@
 #include "dm.h"                 // module_t
 #include "map_image_ohos.h"     // 鸿蒙版 map_image —— 实验 D 的被测对象
 #include "dm_main_layout.h"     // 旷野之息 main 的布局常数（fixups 表头生成）
+#include "dm_main_gates.h"      // 旷野之息 main 的门表（93 个 svc 门，实验 H 登记）
 
 // 旷野之息 main 的嵌入段（dm_images.S）：装载验证要把「映射区」与「嵌入段」逐字节对拍
 extern const unsigned char __start_dmmainx0[];
@@ -525,6 +526,31 @@ static void exp_f(char *out, size_t cap, size_t *used) {
 
 // ─────────────────────── 入口 ───────────────────────
 
+// ───────── 探针桩：门回路只走 svc 38 的占位路径，下列服务不会被触及 ─────────
+// hle.c / hle_svc.c 还引用导入解析、线程与同步、私有宿主调用（都是"宿主服务按游戏提供"的边界，
+// 正式装载由 loader.c/hle_thread.c/hle_tact.c 提供）。这里给惰性实现：链接闭合、行为可见。
+module_t g_mod[MAX_MOD]; int g_nmod = 0;                 // 空模块表：导入解析路径不会走到
+struct dm_flags g_flag;                                   // 调试开关：全 0
+module_t *module_of(const void *p) { (void)p; return NULL; }
+uint64_t guest_ns(void) {                                 // 客体时钟：单调钟直通（探针不走 DM_TICK_HOLD）
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + ts.tv_nsec;
+}
+void dm_backtrace(uint64_t fp) { (void)fp; }
+uint64_t dm_entropy64(void) { static uint64_t s; return s += 0x9E3779B97F4A7C15ull; }
+void hlecount_svc(int num) { (void)num; }
+void *hlecount_wrap(const char *a, const char *b, void *fn) { (void)a; (void)b; return fn; }
+uint64_t svc_host_call(int num, uint64_t *regs) { (void)num; (void)regs; return 0; }
+int svc_thread(int num, uint64_t *regs) { (void)num; (void)regs; return 0; }   // 0 = 未处理 → 落到占位返回
+void gate_register(uint64_t ret_abs, const char *kind, int arg, uint64_t orig);   // hle.c
+extern void dm_gate(void);                                // entry.S：门公共入口
+void dm_thread_returned(void);                            // entry.S：客人线程要求退出时落到这里（noreturn）
+void dm_thread_returned(void) {                           // 探针桩：门回路不触发线程退出；真触发就走 _exit 让它可见
+    fprintf(stderr, "[dm] dm_thread_returned 被触发（不应发生在门回路验证里）\n"); _exit(0);
+}
+// 强制接管表的空段：hle.c 会遍历 dmswhle（正式装载由 HLE_FORCE 产出），探针没有条目
+__attribute__((used, section("dmswhle"))) static const char dm_swhle_probe[4] = {0};
+
 // ───────── 实验 G：真实模块装载（旷野之息 main，改写器真实产物）─────────
 // 与实验 D 的差别：D 用的是自造测试映像（49KB），G 用的是 **真实游戏模块**——
 // patch_nso.py（DM_PATCH_TARGET=ohos）改写旷野之息 main 之后的 main.patched.bin（37MB），
@@ -610,6 +636,88 @@ static void exp_g(char *out, size_t cap, size_t *used) {
          (cmp_ok && map_ok) ? "**真实模块装载成立** —— 装载链吃下了第一个真实游戏模块" : "链路有问题，见上");
 }
 
+// ───────── 实验 H：门回路（真实模块的真实门块 → dm_gate → gate_dispatch → svc 38 → 返回）─────────
+// 装载（实验 G）之后的一步：旷野之息 main 的 93 个门**全部是 svc 38**（WaitSynchronization，占位返回 0）。
+// 做法：装载 → 建 8 个线程槽（KGATE = dm_gate）→ 装键页（实际键号×8）→ 登记 93 门 →
+//       每个门块的尾跳（B 原指令+4）暂改为 RET（隔离：不执行门后的游戏代码）→ 逐块调用。
+// 判据：93 块全部走完整回路且返回 0（dm_gate 回写 x0 = svc 占位返回值）；未识别的门会 die（可见）。
+static void exp_h(char *out, size_t cap, size_t *used) {
+    app(out, cap, used, "【实验 H】门回路：93 个真实门块 → dm_gate → gate_dispatch → svc 38 → 返回\n");
+
+    module_t m;
+    memset(&m, 0, sizeof m);
+    strncpy(m.name, "main", sizeof m.name - 1);
+    m.text_end      = DM_IMG_MAIN_TEXT_END;
+    m.patch_off     = DM_IMG_MAIN_PATCH_OFF;
+    m.ro_off        = DM_IMG_MAIN_RO_OFF;
+    m.data_off      = DM_IMG_MAIN_DATA_OFF;
+    m.key_page_off  = DM_IMG_MAIN_KEY_PAGE_OFF;
+    m.key_page_size = DM_IMG_MAIN_KEY_PAGE_SIZE;
+    m.x0_end        = DM_IMG_MAIN_X0_END;
+    m.img_end       = DM_IMG_MAIN_END;
+    if (dm_ohos_map_image_alloc(&m)) {
+        app(out, cap, used, "  ✗ alloc 失败（见 hilog）\n\n");
+        return;
+    }
+    appf(out, cap, used, "  ✓ 装载：base %p，size %zu\n", (void *)m.base, m.size);
+
+    // ① 线程槽：按 loader.c create_keys 的顺序建 8 键（musl 顺序发号），设值
+    static const char *kn[8] = {"K18", "KTLS", "KTLR", "KGATE", "KRES0", "KRES1", "KASPECT", "KASPECTUI"};
+    pthread_key_t key[8];
+    int k_ok = 1;
+    for (int i = 0; i < 8; i++)
+        if (pthread_key_create(&key[i], NULL)) { appf(out, cap, used, "  ✗ 建键 %s 失败\n", kn[i]); k_ok = 0; break; }
+    if (!k_ok) { app(out, cap, used, "\n"); return; }
+    pthread_setspecific(key[0], (void *)(uintptr_t)0x1111111111111111ull);   // K18
+    pthread_setspecific(key[1], (void *)(uintptr_t)0x2222222222222222ull);   // KTLS
+    pthread_setspecific(key[2], (void *)(uintptr_t)0x3333333333333333ull);   // KTLR
+    pthread_setspecific(key[3], (void *)dm_gate);                            // KGATE = 门公共入口
+    for (int i = 4; i < 8; i++) pthread_setspecific(key[i], (void *)(uintptr_t)(0x4400000000000000ull + i));
+
+    // ② 键页：写实际键号×8（与 loader.c install_key_page 同款；槽位下标来自 fixups 的 KEY_*_IDX）
+    uint64_t *page = (uint64_t *)(m.base + DM_IMG_MAIN_KEY_PAGE_OFF);
+    memset(page, 0, DM_IMG_MAIN_KEY_PAGE_SIZE);
+    page[DM_IMG_MAIN_KEY_K18_IDX]       = (uint64_t)key[0] * 8;
+    page[DM_IMG_MAIN_KEY_KTLS_IDX]      = (uint64_t)key[1] * 8;
+    page[DM_IMG_MAIN_KEY_KTLR_IDX]      = (uint64_t)key[2] * 8;
+    page[DM_IMG_MAIN_KEY_KGATE_IDX]     = (uint64_t)key[3] * 8;
+    page[DM_IMG_MAIN_KEY_KRES0_IDX]     = (uint64_t)key[4] * 8;
+    page[DM_IMG_MAIN_KEY_KRES1_IDX]     = (uint64_t)key[5] * 8;
+    page[DM_IMG_MAIN_KEY_KASPECT_IDX]   = (uint64_t)key[6] * 8;
+    page[DM_IMG_MAIN_KEY_KASPECTUI_IDX] = (uint64_t)key[7] * 8;
+    app(out, cap, used, "  ✓ 线程槽 8 键就绪，KGATE = dm_gate；键页已按实际键号写入\n");
+
+    // ③ 登记 93 门（kind 码 → 字符串；返回点/原指令按模块基址换算成绝对地址）
+    for (int i = 0; i < DM_GATES_MAIN_N; i++) {
+        const char *ks = DM_GATES_MAIN[i].kind == 0 ? "svc" : DM_GATES_MAIN[i].kind == 1 ? "cntpct" : "cntvct";
+        gate_register((uint64_t)(m.base + DM_GATES_MAIN[i].ret), ks, DM_GATES_MAIN[i].arg,
+                      (uint64_t)(m.base + DM_GATES_MAIN[i].orig));
+    }
+    appf(out, cap, used, "  ✓ 已登记 %d 个门（全部 svc，编号 38）\n", DM_GATES_MAIN_N);
+
+    // ④ 尾跳暂改 RET：每个门块的最后一条是 B 原指令+4（在 返回点+4），改成 RET 让回路止于探针
+    for (int i = 0; i < DM_GATES_MAIN_N; i++)
+        *(uint32_t *)(m.base + DM_GATES_MAIN[i].ret + 4) = 0xD65F03C0;   // ret
+
+    // ⑤ 逐门过回路：门块地址 = 从返回点向后扫 stp x29,x30,[sp,#-16]!（0xA9BF7BFD）
+    int ok = 0, noblock = 0;
+    for (int i = 0; i < DM_GATES_MAIN_N; i++) {
+        uint32_t *p = (uint32_t *)(m.base + DM_GATES_MAIN[i].ret);
+        void *blk = NULL;
+        for (int b = 1; b <= 16; b++)
+            if (p[-b] == 0xA9BF7BFD) { blk = (uint8_t *)p - 4 * b; break; }
+        if (!blk) { noblock++; continue; }
+        uint64_t rv = ((uint64_t (*)(void))blk)();
+        if (rv == 0) ok++;
+        else appf(out, cap, used, "  ✗ 门 %d（ret %#llx）返回 %#llx（期望 0）\n",
+                  i, (unsigned long long)DM_GATES_MAIN[i].ret, (unsigned long long)rv);
+    }
+    appf(out, cap, used, "  %s 判据：%d / %d 个门块走完整回路且返回 0（dm_gate 回写 x0 = svc 占位值）；块起点未找到 %d\n",
+         ok == DM_GATES_MAIN_N - noblock ? "✅" : "❌", ok, DM_GATES_MAIN_N, noblock);
+    app(out, cap, used, "  说明：每个门块的尾跳已暂改 RET（不执行门后的游戏代码）；首次过门时 hilog 有"
+                        " \"SVC 0x26 …（占位返回成功）\"\n\n");
+}
+
 int dm_probe_run(const char *files_dir, char *out, size_t cap) {
     if (!out || cap < 64) return -1;
     size_t used = 0;
@@ -630,6 +738,7 @@ int dm_probe_run(const char *files_dir, char *out, size_t cap) {
     logline(">>> 实验 E2 开始"); exp_e2(out, cap, &used); logline(">>> 实验 E2 返回");
     logline(">>> 实验 F 开始"); exp_f(out, cap, &used); logline(">>> 实验 F 返回");
     logline(">>> 实验 G 开始"); exp_g(out, cap, &used); logline(">>> 实验 G 返回");
+    logline(">>> 实验 H 开始"); exp_h(out, cap, &used); logline(">>> 实验 H 返回");
     logline(">>> 实验 C 开始"); exp_c(out, cap, &used); logline(">>> 实验 C 返回");
     logline(">>> 实验 B 开始"); exp_b(files_dir, out, cap, &used); logline(">>> 实验 B 返回");
     logline(">>> 实验 A 开始"); exp_a(out, cap, &used); logline(">>> 实验 A 返回");

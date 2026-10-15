@@ -234,7 +234,18 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
             // later nn::os::GetCurrentStackInfo asserts that sp is still inside that range and aborts if not. Previously every address outside the guest address space was reported as "the 4 KiB page containing it",
             // so the main thread stack was recorded as one page. Whether the sp at init and a later sp share a page depends on the absolute position of the host stack top, which moves with the total length of environment variables / launch arguments (a different environment occasionally aborts at startup).
             // This Diablo build does not call GetCurrentStackInfo (main / subsdk0 do not import it and the SDK has no internal call site; the host reaches the main menu with 12 different environment padding lengths), so it was never hit; reporting "one page" is wrong in itself, so fix it anyway.
+#if defined(__OHOS__)
+            // 鸿蒙：musl 没有 pthread_get_stack*_np（苹果专有）。pthread_getattr_np 拿栈底+大小，
+            // 换算成「栈顶 = 底 + 大小」后语义与苹果分支完全一致。
+            pthread_attr_t at__; void *st_lo = 0; size_t st_sz = 0;
+            if (pthread_getattr_np(pthread_self(), &at__) == 0) {
+                pthread_attr_getstack(&at__, &st_lo, &st_sz);
+                pthread_attr_destroy(&at__);
+            }
+            uint64_t top = (uint64_t)st_lo + st_sz, ssz = st_sz;
+#else
             uint64_t top = (uint64_t)pthread_get_stackaddr_np(pthread_self()), ssz = pthread_get_stacksize_np(pthread_self());
+#endif
             if (addr < top && addr >= top - ssz) { base = top - ssz; size = ssz; state = 0xB/*Stack*/; perm = 3; }
             else { base=addr & ~0xFFFull; size=0x1000; state=3/*Code*/; perm=5; } }
         if (mi) { uint64_t *m=(uint64_t*)mi; m[0]=base; m[1]=size; ((uint32_t*)mi)[4]=state; ((uint32_t*)mi)[5]=0; ((uint32_t*)mi)[6]=perm; ((uint32_t*)mi)[7]=0; ((uint32_t*)mi)[8]=0; }

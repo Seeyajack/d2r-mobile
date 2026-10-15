@@ -38,6 +38,11 @@ add_library(dmprobe SHARED
     ${DM_DIR}/ohos/dm_log.c
     # 被测对象：鸿蒙版 map_image（与宿主 loader.c 用的是同一份）
     ${DM_DIR}/ohos/map_image_ohos.c
+    # 门机制三件套（实验 H 门回路）：分派器/登记（hle.c）、svc 语义（hle_svc.c）、
+    # 门公共入口 dm_gate（entry.S，汇编：存 x0..x30+向量寄存器 → gate_dispatch → 回写）
+    ${DM_DIR}/host/hle.c
+    ${DM_DIR}/host/hle_svc.c
+    ${DM_DIR}/host/entry.S
     # 测试映像：由 dm/ohos/tools/gen_embed_ohos.py --embed-bytes 生成，
     # 里面是自定义段 dmmainx0 / dmmainw / dmmainx1（实验 D 用）
     test_image.S
