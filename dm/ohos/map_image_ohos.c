@@ -30,6 +30,7 @@
 DM_IMG_SYMS(main)
 DM_IMG_SYMS(sdk)
 DM_IMG_SYMS(subsdk0)
+DM_IMG_SYMS(probe)      // 实验 D 的自造测试映像（test_image.S；与真实模块 main 分开命名）
 
 // 强制接管表所在的段（上游 hle.h 的 HLE_FORCE 宏在鸿蒙侧改写到这个段名）
 __attribute__((weak)) extern const uint8_t __start_dmswforce[], __stop_dmswforce[];
@@ -46,7 +47,7 @@ static const img_sections g_imgs[] = {
     __start_dm##nm##x0, __stop_dm##nm##x0, \
     __start_dm##nm##w,  __stop_dm##nm##w,  \
     __start_dm##nm##x1, __stop_dm##nm##x1 }
-    IMG(main), IMG(sdk), IMG(subsdk0),
+    IMG(main), IMG(sdk), IMG(subsdk0), IMG(probe),
 #undef IMG
 };
 

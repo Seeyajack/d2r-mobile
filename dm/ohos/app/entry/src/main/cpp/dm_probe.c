@@ -276,7 +276,7 @@ static void exp_d(char *out, size_t cap, size_t *used) {
 
     module_t m;
     memset(&m, 0, sizeof m);
-    strncpy(m.name, "main", sizeof m.name - 1);
+    strncpy(m.name, "probe", sizeof m.name - 1);   // 测试映像（test_image.S，段名 dmprobe*）；真实模块是 main（实验 G/H）
     m.text_end = 0x2000;
     m.patch_off = 0x8000;
     m.key_page_off = 0x4000;
@@ -551,6 +551,20 @@ void dm_thread_returned(void) {                           // 探针桩：门回�
 // 强制接管表的空段：hle.c 会遍历 dmswhle（正式装载由 HLE_FORCE 产出），探针没有条目
 __attribute__((used, section("dmswhle"))) static const char dm_swhle_probe[4] = {0};
 
+// 实验 H 的门错误兜底：SIGSEGV/SIGBUS 时记下出错 PC，跳回探针（进程活着，逐门继续报）
+static sigjmp_buf g_gate_jmp;
+static volatile sig_atomic_t g_gate_armed;
+static volatile uint64_t g_gate_fault_pc;
+static volatile int g_gate_fault_sig;
+static void gate_fault_handler(int sig, siginfo_t *si, void *uc) {
+    (void)si;
+    if (!g_gate_armed) _exit(128 + sig);
+    g_gate_fault_sig = sig;
+    g_gate_fault_pc = (uint64_t)((ucontext_t *)uc)->uc_mcontext.pc;   // aarch64 mcontext 的 pc
+    g_gate_armed = 0;
+    siglongjmp(g_gate_jmp, 1);
+}
+
 // ───────── 实验 G：真实模块装载（旷野之息 main，改写器真实产物）─────────
 // 与实验 D 的差别：D 用的是自造测试映像（49KB），G 用的是 **真实游戏模块**——
 // patch_nso.py（DM_PATCH_TARGET=ohos）改写旷野之息 main 之后的 main.patched.bin（37MB），
@@ -687,33 +701,80 @@ static void exp_h(char *out, size_t cap, size_t *used) {
     page[DM_IMG_MAIN_KEY_KASPECTUI_IDX] = (uint64_t)key[7] * 8;
     app(out, cap, used, "  ✓ 线程槽 8 键就绪，KGATE = dm_gate；键页已按实际键号写入\n");
 
+    // 信号兜底：登记与过门都套（崩了进程活着，出错 PC 进报告）
+    struct sigaction sa, old_segv, old_bus;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_sigaction = gate_fault_handler;
+    sa.sa_flags = SA_SIGINFO;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGSEGV, &sa, &old_segv);
+    sigaction(SIGBUS, &sa, &old_bus);
+
+    g_gate_armed = 1;
+    if (sigsetjmp(g_gate_jmp, 1) != 0) {
+        g_gate_armed = 0;
+        appf(out, cap, used, "  ❌ 登记阶段崩（pc %#llx，sig %d）—— 见 hilog\n",
+             (unsigned long long)g_gate_fault_pc, g_gate_fault_sig);
+        sigaction(SIGSEGV, &old_segv, NULL); sigaction(SIGBUS, &old_bus, NULL);
+        return;
+    }
     // ③ 登记 93 门（kind 码 → 字符串；返回点/原指令按模块基址换算成绝对地址）
     for (int i = 0; i < DM_GATES_MAIN_N; i++) {
         const char *ks = DM_GATES_MAIN[i].kind == 0 ? "svc" : DM_GATES_MAIN[i].kind == 1 ? "cntpct" : "cntvct";
         gate_register((uint64_t)(m.base + DM_GATES_MAIN[i].ret), ks, DM_GATES_MAIN[i].arg,
                       (uint64_t)(m.base + DM_GATES_MAIN[i].orig));
     }
+    g_gate_armed = 0;
     appf(out, cap, used, "  ✓ 已登记 %d 个门（全部 svc，编号 38）\n", DM_GATES_MAIN_N);
 
     // ④ 尾跳暂改 RET：每个门块的最后一条是 B 原指令+4（在 返回点+4），改成 RET 让回路止于探针
     for (int i = 0; i < DM_GATES_MAIN_N; i++)
         *(uint32_t *)(m.base + DM_GATES_MAIN[i].ret + 4) = 0xD65F03C0;   // ret
 
-    // ⑤ 逐门过回路：门块地址 = 从返回点向后扫 stp x29,x30,[sp,#-16]!（0xA9BF7BFD）
-    int ok = 0, noblock = 0;
+    // ⑤ 封权限：门块要**执行**，代码区与补丁区必须先封成 R+X（实验 D 验证过这条路径）
+    //   ——首轮真机就是漏了这一步：跳进 RW 页直接 SIGSEGV，进程死亡（faultlog 有档）。
+    if (dm_ohos_map_image_seal(&m)) {
+        app(out, cap, used, "  ✗ seal 失败（见 hilog）\n\n");
+        return;
+    }
+    app(out, cap, used, "  ✓ 代码区与补丁区已封 R+X\n");
+
+    // ⑥ 逐门过回路：门块地址 = 从返回点向后扫 stp x29,x30,[sp,#-16]!（0xA9BF7BFD）
+    int ok = 0, noblock = 0, faulted = 0;
     for (int i = 0; i < DM_GATES_MAIN_N; i++) {
         uint32_t *p = (uint32_t *)(m.base + DM_GATES_MAIN[i].ret);
         void *blk = NULL;
         for (int b = 1; b <= 16; b++)
             if (p[-b] == 0xA9BF7BFD) { blk = (uint8_t *)p - 4 * b; break; }
         if (!blk) { noblock++; continue; }
-        uint64_t rv = ((uint64_t (*)(void))blk)();
-        if (rv == 0) ok++;
-        else appf(out, cap, used, "  ✗ 门 %d（ret %#llx）返回 %#llx（期望 0）\n",
-                  i, (unsigned long long)DM_GATES_MAIN[i].ret, (unsigned long long)rv);
+        g_gate_armed = 1; g_gate_fault_pc = 0;
+        if (sigsetjmp(g_gate_jmp, 1) == 0) {
+            // 过门参数：svc 38 = Break(reason, ptr, size)。reason 的最高位 = 「仅通知，可继续」——
+            // 处理器看到它就返回 0 而不 _exit(42)；ptr/size 置 0 免得处理器解引用垃圾指针。
+            register uint64_t g_x0 __asm__("x0") = 0x8000000000000000ull;
+            register uint64_t g_x1 __asm__("x1") = 0;
+            register uint64_t g_x2 __asm__("x2") = 0;
+            __asm__ volatile("blr %3"
+                             : "+r"(g_x0), "+r"(g_x1), "+r"(g_x2)
+                             : "r"(blk)
+                             : "x3","x4","x5","x6","x7","x8","x9","x10","x11","x12",
+                               "x13","x14","x15","x16","x17","x30","memory");
+            uint64_t rv = g_x0;   // dm_gate 回写 x0 = 处理器返回值
+            g_gate_armed = 0;
+            if (rv == 0) ok++;
+            else appf(out, cap, used, "  ✗ 门 %d（ret %#llx）返回 %#llx（期望 0）\n",
+                      i, (unsigned long long)DM_GATES_MAIN[i].ret, (unsigned long long)rv);
+        } else {
+            g_gate_armed = 0; faulted++;
+            appf(out, cap, used, "  ✗ 门 %d（ret %#llx）崩：pc %#llx，sig %d\n",
+                 i, (unsigned long long)DM_GATES_MAIN[i].ret,
+                 (unsigned long long)g_gate_fault_pc, g_gate_fault_sig);
+        }
     }
-    appf(out, cap, used, "  %s 判据：%d / %d 个门块走完整回路且返回 0（dm_gate 回写 x0 = svc 占位值）；块起点未找到 %d\n",
-         ok == DM_GATES_MAIN_N - noblock ? "✅" : "❌", ok, DM_GATES_MAIN_N, noblock);
+    sigaction(SIGSEGV, &old_segv, NULL); sigaction(SIGBUS, &old_bus, NULL);
+    appf(out, cap, used, "  %s 判据：%d / %d 个门块走完整回路且返回 0（Break 以仅通知位过门）；崩 %d（PC 见上）；块起点未找到 %d\n",
+         (ok == DM_GATES_MAIN_N - noblock - faulted && faulted == 0) ? "✅" : "❌",
+         ok, DM_GATES_MAIN_N, faulted, noblock);
     app(out, cap, used, "  说明：每个门块的尾跳已暂改 RET（不执行门后的游戏代码）；首次过门时 hilog 有"
                         " \"SVC 0x26 …（占位返回成功）\"\n\n");
 }
