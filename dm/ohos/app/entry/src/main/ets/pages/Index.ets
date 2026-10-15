@@ -64,6 +64,17 @@ struct Index {
       .fontColor('#5F5E5A')
       .width('100%')
 
+    Button('装载机制实验（实验 G：真实模块装载）')
+      .width('100%')
+      .onClick(() => {
+        try {
+          const ctx = getContext(this) as common.UIAbilityContext;
+          this.result = dmprobe.runProbes(ctx.filesDir);
+        } catch (err) {
+          this.result = '调用原生模块失败：' + JSON.stringify(err);
+        }
+      })
+
     Button('可变帧率节拍（3.3-B：DisplaySoloist 5 组对照）')
       .width('100%')
       .onClick(() => {
@@ -173,17 +184,6 @@ struct Index {
   // ---- 历史探针：做回归时才展开 ----
   @Builder
   HistoryButtons() {
-    Button('运行装载机制实验（A / B / C）')
-      .width('100%')
-      .onClick(() => {
-        try {
-          const ctx = getContext(this) as common.UIAbilityContext;
-          this.result = dmprobe.runProbes(ctx.filesDir);
-        } catch (err) {
-          this.result = '调用原生模块失败：' + JSON.stringify(err);
-        }
-      })
-
     Button('探测图形层能力（Vulkan）')
       .width('100%')
       .onClick(() => {

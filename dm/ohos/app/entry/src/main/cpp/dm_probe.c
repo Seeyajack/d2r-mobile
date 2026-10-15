@@ -547,6 +547,8 @@ static void exp_g(char *out, size_t cap, size_t *used) {
     m.data_off      = DM_IMG_MAIN_DATA_OFF;
     m.key_page_off  = DM_IMG_MAIN_KEY_PAGE_OFF;
     m.key_page_size = DM_IMG_MAIN_KEY_PAGE_SIZE;
+    m.x0_end        = DM_IMG_MAIN_X0_END;      // 装载拷贝的精确范围（fixups），防链接器尾垫错位
+    m.img_end       = DM_IMG_MAIN_END;
     appf(out, cap, used, "  布局：TEXT_END %#llx / PATCH_OFF %#llx / KEY_PAGE %#llx\n",
          (unsigned long long)m.text_end, (unsigned long long)m.patch_off,
          (unsigned long long)m.key_page_off);
@@ -558,14 +560,15 @@ static void exp_g(char *out, size_t cap, size_t *used) {
     appf(out, cap, used, "  ✓ 定位 + 拷贝：base %p，size %zu\n", (void *)m.base, m.size);
 
     // 判据②：三段**全量** memcmp —— 映射区必须与嵌入段逐字节一致
-    const struct { const unsigned char *s, *e; uint8_t *dst; const char *nm; } regions[] = {
-        { __start_dmmainx0, __stop_dmmainx0, m.base,                 "x0(代码)" },
-        { __start_dmmainw,  __stop_dmmainw,  m.base + (__stop_dmmainx0 - __start_dmmainx0), "w(数据)" },
-        { __start_dmmainx1, __stop_dmmainx1, m.base + DM_IMG_MAIN_PATCH_OFF, "x1(补丁区)" },
+    // 对拍长度按 **fixups 范围**（链接器会给 ELF 段尾垫对齐页，段大小比内容大 16K）
+    const struct { const unsigned char *s; uint8_t *dst; size_t len; const char *nm; } regions[] = {
+        { __start_dmmainx0, m.base,                            DM_IMG_MAIN_X0_END,             "x0(代码)" },
+        { __start_dmmainw,  m.base + DM_IMG_MAIN_X0_END,       DM_IMG_MAIN_PATCH_OFF - DM_IMG_MAIN_X0_END, "w(数据)" },
+        { __start_dmmainx1, m.base + DM_IMG_MAIN_PATCH_OFF,    DM_IMG_MAIN_END - DM_IMG_MAIN_PATCH_OFF,    "x1(补丁区)" },
     };
     int cmp_ok = 1;
     for (int k = 0; k < 3; k++) {
-        size_t len = (size_t)(regions[k].e - regions[k].s);
+        size_t len = regions[k].len;
         int same = (memcmp(regions[k].dst, regions[k].s, len) == 0);
         appf(out, cap, used, "  %s %s 段逐字节一致（%zu 字节）\n", same ? "✓" : "✗", regions[k].nm, len);
         if (!same) cmp_ok = 0;

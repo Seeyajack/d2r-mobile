@@ -87,20 +87,40 @@ int dm_ohos_map_image_alloc(module_t *m) {
     size_t zw = (size_t)(s->we - s->w);
     size_t z1 = (size_t)(s->x1e - s->x1);
 
+    // 布局自检与拷贝范围：**以 fixups 的精确范围为準，不信任 ELF 段大小**。
+    // 为什么（真机实测 2026-10-16）：lld 会给每个嵌入段尾垫一个对齐页（.S 内容 0x1634000
+    // → .so 段 0x1638000），按 ELF 段大小拷贝会把 w 段数据错位 16K、还会用零盖掉 ro 开头。
+    // 精确范围由调用方经 module_t 的 x0_end / img_end 传入（来自 fixups 生成头）；
+    // 未设置（=0，如实验 D 的自造映像）时退回旧的 ELF 段大小路径（那些段没有被垫页）。
+    size_t c0 = z0, cw = zw, c1 = z1;
+    if (m->x0_end || m->img_end) {
+        if (z0 < m->x0_end || zw < m->patch_off - m->x0_end || z1 < m->img_end - m->patch_off) {
+            LOGE("【红】鸿蒙装载 %{public}s：嵌入段比 fixups 范围小（x0 %zu / w %zu / x1 %zu）",
+                 m->name, z0, zw, z1);
+            return -1;
+        }
+        c0 = (size_t)m->x0_end;                       // x0 只拷到 x0/w 边界
+        cw = (size_t)(m->patch_off - m->x0_end);      // w 拷到 patch_off
+        c1 = (size_t)(m->img_end - m->patch_off);     // x1 拷到映像末尾（含 bss 预留）
+        LOGI("鸿蒙装载 %{public}s：按 fixups 范围拷贝（x0 %zu / w %zu / x1 %zu，"
+             "ELF 段含链接器尾垫 %zu / %zu / %zu）",
+             m->name, c0, cw, c1, z0, zw, z1);
+    }
+
     // 布局自检：三块必须能按原相对位置拼回原映像（与 iOS 版同样那几条）
-    if (z0 + zw != m->patch_off) {
-        LOGE("【红】鸿蒙装载 %{public}s：段布局不符（x0 %{public}zu + w %{public}zu "
+    if (c0 + cw != m->patch_off) {
+        LOGE("【红】鸿蒙装载 %{public}s：段布局不符（x0 %zu + w %zu "
              "≠ PATCH_OFF %{public}llu）",
-             m->name, z0, zw, (unsigned long long)m->patch_off);
+             m->name, c0, cw, (unsigned long long)m->patch_off);
         return -1;
     }
-    if (!z0 || !z1) {
-        LOGE("【红】鸿蒙装载 %{public}s：x0 %{public}zu / x1 %{public}zu 为空",
-             m->name, z0, z1);
+    if (!c0 || !c1) {
+        LOGE("【红】鸿蒙装载 %{public}s：x0 %zu / x1 %zu 为空",
+             m->name, c0, c1);
         return -1;
     }
 
-    m->size = m->patch_off + z1;
+    m->size = m->patch_off + c1;
     size_t total = (size_t)ROUND_UP(m->size);
 
     // 先按「可写」拿匿名内存 —— 拷映像、装键页都要写。
@@ -113,10 +133,10 @@ int dm_ohos_map_image_alloc(module_t *m) {
         return -1;
     }
 
-    // 三块按原相对位置摆回去：x0 在 0，w 在 z0，x1 在 patch_off
-    memcpy(base, s->x0, z0);
-    memcpy(base + z0, s->w, zw);
-    memcpy(base + m->patch_off, s->x1, z1);
+    // 三块按原相对位置摆回去：x0 在 0，w 在 x0_end，x1 在 patch_off
+    memcpy(base, s->x0, c0);
+    memcpy(base + c0, s->w, cw);
+    memcpy(base + m->patch_off, s->x1, c1);
 
     m->base = base;
     LOGI("鸿蒙装载 %{public}s：base 0x%{public}llx size %{public}zu"

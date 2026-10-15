@@ -43,6 +43,12 @@ typedef struct {
     unsigned nsym;
     uint32_t *symh; unsigned symh_mask;   // 已定义符号的名字哈希表（开放寻址，存符号下标；同名只留下标最小者 = 线性扫描的首个命中） | Name hash table of defined symbols (open addressing, stores symbol indices; for a duplicated name only the smallest index is kept = the first hit of a linear scan)
     uint64_t init, init_array, init_arraysz;   // init = DT_INIT（模块 _init：登记 DSO 并跑本模块 init_array） | init = DT_INIT (the module's _init: registers the DSO and runs this module's init_array)
+#if defined(__OHOS__)
+    // 鸿蒙：装载拷贝的**精确范围**（来自 fixups 生成头 DM_IMG_<名>_*）。
+    // 为什么要有：lld 会给每个嵌入段尾垫一个对齐页（.S 内容 0x1634000 → .so 段 0x1638000），
+    // 按 ELF 段大小拷贝会把 w 段数据错位 16K —— 拷贝范围必须以 fixups 为准，不信任 ELF 段大小。
+    uint64_t x0_end, img_end;
+#endif
 } module_t;
 
 extern module_t g_mod[MAX_MOD];

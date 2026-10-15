@@ -158,6 +158,11 @@ def main():
             for key, val in hdr.items():
                 kk = key.replace(' ', '_').upper()
                 lines.append(f'#define DM_IMG_{up}_{kk} {val}')
+            # 段的**精确**范围（.S 三块的边界）：装载拷贝用它，不信任 ELF 段大小
+            # （lld 会给每段尾垫一个对齐页）。gen_one 返回 (x0 结束, PATCH_OFF, 映像结束)。
+            a, po, end = gen_one(out_dir, n, [], False)
+            lines.append(f'#define DM_IMG_{up}_X0_END {a:#x}')
+            lines.append(f'#define DM_IMG_{up}_END {end:#x}')
             lines.append('')
         with open(layout_hdr, 'w', encoding='utf-8') as f:
             f.write('\n'.join(lines) + '\n')
