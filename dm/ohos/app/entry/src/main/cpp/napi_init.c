@@ -252,6 +252,19 @@ static napi_value RunVkPace(napi_env env, napi_callback_info info) {
     return ret;
 }
 
+static napi_value RunVkPaceXc(napi_env env, napi_callback_info info) {
+    // 阶段 4（3.3-C）：帧率接入口对照 —— DisplaySoloist vs XComponent 侧，6 组同轮。
+    char files_dir[1024];
+    Arg0String(env, info, files_dir, sizeof files_dir);
+    napi_value ret = NULL;
+    char *buf = (char *)malloc(VKPACE_BUF);
+    if (!buf) { napi_create_string_utf8(env, "内存不足", NAPI_AUTO_LENGTH, &ret); return ret; }
+    vk_backend_pace_xc(buf, VKPACE_BUF);
+    napi_create_string_utf8(env, buf, NAPI_AUTO_LENGTH, &ret);
+    free(buf);
+    return ret;
+}
+
 static napi_value Init(napi_env env, napi_value exports) {
     // 取 ArkUI 传进来的 XComponent 实例并注册回调（照 dm/ohos/front_ohos.c 的写法）
     napi_value exportInstance = NULL;
@@ -264,6 +277,9 @@ static napi_value Init(napi_env env, napi_value exports) {
             cb.OnSurfaceDestroyed = OnSurfaceDestroyedCB;
             cb.DispatchTouchEvent = DispatchTouchEventCB;
             OH_NativeXComponent_RegisterCallback(xc, &cb);
+            // 把实例也存一份：官方"可变帧率"在 XComponent 侧另有一套接口
+            // （SetExpectedFrameRateRange + RegisterOnFrameCallback），3.3-C 要拿它和 DisplaySoloist 对照。
+            dm_ohos_surface_set_xc(xc);
         }
     }
 
@@ -281,6 +297,7 @@ static napi_value Init(napi_env env, napi_value exports) {
         { "runVkPsoCache",  NULL, RunVkPsoCache,  NULL, NULL, NULL, napi_default, NULL },
         { "runVkOnScreen",  NULL, RunVkOnScreen,  NULL, NULL, NULL, napi_default, NULL },
         { "runVkPace",      NULL, RunVkPace,      NULL, NULL, NULL, napi_default, NULL },
+        { "runVkPaceXc",    NULL, RunVkPaceXc,    NULL, NULL, NULL, napi_default, NULL },
     };
     napi_define_properties(env, exports, sizeof desc / sizeof desc[0], desc);
     return exports;

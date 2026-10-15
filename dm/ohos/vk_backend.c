@@ -24,6 +24,27 @@
 
 #include <vulkan/vulkan.h>
 
+// 3.3-C：官方"可变帧率"在 XComponent 侧另有一套接口（API 11 起），与 DisplaySoloist 做对照。
+//
+// 这里**刻意不包含** ArkUI 的 `<ace/xcomponent/native_interface_xcomponent.h>`，而是按官方签名自行声明。
+// 原因（真机实测踩到）：那个头在**文件作用域**定义了
+//     const uint32_t OH_XCOMPONENT_ID_LEN_MAX = 128;
+//     const uint32_t OH_MAX_TOUCH_POINTS_NUMBER = 10;
+// 而 **C 里的文件作用域 const 是外部链接**（C++ 才是内部链接）⇒ 只要有两个 .c 同时包含它，
+// 链接就炸：`ld.lld: error: duplicate symbol: OH_XCOMPONENT_ID_LEN_MAX`。
+// napi_init.c 必须包含它（那边要用 OH_NativeXComponent_Callback 结构体），所以这里只声明要用的三个函数。
+// 能用官方头的地方照旧用官方头 —— napi_init.c 一个字没改。
+// Deliberately not including ArkUI's XComponent header: it defines file-scope `const uint32_t` objects,
+// and in C (unlike C++) those have external linkage, so two TUs including it collide at link time.
+typedef struct OH_NativeXComponent OH_NativeXComponent;
+typedef struct { int32_t min; int32_t max; int32_t expected; } OH_NativeXComponent_ExpectedRateRange;
+extern int32_t OH_NativeXComponent_SetExpectedFrameRateRange(OH_NativeXComponent *component,
+                                                             OH_NativeXComponent_ExpectedRateRange *range);
+extern int32_t OH_NativeXComponent_RegisterOnFrameCallback(
+    OH_NativeXComponent *component,
+    void (*callback)(OH_NativeXComponent *component, uint64_t timestamp, uint64_t targetTimestamp));
+extern int32_t OH_NativeXComponent_UnregisterOnFrameCallback(OH_NativeXComponent *component);
+
 // 鸿蒙的"报时员"：官方 DisplaySoloist（自渲染视区的可变帧率调度，API 12 起）。
 // 头文件在子目录里（NDK 的 sysroot/usr/include/native_display_soloist/），库是 libnative_display_soloist.so。
 // The platform timekeeper: the official DisplaySoloist (variable frame rate scheduling for self-drawn
@@ -2010,7 +2031,7 @@ int vk_backend_onscreen(char *out, size_t cap) {
 
 typedef struct {
     const char *name;
-    int  use_ds;        // 1 = 由 DisplaySoloist 驱动；0 = 裸 present（我们自己的循环）
+    int  driver;        // 谁在驱动出图：0 = 裸 present（我们自己的循环）；1 = DisplaySoloist；2 = XComponent 侧接口
     int  wait_idle;     // 1 = present 后每帧等 GPU（3.3-A 老做法）；0 = 只入队不等（上游语义）
     int  rate;          // 0 = 不设帧率（跟随系统）；否则 min=max=expected=rate
     int  target;        // 收满多少拍收工
@@ -2023,6 +2044,7 @@ typedef struct {
     double pr_avg_ms;   // 我们自己出图的节奏
     double jitter;      // 最大间隔 / 平均间隔（越接近 1 越整齐）
     double cb_cost_ms;  // 回调单次耗时（平均）
+    unsigned long cb_tid, main_tid;   // 回调线程 / 主线程（3.3-C 要对比两条入口落哪条线程）
 } pace_res;
 
 typedef struct {
@@ -2042,11 +2064,16 @@ typedef struct {
     unsigned long main_tid, cb_tid;
 } pace_run;
 
-// 每拍进来一次。**这里跑在系统给的线程上**（Create(true) 时是独占线程），不是 UI 线程 ——
-// 两边的线程 id 都记下来，报告里直接比。
-static void pace_frame_cb(long long timestamp, long long targetTimestamp, void *data) {
-    (void)targetTimestamp;                       // 下一拍的时刻暂时不用；将来做"提前量"的时候要用
-    pace_run *R = (pace_run *)data;
+// 当前在跑的那一组。**放文件级**：XComponent 侧的回调签名里没有 data 参数，拿不到上下文，
+// 只能从这里取（同一时刻只跑一组、单线程调用，不会冲突）。
+static pace_run *g_pace;
+
+// 一拍进来要做的事。两个接入口（DisplaySoloist / XComponent 侧）的回调内容完全一样，
+// 只是签名不同，所以共用这一份。
+// **这里跑在系统给的线程上**，不是 UI 线程 —— 两边的线程 id 都记下来，报告里直接比。
+static void pace_tick(uint64_t timestamp) {
+    pace_run *R = g_pace;
+    if (!R) return;
     atomic_fetch_add(&R->in_cb, 1);
     if (!atomic_load(&R->stop) && atomic_load(&R->done_n) < R->arm.target) {
         uint64_t t0 = ns_now2();
@@ -2087,6 +2114,19 @@ static void pace_frame_cb(long long timestamp, long long targetTimestamp, void *
     atomic_fetch_sub(&R->in_cb, 1);
 }
 
+// DisplaySoloist 的回调（签名带 data 指针；这里不用它，统一走 g_pace）
+static void pace_ds_cb(long long timestamp, long long targetTimestamp, void *data) {
+    (void)targetTimestamp;       // 下一拍的时刻暂时不用；将来做"提前量"的时候要用
+    (void)data;
+    pace_tick((uint64_t)timestamp);
+}
+
+// XComponent 侧 `RegisterOnFrameCallback` 的回调（**没有 data 参数**，所以只能走 g_pace）
+static void pace_xc_cb(OH_NativeXComponent *component, uint64_t timestamp, uint64_t targetTimestamp) {
+    (void)component; (void)targetTimestamp;
+    pace_tick(timestamp);
+}
+
 // 一组跑完后的读数落进 res（供最后的判据汇总用）
 static void pace_res_of(const pace_arm *a, const pace_run *R, int got, pace_res *res) {
     memset(res, 0, sizeof *res);
@@ -2101,13 +2141,15 @@ static void pace_res_of(const pace_arm *a, const pace_run *R, int got, pace_res 
         if (avg > 0) res->jitter = (double)R->pr_worst / avg;
     }
     if (got) res->cb_cost_ms = (double)R->cb_cost_sum / (double)got / 1e6;
+    res->cb_tid = R->cb_tid;
+    res->main_tid = R->main_tid;
     (void)a;
 }
 
 // 把一组的过程与读数打进报告（给人在手机上读，所以每个数都写明是什么）
 static void pace_report(os_emit *em, const pace_arm *a, const pace_run *R, int got) {
     OS_EMIT(em, "---- %s ----", a->name);
-    if (a->use_ds) {
+    if (a->driver) {
         OS_EMIT(em, "  收到 %d 拍（目标 %d）%s", got, a->target, got < a->target ? " ← **没收到应有的拍数**" : "");
         OS_EMIT(em, "  回调线程 %#lx ／ 主线程 %#lx ⇒ %s", R->cb_tid, R->main_tid,
                 (R->cb_tid && R->cb_tid != R->main_tid)
@@ -2126,12 +2168,16 @@ static void pace_report(os_emit *em, const pace_arm *a, const pace_run *R, int g
         OS_EMIT(em, "  我们出图的节奏：最小 %.2f ／ 平均 %.2f ／ 最大 %.2f ms（≈ %.1f fps）",
                 (double)R->pr_best / 1e6, avg / 1e6, (double)R->pr_worst / 1e6, 1e9 / avg);
     }
-    if (a->use_ds && got)
+    if (a->driver && got)
         OS_EMIT(em, "  回调单次耗时：平均 %.2f ms，最大 %.2f ms", (double)R->cb_cost_sum / got / 1e6,
                 (double)R->cb_cost_max / 1e6);
     OS_EMIT(em, "  等待方式：%s", a->wait_idle ? "每帧等 GPU 干完（3.3-A 老做法）"
                                               : "只入队不等（上游语义）");
     if (R->fails) OS_EMIT(em, "  ❌ 其中 %d 拍出图失败（详见 hilog）", R->fails);
+    if (a->driver == 2 && !got)
+        OS_EMIT(em, "  ↑ 预期如此：XComponent 侧的回调要在 **UI 主线程**派发（官方明文），"
+                    "而同步探针正把 UI 线程堵着 ⇒ 收不到拍。这是结论，不是缺陷；"
+                    "要真量它必须改「两段式」（注册后立即返回 → 回调自收 → 再取结果），见文档 3.3-C");
 }
 
 // 跑一组。返回失败项数；读数写进 res。
@@ -2154,8 +2200,9 @@ static int pace_one_arm(os_emit *em, os_ctx *o, const pace_arm *arm, pace_run *R
     memset(slot, 0, sizeof slot);
     R->slot = slot;
     if (os_slot_init(slot, arm->slots, em) != 0) { memset(res, 0, sizeof *res); return 1; }
+    g_pace = R;      // 回调从这里取上下文（XComponent 侧的回调没有 data 参数）
 
-    if (!arm->use_ds) {
+    if (arm->driver == 0) {
         // 裸 present：我们自己的循环。只有"我画得多快"，没有系统拍子。
         for (int f = 0; f < arm->target; f++) {
             os_slot *s = &slot[f % arm->slots];
@@ -2171,7 +2218,7 @@ static int pace_one_arm(os_emit *em, os_ctx *o, const pace_arm *arm, pace_run *R
             R->pr_prev = ts;
             got++;
         }
-    } else {
+    } else if (arm->driver == 1) {
         OH_DisplaySoloist *ds = OH_DisplaySoloist_Create(true);   // true = 独占一条线程
         if (!ds) {
             OS_EMIT(em, "❌ OH_DisplaySoloist_Create 失败（拿不到报时员）");
@@ -2188,7 +2235,7 @@ static int pace_one_arm(os_emit *em, os_ctx *o, const pace_arm *arm, pace_run *R
                 OS_EMIT(em, "⚠ 设期望帧率 %d 失败（继续跑，但下面的间隔不代表它）", arm->rate);
         }
 
-        if (OH_DisplaySoloist_Start(ds, pace_frame_cb, R) != 0) {
+        if (OH_DisplaySoloist_Start(ds, pace_ds_cb, R) != 0) {
             OS_EMIT(em, "❌ OH_DisplaySoloist_Start 失败");
             OH_DisplaySoloist_Destroy(ds);
             fails++;
@@ -2208,12 +2255,44 @@ static int pace_one_arm(os_emit *em, os_ctx *o, const pace_arm *arm, pace_run *R
             while (atomic_load(&R->in_cb)) usleep(1000);
             OH_DisplaySoloist_Destroy(ds);
         }
+    } else {
+        // XComponent 侧接入口（官方 API 11）：随 XComponent 走，更贴合"游戏把画面渲染进 XComponent"。
+        OH_NativeXComponent *xc = (OH_NativeXComponent *)dm_ohos_surface_xc();
+        if (!xc) {
+            OS_EMIT(em, "❌ 还没拿到 OH_NativeXComponent（ArkUI 侧没把组件交过来？）");
+            fails++;
+        } else {
+            if (arm->rate) {
+                OH_NativeXComponent_ExpectedRateRange rg;
+                rg.min = rg.max = rg.expected = arm->rate;
+                if (OH_NativeXComponent_SetExpectedFrameRateRange(xc, &rg) != 0)
+                    OS_EMIT(em, "⚠ 设期望帧率 %d 失败（继续跑，但下面的间隔不代表它）", arm->rate);
+            }
+            if (OH_NativeXComponent_RegisterOnFrameCallback(xc, pace_xc_cb) != 0) {
+                OS_EMIT(em, "❌ RegisterOnFrameCallback 失败");
+                fails++;
+            } else {
+                // **只短等一小会儿**：同步探针在原理上收不到 XC 侧的回调（它要 UI 主线程派发，而我们正堵着），
+                // 等 1.2 s 足够确认"确实收不到"。绝不能用几秒的超时去等 —— 三个组加起来会把 UI 线程堵过 6 秒，
+                // 系统会判 THREAD_BLOCK_6S 直接 PROCESS_KILL（真机踩过）。
+                uint64_t deadline = 1200;
+                uint64_t t0 = ms_now();
+                while (atomic_load(&R->done_n) < arm->target && ms_now() - t0 < deadline) usleep(1000);
+                got = atomic_load(&R->done_n);
+
+                // 与 DisplaySoloist 同样的收尾顺序：停回调 → 等最后一拍退出 → 才算干净
+                atomic_store(&R->stop, 1);
+                OH_NativeXComponent_UnregisterOnFrameCallback(xc);
+                while (atomic_load(&R->in_cb)) usleep(1000);
+            }
+        }
     }
 
+    g_pace = NULL;
     pace_report(em, arm, R, got);
     pace_res_of(arm, R, got, res);
     os_slot_free(slot, arm->slots, pool);
-    if (got < arm->target) fails++;
+    if (got < arm->target && arm->driver != 2) fails++;   // XC 侧收不到拍是"预期如此"，不算失败
     return fails;
 }
 
@@ -2323,6 +2402,113 @@ int vk_backend_pace(char *out, size_t cap) {
 
     OS_EMIT(em, "");
     OS_EMIT(em, "===== 3.3-B %s：失败 %d 项（总耗时 %llums）=====",
+            fails ? "未全通过" : "全部通过", fails, (unsigned long long)(ms_now() - t0));
+    *em->p = 0;
+    return fails;
+}
+
+// ================= 阶段 4（3.3-C）：帧率接入口对照 —— DisplaySoloist vs XComponent 侧 =================
+// 3.3-B 验的是"DisplaySoloist 能不能当报时源"。但官方"可变帧率"其实有**四个接入口**：
+// ArkUI 的 `expectedFrameRateRange`、`displaySync`、**XComponent 侧的
+// `OH_NativeXComponent_SetExpectedFrameRateRange` + `RegisterOnFrameCallback`（API 11 起）**、`DisplaySoloist`。
+// 其中 **XComponent 那一条更贴合"游戏把画面渲染进 XComponent"** 这个场景。
+//
+// 这一轮只回答一个问题：**两条入口到底差在哪**。四组紧挨着跑、**同轮内比**
+// （跨轮次比读数会漂，3.3-B 已经吃过这个亏）：DS 60Hz / DS 30Hz / DS 60Hz·等GPU / **XC 60Hz（放最后）**。
+//
+// 判据：
+//   ①② DisplaySoloist 两组与 3.3-B 的读数对齐（复现性）；
+//   ③ XC 侧在同步探针下收到几拍 —— 预期 **0 拍**，因为官方写明它的回调**要在 UI 主线程派发**，
+//      而同步探针正把 UI 线程堵着（真机实测就是 0 拍）；
+//   ④ 线程模型：DisplaySoloist 回调在独立线程（实测）vs XC 侧回调在 UI 主线程（官方）——
+//      **这才是两条入口的本质差别**，也是本轮选 DisplaySoloist 的依据。
+//
+// 反过来说：**要真正把 XC 侧量出数，探针必须改成"两段式"**（注册后立即返回让出 UI 线程 →
+// 回调在 UI 线程上自收 → 再点一次取结果）。同步阻塞式探针在原理上测不到它。
+// 另外提醒：**探针绝不能为了等拍把 UI 线程堵过 ~6 秒** —— 系统会判 THREAD_BLOCK_6S 直接杀进程
+// （真机踩过：三组各等 5 秒超时，App 被 PROCESS_KILL）。所以 XC 组只短等 1.2 秒。
+int vk_backend_pace_xc(char *out, size_t cap) {
+    if (!out || cap < 256) return -1;
+    os_emit *em = &(os_emit){ out, out + cap - 1 };
+    os_ctx o;
+    int fails = 0;
+    uint64_t t0 = ms_now();
+
+    OS_EMIT(em, "=== 阶段 4（3.3-C）：帧率接入口对照 —— DisplaySoloist vs XComponent 侧 ===");
+    OS_EMIT(em, "两条官方入口、同一段渲染代码、同一轮里跑；比的是「拍子」与「回调线程」");
+
+    fails = os_setup(em, &o);
+    if (fails) {
+        os_teardown(&o);
+        OS_EMIT(em, "");
+        OS_EMIT(em, "===== 3.3-C 未全通过：图都搭不出来（失败 %d 项）=====", fails);
+        *em->p = 0;
+        return fails;
+    }
+
+    // 顺序有讲究：XC 组放最后 —— 它要设期望帧率，会参与整机刷新率决策，
+    // 夹在中间会把后面 DS 组的"拍子"污染掉。
+    static const pace_arm ARMS[] = {
+        { "① DisplaySoloist 60Hz",          1, 0, 60, PACE_ARM_FRAMES, 3 },
+        { "② DisplaySoloist 30Hz",          1, 0, 30, PACE_ARM_FRAMES, 3 },
+        { "③ DisplaySoloist 60Hz · 等 GPU", 1, 1, 60, PACE_ARM_FRAMES, 3 },
+        { "④ XComponent 侧 60Hz（同步探针下预期收不到）", 2, 0, 60, PACE_ARM_FRAMES, 3 },
+    };
+    const int NARM = (int)(sizeof ARMS / sizeof *ARMS);
+    static pace_run R;
+    pace_res res[8];
+    memset(res, 0, sizeof res);
+
+    if (NARM > (int)(sizeof res / sizeof *res)) {
+        OS_EMIT(em, "❌ 组数 %d 超出读数表容量", NARM);
+        os_teardown(&o);
+        *em->p = 0;
+        return 1;
+    }
+    for (int i = 0; i < NARM; i++) {
+        OS_EMIT(em, "");
+        fails += pace_one_arm(em, &o, &ARMS[i], &R, &res[i]);
+    }
+
+    os_teardown(&o);
+
+    OS_EMIT(em, "");
+    OS_EMIT(em, "===== 判据（两条入口差在哪）=====");
+    {
+        // ①② DisplaySoloist 两组：与 3.3-B 的读数对齐（看复现性）
+        if (res[0].ts_avg_ms > 0)
+            OS_EMIT(em, "① DisplaySoloist 60Hz：拍子平均 %.2f ms（3.3-B 同量级基线 22.33 / 22.51 ms）",
+                    res[0].ts_avg_ms);
+        else OS_EMIT(em, "① DisplaySoloist 60Hz 没收到拍");
+        if (res[1].ts_avg_ms > 0)
+            OS_EMIT(em, "② DisplaySoloist 30Hz：拍子平均 %.2f ms（理论 33.33）", res[1].ts_avg_ms);
+        else OS_EMIT(em, "② DisplaySoloist 30Hz 没收到拍");
+
+        // ③ 这一条就是本轮的核心结论
+        OS_EMIT(em, "③ XComponent 侧（同步探针）：收到 %d 拍 ⇒ %s", res[3].got,
+                res[3].got ? "居然收到了，与官方「回调在 UI 主线程」不符，需要复查"
+                           : "**一次都没收到** —— 与官方「回调函数运行于 UI 主线程」一致（UI 线程正被探针堵着）");
+
+        // ④ 线程模型 —— 这才是两条入口的本质差别
+        if (res[0].cb_tid && res[0].cb_tid != res[0].main_tid)
+            OS_EMIT(em, "④ 线程模型：DisplaySoloist 回调在 %#lx（主线程 %#lx）⇒ **独立线程**；"
+                        "XComponent 侧按官方文档在 **UI 主线程**", res[0].cb_tid, res[0].main_tid);
+        else OS_EMIT(em, "④ 线程模型：DisplaySoloist 这组没收到拍，这条只报数（见上面各组）");
+
+        // ⑤ 回调里等 GPU 的对照
+        if (res[0].ts_avg_ms > 0 && res[2].ts_avg_ms > 0)
+            OS_EMIT(em, "⑤ 回调里等 GPU：%.2f ms vs 不等 %.2f ms（×%.2f）",
+                    res[2].ts_avg_ms, res[0].ts_avg_ms, res[2].ts_avg_ms / res[0].ts_avg_ms);
+
+        // 结论（不写死，跟着上面的判据走）
+        if (!fails)
+            OS_EMIT(em, "结论：接入口选 **DisplaySoloist** —— 回调独立于 UI 线程，与"
+                        "「游戏渲染在主循环线程、不能堵 UI」的架构相符；XComponent 侧接口的回调绑在 UI 主线程，"
+                        "除非渲染本来就跑在 UI 线程，否则不合适");
+    }
+
+    OS_EMIT(em, "");
+    OS_EMIT(em, "===== 3.3-C %s：失败 %d 项（总耗时 %llums）=====",
             fails ? "未全通过" : "全部通过", fails, (unsigned long long)(ms_now() - t0));
     *em->p = 0;
     return fails;

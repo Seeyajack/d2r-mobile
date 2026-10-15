@@ -23,6 +23,17 @@ void   dm_ohos_surface_clear_window(void);
 void  *dm_ohos_surface_window(void);
 int    dm_ohos_surface_size(uint32_t *w, uint32_t *h);
 
+// ArkUI 交过来的 **XComponent 实例**（`napi_init.c` 在 Init 里 unwrap 出来后存进来）。
+// 为什么需要它：官方"可变帧率"在 **XComponent 侧另有一套接口**
+// （`OH_NativeXComponent_SetExpectedFrameRateRange` + `RegisterOnFrameCallback`，API 11），
+// 3.3-C 要拿它和 DisplaySoloist 做对照 —— 而 XComponent 实例只能在 ArkUI 那一侧拿到。
+// 用 void* 而不是 OH_NativeXComponent*：这个头不必因此去包含 ArkUI 的 xcomponent 头。
+// The XComponent instance handed over by ArkUI (stored by napi_init). The official variable frame rate
+// has a second entry point on the XComponent side; the probe compares it against DisplaySoloist, and the
+// instance is only obtainable on the ArkUI side. Kept as void* so this header need not pull in ArkUI.
+void   dm_ohos_surface_set_xc(void *xc);
+void  *dm_ohos_surface_xc(void);
+
 // 用共享上下文的实例建 VkSurfaceKHR。0 = 成功；失败原因写进 err。
 int    dm_ohos_surface_create(VkSurfaceKHR *out, char *err, size_t errcap);
 

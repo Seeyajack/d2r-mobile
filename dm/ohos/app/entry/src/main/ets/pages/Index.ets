@@ -75,6 +75,17 @@ struct Index {
         }
       })
 
+    Button('帧率接入口对照（3.3-C：DisplaySoloist vs XComponent 侧）')
+      .width('100%')
+      .onClick(() => {
+        try {
+          const ctx = getContext(this) as common.UIAbilityContext;
+          this.result = dmprobe.runVkPaceXc(ctx.filesDir);
+        } catch (err) {
+          this.result = '调用原生模块失败：' + JSON.stringify(err);
+        }
+      })
+
     Button('出图（3.3-A 回归：XComponent→swapchain→上屏）')
       .width('100%')
       .onClick(() => {

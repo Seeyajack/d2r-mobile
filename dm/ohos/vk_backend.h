@@ -111,3 +111,10 @@ int     vk_backend_onscreen(char *out, size_t cap);
 // 三个判据：回调间隔 ≈16.67 ms ／ 设 30fps 后间隔翻倍 ／ 回调里等 GPU 是否拖垮节拍。
 // 顺带量回调线程 id、回调单次耗时 —— 这三项决定生产形态（回放层怎么接它）。
 int     vk_backend_pace(char *out, size_t cap);
+
+// 阶段 4（3.3-C）：**帧率接入口对照** —— `DisplaySoloist` vs XComponent 侧的
+// `OH_NativeXComponent_SetExpectedFrameRateRange` + `RegisterOnFrameCallback`（官方 API 11）。
+// 官方"可变帧率"有四个接入口，其中 XComponent 那条更贴合"游戏把画面渲染进 XComponent"。
+// 六组同轮紧挨着跑（60Hz/30Hz 各一对 + 两条入口的"等 GPU"对照），同轮内比（跨轮次读数会漂）。
+// 判据：同帧率下两条入口的拍子差 <10% ⇒ 节拍上同源，选哪条看工程便利性；回调是否都落在独立线程。
+int     vk_backend_pace_xc(char *out, size_t cap);

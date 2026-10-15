@@ -350,12 +350,58 @@ Vulkan 版）+ 渲染通道（传统 renderPass）+ 绘制（顶点缓冲走 3.1
    DisplaySoloist 只当 **vsync 报时源**；
 2. 真在意某个帧率，要顺着"整机刷新率决策"的思路做，而不是死守 `expected`。
 
-**顺带发现（下一轮要对比的决策点）**：官方"可变帧率"有**四个接入口**——
-`expectedFrameRateRange`（ArkUI）、`displaySync`、**`OH_NativeXComponent_SetExpectedFrameRateRange`**、`DisplaySoloist`。
-其中**XComponent 那一条更贴合"游戏把画面渲染进 XComponent"的场景**：API 11 起，
-配 `OH_NativeXComponent_RegisterOnFrameCallback`，回调签名同样是 `(timestamp, targetTimestamp)`
-（NDK 里已确认存在，`native_interface_xcomponent.h` 第 1219 / 1237 行）。
-本步选 DisplaySoloist 是因为探针要在没有 ArkUI 组件树参与的情况下量节拍；**生产路径改用哪一条，留作下一轮对比。**
+#### 3.3-C 帧率接入口对照（DisplaySoloist vs XComponent 侧）—— 真机跑到一半，**结论已经很清楚**
+
+**为什么做**：官方"可变帧率"有四个接入口，其中 **XComponent 侧那一条（API 11 起，
+`OH_NativeXComponent_SetExpectedFrameRateRange` + `RegisterOnFrameCallback`）更贴合"游戏渲染进 XComponent"**，
+与 3.3-B 用的 `DisplaySoloist` 二选一需要实测。
+
+**结果（Mate 70 Pro+，2026-10-15；定稿读数来自修正后的一轮：失败 0 项、5563 ms）**：
+
+| 组 | 收拍 | 系统给的拍子（最小 / 平均 / 最大 ms） | 回调线程 |
+|---|---|---|---|
+| ① DisplaySoloist 60Hz | 60 拍 | 21.93 / **22.33** / 22.38（≈44.8 fps） | 系统另起线程 |
+| ② DisplaySoloist 30Hz | 60 拍 | 8.22 / **32.69** / 33.68（≈30.6 fps） | 系统另起线程 |
+| ③ DisplaySoloist 60Hz · **等 GPU** | 60 拍 | 16.75 / **16.75** / 16.75（**≈59.7 fps，最小=平均=最大**） | 系统另起线程 |
+| ④ **XComponent 侧 60Hz** | **0 拍** ← 一次回调都没来 | — | —（按官方：在 UI 主线程） |
+
+> ⭐ **① 与 ③ 请求的是同一个帧率（60），却分别落到 44.8 fps 与 59.7 fps** ⇒
+> **系统的帧率决策不是确定性的**（面板档位/功耗/热状态都在参与）。这一条把"节拍必须自己排"钉死了：
+> 同一个请求在同一个应用里都能给出两个不同的结果，任何依赖它的设计都不成立。
+>
+> （③ 的极小=平均=极大=16.75 ms，是这一轮唯一一次拿到**精确 60fps** 的记录 ——
+> 但它是**碰上的**，不是设出来的，不能当能力用。）
+
+**根因（两条独立证据互相印证）**：
+
+1. **官方明文**（《请求自绘制内容绘制帧率》）：**"回调函数运行于 UI 主线程"**，且
+   **"从 API version 18 开始……只在 XComponent 上树期间能收到期望回调"**（本机 API 26 ⇒ 按 18+ 行为）。
+2. **真机证据**：探针是**同步阻塞 UI 线程**等拍的 —— 而 XC 侧回调偏偏要在 UI 主线程上派发，
+   UI 线程被自己堵住，回调就永远投递不进来 ⇒ **0 拍**。
+
+**⭐ 顺带撞到一个必须记的系统行为**：三个 XC 组各等 5 秒超时，UI 线程被堵了 20 秒 ⇒
+系统判定 **`THREAD_BLOCK_6S`，App 被 `PROCESS_KILL` 杀掉**（系统日志原文：
+`appFreeze happend, eventName: APP_INPUT_BLOCK` → `[FRAMEWORK,PROCESS_KILL] reason=THREAD_BLOCK_6S`）。
+⇒ **探针（以及将来的游戏）都不许把 UI 线程堵超过 ~5 秒**；3.3-B 之所以活着，是因为它总共只堵 5.4 秒。
+**已修**：XC 组只短等 1.2 秒（原理上收不到，够确认即可），整轮回到 5.56 秒 ⇒ 不再触发看门狗。
+
+**这一轮已经得出的交付结论**：**两条入口不是"同源的两个门面"，它们在回调线程模型上有实质差别**：
+
+| | `DisplaySoloist` | XComponent 侧接口 |
+|---|---|---|
+| 回调线程 | **系统另起的独占线程**（真机实测） | **UI 主线程**（官方明文） |
+| 对游戏（渲染在主循环线程、不能堵 UI） | **合适** | 不合适 |
+| 实例生命周期 | 要自己 Create/Destroy | 随 XComponent 组件走 |
+
+⇒ **生产接入口选 `DisplaySoloist`**（3.3-B 已验证：独立线程、帧率可设、回调 ~3 ms）。
+
+**仍未做（要才能把 XC 侧量出数）**：XC 那条要真正读数，必须把探针改成**两段式**——
+按钮一「注册后立即返回」（把 UI 线程让出来），回调在 UI 线程上自己出图收拍；
+按钮二「取结果」。**同步阻塞式探针在原理上就测不到它。** 是否值得为此再改一轮，见待办。
+
+**四个接入口备查**：`expectedFrameRateRange`（ArkUI）、`displaySync`、
+`OH_NativeXComponent_SetExpectedFrameRateRange` + `RegisterOnFrameCallback`（API 11，随 XComponent）、
+`DisplaySoloist`（本步选用）。回调签名两边都是 `(timestamp, targetTimestamp)`。
 
 ## 四、鸿蒙 NEXT 特有游戏机制的接入点（按阶段落位）
 

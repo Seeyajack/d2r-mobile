@@ -14,6 +14,7 @@
 
 static void    *g_window;
 static uint32_t g_w, g_h;
+static void    *g_xc;      // ArkUI 的 XComponent 实例（帧率接口要用，见头文件里的理由）
 
 void dm_ohos_surface_set_window(void *window, uint32_t w, uint32_t h) {
     g_window = window; g_w = w; g_h = h;
@@ -24,6 +25,11 @@ void dm_ohos_surface_clear_window(void) {
     LOG("出图：XComponent 窗口已销毁，已清空");
 }
 void  *dm_ohos_surface_window(void) { return g_window; }
+void   dm_ohos_surface_set_xc(void *xc) {
+    g_xc = xc;
+    LOG("帧率接口：拿到 ArkUI 的 XComponent 实例 %p", xc);
+}
+void  *dm_ohos_surface_xc(void) { return g_xc; }
 int    dm_ohos_surface_size(uint32_t *w, uint32_t *h) {
     if (!g_window || !g_w || !g_h) return -1;
     if (w) *w = g_w;
