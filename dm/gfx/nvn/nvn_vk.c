@@ -341,11 +341,65 @@ typedef struct {
     const tex_t *t; uint64_t serial;
     VkImage img; VkDeviceMemory mem; VkImageView view; VkRenderPass rp; VkFramebuffer fb;
     uint32_t w, h; VkFormat fmt;
+    int ext; VkImageLayout ext_layout;      // 外部目标（出图合流）：只引用，不持有；结束布局由调用方定
 } vk_rt_ent;
 static vk_rt_ent *g_rts; static int g_nrt, g_rtcap;
 
+// ---- 出图合流：外部渲染目标（见 nvn_vk.h）----
+// 为什么需要它：回放层自建的渲染目标结束布局是 TRANSFER_SRC（供读回），而"上屏"要求画进交换链图像、
+// 结束布局是 PRESENT_SRC_KHR。与其让回放层去认识交换链，不如让调用方把"画到哪"递进来 ——
+// 回放层仍然是"按命令流选目标"，只是遇到登记过的就换成调用方那一份。
+typedef struct {
+    const tex_t *t;
+    VkImage img; VkImageView view; VkRenderPass rp; VkFramebuffer fb;
+    uint32_t w, h; VkFormat fmt; VkImageLayout final_layout;
+} vk_ext_rt;
+static vk_ext_rt g_ext[8]; static int g_next;
+
+static vk_ext_rt *ext_get(const tex_t *t) {
+    for (int i = 0; i < g_next; i++) if (g_ext[i].t == t) return &g_ext[i];
+    return NULL;
+}
+
+int nvn_vk_target_bind_external(const void *tex, VkImage img, VkImageView view, VkRenderPass rp,
+                                VkFramebuffer fb, uint32_t w, uint32_t h, VkFormat fmt,
+                                VkImageLayout final_layout) {
+    if (!tex || !img || !rp || !fb || !w || !h) { set_err("外部渲染目标：参数不全"); return -1; }
+    vk_ext_rt *x = ext_get((const tex_t *)tex);
+    if (!x) {
+        if (g_next == (int)(sizeof g_ext / sizeof *g_ext)) { set_err("外部渲染目标表已满"); return -1; }
+        x = &g_ext[g_next++];
+        memset(x, 0, sizeof *x);
+        x->t = (const tex_t *)tex;
+    }
+    x->img = img; x->view = view; x->rp = rp; x->fb = fb;
+    x->w = w; x->h = h; x->fmt = fmt; x->final_layout = final_layout;
+    // 已经建过的同贴图 rt 条目要作废：下一帧换的是另一张交换链图像，旧的不能留着被复用
+    for (int i = 0; i < g_nrt; i++) if (g_rts[i].t == (const tex_t *)tex) g_rts[i].t = NULL;
+    return 0;
+}
+
+void nvn_vk_target_unbind_external(const void *tex) {
+    for (int i = 0; i < g_next; i++) if (g_ext[i].t == (const tex_t *)tex) g_ext[i].t = NULL;
+    for (int i = 0; i < g_nrt; i++) if (g_rts[i].t == (const tex_t *)tex) g_rts[i].t = NULL;
+}
+
 static vk_rt_ent *rt_get(const tex_t *t) {
     for (int i = 0; i < g_nrt; i++) if (g_rts[i].t == t) return &g_rts[i];
+
+    // 登记过外部目标就以它为准（出图合流）——自建那一整段整段跳过
+    vk_ext_rt *x = ext_get(t);
+    if (x && x->img) {
+        vk_rt_ent e; memset(&e, 0, sizeof e);
+        e.t = t; e.serial = t->serial; e.w = x->w; e.h = x->h; e.fmt = x->fmt;
+        e.img = x->img; e.view = x->view; e.rp = x->rp; e.fb = x->fb;
+        e.ext = 1; e.ext_layout = x->final_layout;
+        if (g_nrt == g_rtcap) { g_rtcap = g_rtcap ? g_rtcap * 2 : 16; g_rts = realloc(g_rts, (size_t)g_rtcap * sizeof *g_rts); }
+        g_rts[g_nrt++] = e;
+        LOG("渲染目标（外部/出图）：%ux%u VkFormat %d，结束布局 %d（图像由调用方持有）",
+            e.w, e.h, (int)e.fmt, (int)e.ext_layout);
+        return &g_rts[g_nrt - 1];
+    }
 
     VkDevice dev = dm_ohos_vk_device();
     if (!dev) { set_err("渲染目标：共享上下文不可用"); return NULL; }
@@ -555,6 +609,9 @@ static void pass_open(vk_rt_ent *rt) {
     bi.renderPass = rt->rp; bi.framebuffer = rt->fb;
     bi.renderArea.extent.width = rt->w; bi.renderArea.extent.height = rt->h;
     bi.clearValueCount = 1; bi.pClearValues = &cv;
+    // 诊断（3.4-D 查"合流后屏幕全黑"）：把**实际用的目标**打出来 —— 运行期证实通道/帧缓冲就是我递进去那份
+    LOG("通道打开：%s目标 %ux%u，rp=%p fb=%p img=%p",
+        rt->ext ? "**外部/出图**" : "自建", rt->w, rt->h, (void *)rt->rp, (void *)rt->fb, (void *)rt->img);
     vkCmdBeginRenderPass(g_cb, &bi, VK_SUBPASS_CONTENTS_INLINE);
     g_pass_open = 1; g_pass_rt = rt;
     g_st.passes++;
@@ -893,4 +950,8 @@ int nvn_vk_target_extent(uint32_t *w, uint32_t *h) {
     if (h) *h = g_rts[g_nrt - 1].h;
     return 0;
 }
-VkImageLayout nvn_vk_target_layout(void) { return VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL; }
+VkImageLayout nvn_vk_target_layout(void) {
+    // 外部目标（出图合流）的结束布局由调用方的通道决定（上屏是 PRESENT_SRC_KHR）；自建的一律 TRANSFER_SRC
+    if (S.rt && g_nrt) { vk_rt_ent *e = &g_rts[g_nrt - 1]; if (e->ext) return e->ext_layout; }
+    return VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+}

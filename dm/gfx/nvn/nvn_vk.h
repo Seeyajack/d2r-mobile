@@ -101,6 +101,18 @@ VkImage       nvn_vk_target_image(void);
 int           nvn_vk_target_extent(uint32_t *w, uint32_t *h);
 VkImageLayout nvn_vk_target_layout(void);
 
+// ---------------------------------------------------------------- 出图合流：外部渲染目标
+// 回放层平时**自建**渲染目标（`finalLayout = TRANSFER_SRC`，供读回）。但"画到屏幕"要求
+// 画进**交换链图像**、且通道结束布局是 `PRESENT_SRC_KHR` —— 所以留这道缝：
+//   把外部目标登记在某个贴图对象上，回放层按命令流选目标时遇到它就直接用调用方的
+//   图像 / 通道 / 帧缓冲，**不再自建**；没登记时行为与原来一字不差。
+// 所有权：图像、通道、帧缓冲**都由调用方持有与销毁**，回放层只是引用（内部不打销毁标记）。
+// 典型用法（见 vk_backend_onscreen_replay）：每帧取到交换链图像后重新绑一次即可。
+int  nvn_vk_target_bind_external(const void *tex, VkImage img, VkImageView view, VkRenderPass rp,
+                                 VkFramebuffer fb, uint32_t w, uint32_t h, VkFormat fmt,
+                                 VkImageLayout final_layout);
+void nvn_vk_target_unbind_external(const void *tex);
+
 #ifdef __cplusplus
 }
 #endif
