@@ -124,3 +124,11 @@ int     vk_backend_pace_xc(char *out, size_t cap);
 // GPU 侧自建 `VkImage` + 暂存上传 + 采样器/描述符 + 全屏 1:1 采样，读回后**逐像素对照**（±1）。
 // 偏心地讲：无论后续选"CPU 解→未压缩"（C1）还是"GPU 转码"（C3），这条参照链都绕不开。
 int     vk_backend_tex(char *out, size_t cap);
+
+// 阶段 4（3.4-B）：**块线性解排布**（Tegra GOB）—— 直接收编上游单测 `dm/gfx/tex/tests/t_tex.c`
+// （A 往返 / B 手算地址 / C·D 真数据对拍+错块高负对照 / E 手工 3D 标记），
+// 按名字 dlopen 它的 .so 取 main 来调，printf 用宿主单测那套捕获。
+// 这块代码（`nvn_tex.c` / `nvn_deswizzle.c`）平台中立，**零改动复用**。
+// ⚠️ C/D 段要游戏样本（fetch_samples.py 产出）；缺样本时它会报两处红 —— 那是"未跑"，报告里会按段归类分清。
+// dir = 应用数据目录（捕获文件与样本目录都放它下面）。
+int     vk_backend_tex_layout(const char *dir, char *out, size_t cap);

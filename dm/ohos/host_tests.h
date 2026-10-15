@@ -39,3 +39,10 @@ extern const int dm_host_tests_count;
 // filter decides which tests run (handy when debugging): empty = resume, "*" = wipe the log and rerun
 // everything, anything else = run only the test with that exact name, ignoring the recorded results.
 int dm_host_tests_run(const char *logpath, const char *filter, char *out, size_t cap);
+
+// ---- 给"收编上游别的测试"用的输出捕获（3.4-B 的贴图单测走这条）----
+// 上游那些测试是用 printf 报结果的，而 App 的 stdout 看不见；这里把被测代码的 stdout **与 stderr**
+// 临时引到 path 文件里，跑完再读回来贴进探针报告。语义与宿主单测用的是同一套实现。
+// s尾：返回 >=0 时应原样传回 dm_test_capture_end。
+int  dm_test_capture_begin(const char *path);
+void dm_test_capture_end(int saved);

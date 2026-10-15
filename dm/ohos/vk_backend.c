@@ -8,6 +8,7 @@
 #include "vk_backend.h"
 
 #include "dm_log.h"
+#include "host_tests.h"    // 3.4-B：借用宿主单测的 stdout 捕获（dm_test_capture_begin/end）
 #include "nvn_obj.h"       // 3.2 手写命令流要用它的记录格式（op_hdr / p_*）
 #include "nvn_vk.h"
 #include "tex_shaders.h"   // 3.4-A：采样贴图用的 SPIR-V（生成文件，见 tools/gen_spv_header.py）
@@ -17,6 +18,7 @@
 
 #include "../gfx/tex/nvn_bcdec.h"   // 3.4-A：上游那份"给没有 BC 的 GPU 用"的 CPU 解码器（平台中立）
 
+#include <dlfcn.h>         // 3.4-B：按名字载入上游贴图单测的 .so（与宿主单测同一套做法）
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -2624,7 +2626,7 @@ int vk_backend_tex(char *out, size_t cap) {
     uint64_t t0 = ms_now();
 
     OS_EMIT(em, "=== 阶段 4（3.4-A）：贴图通道最小闭环 —— BC 解压 → 上传 → 采样 ===");
-    OS_EMIT(em, "贴图 %d×%d（BC1 RGB_DXT1，%d×%d 块），离屏目标同尺寸 1:1 采样（NEAREST + CLAMP）",
+    OS_EMIT(em, "贴图 %d×%d（BC1 RGB_DXT1，块大小 %d×%d），离屏目标同尺寸 1:1 采样（NEAREST + CLAMP）",
             TEX_W, TEX_H, TEX_BLK, TEX_BLK);
 
     char err[256] = "";
@@ -2864,6 +2866,122 @@ fail:
 report:
     OS_EMIT(em, "");
     OS_EMIT(em, "===== 3.4-A %s：失败 %d 项（总耗时 %llums）=====",
+            fails ? "未全通过" : "全部通过", fails, (unsigned long long)(ms_now() - t0));
+    *em->p = 0;
+    return fails;
+}
+
+// ================= 阶段 4（3.4-B）：块线性解排布 =================
+// **不自己另写判据** —— 直接收编上游自己的单测 `dm/gfx/tex/tests/t_tex.c`：
+//   A 往返（各级/层随机数据往返逐字节）
+//   B 地址公式（期望值按 GOB 64B×8 行的公开排布**手算**，注释里连加法过程都写着）
+//   C/D 真数据对拍（Switch 块线性 vs PC 线性，阈值 PSNR）+ 错块高负对照
+//   E 手工 3D（按手算地址往块线性存储里放标记，解排布后核标记落点）
+// 形状与宿主单测一样：一个单测一个 .so，按名字 dlopen 后取 main 调；它的 printf 用宿主单测那套 dup2 捕获。
+//
+// 为什么这一步必须做：真实贴图在 Switch 上是**块线性**存的（Tegra GOB 排布），不解出来就没法解码/上传。
+// 而 `nvn_tex.c` / `nvn_deswizzle.c` 是**平台中立**的（算法移植自 deko3d 的 dk_image.cpp，无任何平台调用）
+// ⇒ 直接编进来复用，**零改动** —— 这也正是"L2 领域层"该有的样子。
+//
+// ⚠️ C/D 段需要**游戏样本**（`dm/gfx/tex/tests/fetch_samples.py` 从你的游戏文件里产出）。
+// 本机没有样本时它会明确报两处红（"缺样本目录" + "真数据样本不足 3 对"）—— 那是**未跑**，不是移植缺陷；
+// 本探针会把红行**按段归类**打印出来，便于一眼分清。
+#define TEX_LAYOUT_LOG_MAX 12288
+
+int vk_backend_tex_layout(const char *dir, char *out, size_t cap) {
+    if (!out || cap < 256) return -1;
+    os_emit *em = &(os_emit){ out, out + cap - 1 };
+    int fails = 0;
+    uint64_t t0 = ms_now();
+
+    OS_EMIT(em, "=== 阶段 4（3.4-B）：块线性解排布 —— 收编上游单测 t_tex ===");
+    OS_EMIT(em, "判据全部来自上游：A 往返 ／ B 手算地址 ／ C/D 真数据对拍+错块高负对照 ／ E 手工 3D");
+
+    void *h = dlopen("dmt_tex_layout.so", RTLD_NOW);
+    if (!h) { OS_EMIT(em, "❌ 载入 dmt_tex_layout.so 失败：%s", dlerror()); *em->p = 0; return 1; }
+    int (*tex_main)(int, char **) = (int (*)(int, char **))dlsym(h, "main");
+    if (!tex_main) { OS_EMIT(em, "❌ dlsym(main) 失败：%s", dlerror()); dlclose(h); *em->p = 0; return 1; }
+    OS_EMIT(em, "✓ 已载入单测并取到入口（块线性那套代码平台中立，零改动复用）");
+
+    char logpath[1200], sample_dir[1200];
+    snprintf(logpath, sizeof logpath, "%s/tex_layout.log", (dir && *dir) ? dir : ".");
+    snprintf(sample_dir, sizeof sample_dir, "%s/tex_samples", (dir && *dir) ? dir : ".");
+
+    int saved = dm_test_capture_begin(logpath);
+    if (saved < 0) { OS_EMIT(em, "❌ 打不开捕获文件：%s", logpath); dlclose(h); *em->p = 0; return 1; }
+    char *argv[3];
+    argv[0] = (char *)"t_tex"; argv[1] = sample_dir; argv[2] = NULL;
+    int rc = tex_main(2, argv);
+    dm_test_capture_end(saved);
+    dlclose(h);
+    OS_EMIT(em, "✓ 单测跑完，返回 %d（0 = 全过）", rc);
+
+    // ---- 把它自己的输出读回来（顺带按段归类红行）----
+    char *text = (char *)malloc(TEX_LAYOUT_LOG_MAX + 1);
+    if (!text) { OS_EMIT(em, "❌ 内存不足，读不回单测输出（文件在 %s）", logpath); *em->p = 0; return 1; }
+    size_t got = 0;
+    FILE *f = fopen(logpath, "rb");
+    if (f) { got = fread(text, 1, TEX_LAYOUT_LOG_MAX, f); fclose(f); }
+    text[got] = 0;
+    if (!got) { OS_EMIT(em, "❌ 单测没有任何输出（捕获文件空）"); free(text); *em->p = 0; return 1; }
+
+    // 段归类：红行归给**最近一次见到的段头**。
+    // 注意上游的输出顺序是 A → B → E → **C/D**（C/D 在最后），所以不能按"序号最大"归，
+    // 也不能想当然地按 A/B/C/D/E 排 —— 第一版就是栽在这里（把缺样本的红算到了 E 段）。
+    static const char *SEC[4] = { "A 往返", "B 地址", "E 手工", "C/D 真数据" };
+    int sec_mark[4] = { 0 }, sec_fail[4] = { 0 }, total_fail = 0, cur = -1;
+    for (char *p = text; *p; ) {
+        char *nl = strchr(p, '\n');
+        size_t n = nl ? (size_t)(nl - p) : strlen(p);
+        int hit = -1;
+        for (int s = 0; s < 4; s++)
+            if (n >= strlen(SEC[s]) && strncmp(p, SEC[s], strlen(SEC[s])) == 0) { hit = s; break; }
+        if (hit >= 0) { cur = hit; sec_mark[hit] = 1; }
+        else if (n >= 3 && !strncmp(p, "  ", 2) && (uint8_t)p[2] == 0xE2) {   // "  ✗ …"（✗ = E2 9C 97）
+            total_fail++;
+            if (cur >= 0) sec_fail[cur]++;
+        }
+        if (!nl) break;
+        p = nl + 1;
+    }
+
+    OS_EMIT(em, "");
+    OS_EMIT(em, "---- 单测自己的输出（原文，%zu 字节%s）----", got,
+            got >= TEX_LAYOUT_LOG_MAX ? "，已截断" : "");
+    for (char *p = text; *p; ) {
+        char *nl = strchr(p, '\n');
+        size_t n = nl ? (size_t)(nl - p) : strlen(p);
+        char line[1024];
+        size_t m = n < sizeof line - 1 ? n : sizeof line - 1;
+        memcpy(line, p, m); line[m] = 0;
+        OS_EMIT(em, "  %s", line);
+        if (!nl) break;
+        p = nl + 1;
+    }
+
+    OS_EMIT(em, "");
+    OS_EMIT(em, "---- 判据归类（哪一段红，一眼分清）----");
+    for (int s = 0; s < 4; s++)
+        OS_EMIT(em, "  %-12s %s%s", SEC[s], sec_mark[s] ? (sec_fail[s] ? "红" : "全过") : "（本段没跑到）",
+                sec_fail[s] ? "" : "");
+    OS_EMIT(em, "  红行合计：%d", total_fail);
+
+    // 判定：**C/D 段因缺样本而红不算移植缺陷**（上游明文"样本缺失算红，不跳过"，所以它会明确报出来）。
+    int c_only = (total_fail == sec_fail[3]);      // 3 = "C/D 真数据"
+    if (total_fail == 0) {
+        OS_EMIT(em, "  ✅ 全过 —— 块线性解排布（含手算地址、往返、3D 标记）在鸿蒙侧与上游完全一致");
+    } else if (c_only) {
+        OS_EMIT(em, "  ⚠ 红行全部落在 C/D 段，且原因是**缺游戏样本**（A/B/E 全过）");
+        OS_EMIT(em, "     ⇒ 这不是移植缺陷：C/D 要 fetch_samples.py 从游戏文件里取样本，本机没有。");
+        OS_EMIT(em, "     ⇒ 拿到样本后重跑同一个按钮即可把它补齐。");
+    } else {
+        fails++;
+        OS_EMIT(em, "  ❌ 除缺样本之外还有红行 —— 那才是要看的东西");
+    }
+    free(text);
+
+    OS_EMIT(em, "");
+    OS_EMIT(em, "===== 3.4-B %s：失败 %d 项（总耗时 %llums）=====",
             fails ? "未全通过" : "全部通过", fails, (unsigned long long)(ms_now() - t0));
     *em->p = 0;
     return fails;

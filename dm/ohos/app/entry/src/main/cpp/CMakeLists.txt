@@ -60,3 +60,15 @@ target_link_libraries(dmprobe PUBLIC libace_napi.z.so libace_ndk.z.so libhilog_n
 # 结构照上游"每个单测一个可执行文件"。跑测框架按名字 dlopen 它们、取各自的 main 来调。
 # 这一段是生成文件，改单测清单请改 dm/host/tests/Makefile 再重跑生成器。
 include(${DM_DIR}/ohos/host_tests_gen.cmake)
+
+# ---- 图形层的贴图单测（3.4-B）：上游 dm/gfx/tex/tests/t_tex.c ----
+# 形状与宿主单测完全一样（一个单测一个 .so，由探针按名字 dlopen 后取 main 调）——
+# 为什么不自己另写一套判据：上游那个单测里 A 往返 / B 手算地址 / C 真数据对拍 / D 错块高负对照 /
+# E 手工 3D 标记 五套判据都是现成的，而且 B 的期望值连推导过程都写在注释里（手算），照抄不如收编。
+# 块线性那套代码（nvn_tex.c / nvn_deswizzle.c）**平台中立**，直接编进来，零改动。
+add_library(dmt_tex_layout SHARED
+    "${DM_REPO}/dm/gfx/tex/tests/t_tex.c"
+    "${DM_REPO}/dm/gfx/tex/nvn_deswizzle.c"
+    "${DM_REPO}/dm/gfx/nvn/nvn_tex.c"
+)
+dm_host_test_config(dmt_tex_layout)

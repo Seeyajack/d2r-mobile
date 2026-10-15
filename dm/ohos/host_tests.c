@@ -184,8 +184,12 @@ static void capture_end(int saved) {
     if (g_saved_err >= 0) { dup2(g_saved_err, STDERR_FILENO); close(g_saved_err); g_saved_err = -1; }
 }
 
-static uint64_t now_ms(void) {
-    struct timespec ts;
+// 对外的一对包装：让"收编别的上游测试"（3.4-B 的贴图单测）用同一套捕获，不必各自再写一遍 dup2。
+// 纯新增，宿主单测那条路径一个字没动。
+int  dm_test_capture_begin(const char *path) { return capture_begin(path); }
+void dm_test_capture_end(int saved) { capture_end(saved); }
+
+static uint64_t now_ms(void) {    struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1000ull + (uint64_t)ts.tv_nsec / 1000000ull;
 }
