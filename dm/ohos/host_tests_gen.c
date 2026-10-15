@@ -28,14 +28,11 @@ const dm_test_ent dm_host_tests[] = {
     { "t_i18n[systw]", "dmt_t_i18n", "systw", "TMPDIR=@" },
     { "t_i18n[tags]", "dmt_t_i18n", "tags", "TMPDIR=@" },
     { "t_i18n[game]", "dmt_t_i18n", "game", "TMPDIR=@" },
-    { "t_interaction_diag", "dmt_t_interaction_diag", "", "" },
-    { "t_map_diag", "dmt_t_map_diag", "", "" },
     { "t_modetx", "dmt_t_modetx", "", "" },
     { "t_movie", "dmt_t_movie", "", "" },
     { "t_namegen", "dmt_t_namegen", "", "" },
     { "t_oe", "dmt_t_oe", "", "" },
     { "t_padmap", "dmt_t_padmap", "", "" },
-    { "t_rift_wave", "dmt_t_rift_wave", "", "" },
     { "t_romfs_validate", "dmt_t_romfs_validate", "", "" },
     { "t_romfs_validate", "dmt_t_romfs_validate", "", "DM_ROMFS=$(DM_ROOT)/data/switch/3.3.94012/Update/RomFS" },
     { "t_rwlv", "dmt_t_rwlv", "", "" },
@@ -46,7 +43,6 @@ const dm_test_ent dm_host_tests[] = {
     { "t_touch", "dmt_t_touch", "", "" },
     { "t_touch_mac", "dmt_t_touch_mac", "", "" },
     { "t_unit_level", "dmt_t_unit_level", "", "" },
-    { "t_warp_diag", "dmt_t_warp_diag", "", "" },
     { "t_widget", "dmt_t_widget", "", "" },
 };
 const int dm_host_tests_count = (int)(sizeof dm_host_tests / sizeof dm_host_tests[0]);

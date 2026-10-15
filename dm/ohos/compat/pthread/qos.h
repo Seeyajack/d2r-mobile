@@ -27,9 +27,21 @@ typedef enum {
     QOS_CLASS_UNSPECIFIED      = 0x00
 } qos_class_t;
 
+// 我们**只记住"被告知过什么"**，不假装系统按它调度过 —— 与文件头那条原则一致。
+// 为什么要记：上游 `hle_audio.c` 会用 `qos_class_self()` 取一个"基线等级"，事后再设回去；
+// 不记的话它永远拿到 UNSPECIFIED（也能跑，但那是"碰巧能跑"，不是"语义对上了"）。
+// 每个线程一份（`__thread`）；它是头文件里的 static，所以各编译单元各有一份 —— 对"镜像调用"够用。
+static __thread qos_class_t dm_shim_qos_class __attribute__((unused)) = QOS_CLASS_UNSPECIFIED;
+
 static inline int pthread_set_qos_class_self_np(qos_class_t qos_class, int relative_priority) {
-    (void)qos_class; (void)relative_priority;
+    (void)relative_priority;
+    dm_shim_qos_class = qos_class;
     return 0;
+}
+
+// 当前线程的 QoS 等级（苹果那边是"读线程自己的标签"）。见上面的说明：只回放我们被告知过的值。
+static inline qos_class_t qos_class_self(void) {
+    return dm_shim_qos_class;
 }
 
 static inline int pthread_get_qos_class_np(pthread_t thread, qos_class_t *qos_class, int *relative_priority) {

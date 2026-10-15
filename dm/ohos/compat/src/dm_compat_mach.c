@@ -227,3 +227,15 @@ kern_return_t task_threads(mach_port_t task, thread_act_array_t *list, mach_msg_
     dm_thread_api_warn("task_threads");
     return KERN_FAILURE;
 }
+
+// ---- libSystem 私有接口 thread_selfcounts：本线程累计 {指令数, 周期数}（并入上游时新带进来的依赖）----
+// 上游用它做"每帧每个模块执行了多少条指令"的读数（`hle_nvn.c` 的 thr_instr / thr_counts、`dm_prof.c`）。
+// 鸿蒙一侧**没有指令计数器**：没有等价的私有接口，/proc 也只给 CPU 时间、不给指令数。
+// 所以这里**如实返回失败**并把调用方的缓冲清零 —— 调用方读到 0 就知道"这项读数不可用"，
+// 而不是读到垃圾数（它们本来就是 DM_PUMP_PROF 这类诊断开关，读数是 0 就是没生效，不影响游戏行为）。
+// 想要同类信息，正路是用 clock_gettime(CLOCK_THREAD_CPUTIME_ID) 量时间 —— 那是性能调优阶段的事。
+int thread_selfcounts(int type, void *buf, size_t nbytes) {
+    (void)type;
+    if (buf && nbytes) memset(buf, 0, nbytes);
+    return -1;
+}

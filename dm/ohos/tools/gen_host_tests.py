@@ -44,6 +44,25 @@ SKIP = {
     't_rift_next': '同 t_rift_clock：上游规则用 -dead_strip 只链 t_rift_next.c + hle_os.c，'
                    '而 hle_os.c 引用的 dm_guest_clock_advanced 定义在 hle_thread.c（没链）⇒ ELF 上缺符号',
     't_rift_oldrun': '同 t_rift_clock：上游规则用 -dead_strip 只链 t_rift_oldrun.c + hle_os.c ⇒ ELF 上缺符号',
+    # 下面三个是并入上游 4 个提交（2026-10-15）时新增的单测，同类问题：它们引用**整个宿主应用层**
+    # （缺 17~20 个符号，横跨 dm_prof / dm_rift / dm_beltauto / dm_potpick / dm_padmode / dm_pouch /
+    #   dm_cursor / dm_custom / dm_actions / dm_pages / dm_runeword / dm_vault_ui / dm_hud …，
+    #   还有 g_mod / g_nmod / g_dm_seek_tp 这类**全局变量**）。macOS 靠 -dead_strip 丢掉没调到的
+    # 引用所以上游清单很短；ELF 的 -shared 丢不掉 ⇒ 缺符号。真机编译已实测（一次构建同时暴露三个）。
+    # 要搬得先做「宿主闭包」机制：从缺失符号反推需要哪些宿主源文件（还能顺带救回上面三条 rift 测试）。
+    't_interaction_diag': '缺 20 个宿主符号（dm_ipf_* / dm_rift_client_pump / dm_beltauto_step / dm_potpick_step /'
+                          ' dm_padmode_step / dm_pouch_step / dm_cur_tick / dm_custom_get / dm_gfx_shot_at /'
+                          ' dm_screen_real / dm_ui_proj_dy / g_mod / g_nmod / g_dm_seek_tp* …）——要「宿主闭包」，留作待办',
+    't_map_diag': '缺 20 个宿主符号（dm_cursor_item / dm_held_* / dm_item_compare / dm_padmode_* /'
+                  ' dm_pages_request_flip / dm_pouch_tip_gate / dm_runeword_* / dm_shop_open / dm_ui_hover_now /'
+                  ' dm_vault_ui_* / now_ns …）——要「宿主闭包」，留作待办',
+    't_rift_wave': '缺 17 个宿主符号（dm_str / dm_game_notice / dm_hud_request_players / dm_guest_clock_advanced /'
+                   ' dm_door_label / dm_request_save / dm_restart_request / dm_save_workdir / g_nmod /'
+                   ' gate_obs_* / uimsg_subscribe / crash_watch_frame …）——要「宿主闭包」，留作待办',
+    't_warp_diag': '同上（上一轮构建早退没暴露，第二轮才现形）：缺 15 个宿主符号（dm_str / dm_game_notice /'
+                   ' dm_hud_request_players / dm_door_label / dm_request_save / dm_restart_request /'
+                   ' dm_save_workdir / dm_quiet_difficulty_msg / g_mod / g_nmod / gate_obs_* / guest_ns …）'
+                   '——要「宿主闭包」，留作待办',
 }
 
 # 每个单测 .so 都要带上的支撑源（相对仓库根）：垫片层 + 我们自己的日志/音频后端。
