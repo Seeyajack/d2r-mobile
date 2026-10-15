@@ -42,6 +42,7 @@ SRC=\
 	dm_pages.c \
 	dm_potpick.c \
 	dm_pouch.c \
+	dm_cloudmerge.c \
 	dm_rift.c \
 	dm_rift_ui.c \
 	dm_runeword.c \
@@ -57,6 +58,7 @@ SRC=\
 	dm_vault.c \
 	dm_vault_ui.c \
 	dm_world.c \
+	dm_prof.c \
 	thread.c \
 	touch_mac.c \
 	../ios/Sources/cloud_ios.m \

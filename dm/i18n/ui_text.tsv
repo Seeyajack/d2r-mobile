@@ -75,6 +75,10 @@ dmCustomDropHaptic	高价值物品掉落时震动	Vibrate on valuable drops	自�
 dmCustomGemPick	符文与宝石自动拾取（直接进高级仓库）	Auto-stash runes & gems	自定义页开关
 dmCustomStoreBtn	背包「存放」按钮	Inventory Deposit button	自定义页开关
 dmCustomEcoFps	省电模式（30 帧）	Power saver (30 fps)	自定义页开关
+dmCustomQ3dSmooth	流畅优先	Smoothness first	自定义页「3D 画质」单选的第一项（缺省；dm_custom.c 键 q3d=0）
+dmCustomQ3dSmoothHint	掉帧时自动降低 3D 画面清晰度	Lowers 3D resolution when frames drop	流畅优先下面的说明小字
+dmCustomQ3dQuality	画质优先	Quality first	自定义页「3D 画质」单选的第二项（q3d=1）
+dmCustomQ3dQualityHint	始终保持设定的 3D 清晰度	Always keeps the set 3D resolution	画质优先下面的说明小字
 dmCustomLootFilter	掉落过滤（噩梦起自动隐藏杂物）	Loot Filter (auto, Nightmare+)	自定义页开关；Loot Filter 是原版过滤器的英文名
 dmCustomAutoBuff	自动补上增益技能（站着不动时）	Auto-recast buffs when idle	自定义页开关
 dmCustomLang	语言 / Language	语言 / Language	自定义页语言那一行的标签。两种界面写同样的中英两个词：这一行的文字控件指定原版的全球字体 BlizzardGlobal（英文界面缺省的 Formal 字体没有汉字，全球字体有；原版标题页、队伍名、合规提示同样按控件指定它）
@@ -163,6 +167,12 @@ dmOldWhySuffix	\n（%s）	\n(%s)	老机型弹框正文末尾的原因
 dmOldDl	直接下载	Download	老机型弹框按钮
 dmOldCopied	已经拷好了	Already Copied	老机型弹框按钮
 dmOldQuit	退出	Quit	老机型弹框按钮
+dmPackBadTitle	这个安装包还不能玩	This Package Is Not Ready	安装包自检弹框标题（main.m pack_check：装了没做过第一步的壳 / 拼装的包）
+dmPackBadMiss	安装包里缺游戏内容（缺 %d 项，如 %@）。	The package is missing game content (%d items, e.g. %@).	安装包自检弹框正文第一句：缺壳清单里的项
+dmPackBadProd	安装包是用不同版本拼成的（壳是 %@，做进去的内容是 %@）。	The package mixes versions (shell %@, built-in content %@).	安装包自检弹框正文第一句：打包记录的产物代号与壳不一致
+dmPackBadHow	发布页上的壳是做安装包的原料，不能直接装来玩。\n\n怎么做：在电脑上打开 github.com/jhaizhou-ops/d2r-mobile，照 docs/NO_XCODE 的第一步用 d2rm_pack.py 把你的游戏内容做进同一版本的壳，再装它输出的那个安装包。	The shell on the releases page is build input, not an app to install.\n\nWhat to do: on a computer, open github.com/jhaizhou-ops/d2r-mobile and follow step 1 of docs/NO_XCODE — run d2rm_pack.py to build your game content into the shell of the same release, then install the package it outputs.	安装包自检弹框正文后段（缺项与版本不一致共用）
+dmGpuOldTitle	这台设备玩不了	This Device Is Not Supported	图形芯片不支持 Metal 3 时的弹框标题（main.m）
+dmGpuOldMsg	这台设备的图形芯片不支持 Metal 3，本游戏的图形层需要它。\n\n需要 A14 / M1 及以后的芯片（iPhone 12 及以后、2021 年及以后的 iPad Pro 等）；A13 及更早的芯片（包括 2020 年的 iPad Pro）玩不了。	This device's graphics chip does not support Metal 3, which the game's graphics layer needs.\n\nAn A14 / M1 chip or later is required (iPhone 12 and later, iPad Pro from 2021 and later, and so on); A13 and earlier chips, including the 2020 iPad Pro, cannot run it.	图形芯片不支持 Metal 3 时的弹框正文（main.m）
 dmOldConnecting	正在连接下载服务器…	Connecting to the download server…	老机型补充包下载页
 dmOldDlFail	下载失败：%s	Download failed: %s	老机型补充包：没用上的原因
 dmOldProgress	正在下载老机型补充包\n%.2f / %.2f GB（%.0f%%）%@	Downloading the supplementary pack\n%.2f / %.2f GB (%.0f%%)%@	老机型补充包下载页进度
@@ -262,6 +272,8 @@ dmKbRiftMsGot	首通奖励已领取	First clear reward claimed	积分牌秘境�
 dmKbRiftTotal	最高 %d 层	Best Level: %d	积分牌秘境项（dm_kills.c）；英文：拟
 dmCloudConflict	iCloud：两台设备的共享仓库各有内容，已用云端那份，本机那份已完整保存待并回	iCloud: both devices had shared stash contents. Using the cloud copy; this device's copy is kept to be merged back	iCloud 共享仓库分叉提示（diag.c；本机那份在待合并收件箱）
 dmCloudCharConflict	iCloud：角色 %s 两台设备各有一份，已用云端那份，本机那份已备份	iCloud: both devices had character %s. Using the cloud copy; this device's copy is backed up	iCloud 首次同步同名角色提示（diag.c，%s = 角色名）
+dmCloudMergeBack	iCloud：另一台设备共享仓库里多出的物品已放进背包，金币已加回共享仓库	iCloud: items from the other device's shared stash are now in your inventory; its gold is back in the shared stash	iCloud 收件箱局内并回：开箱时放进背包的提示（dm_cloudmerge.c）
+dmCloudMergeFull	iCloud：背包放不下了，腾出空位后再打开储藏箱继续取回	iCloud: inventory is full. Make room and open the stash again to get the rest	iCloud 收件箱局内并回：背包满了的提示（dm_cloudmerge.c）
 dmRiftHudTitle	秘境	Rift	秘境顶部进度条（dm_rift_hud.m，UIKit）
 dmRiftHudDone	第 %d 层完成	Level %d complete	秘境顶部进度条（dm_rift_hud.m，UIKit）；英文：见 dmRiftSayDoneBoth
 dmRiftHudLate	第 %d 层超时	Level %d overtime	秘境顶部进度条（dm_rift_hud.m，UIKit）；英文：拟
@@ -331,10 +343,10 @@ dmRiftMsNEn	每档另得 符文 · 赦免之证 · 打孔	+ Rune, Token of Absol
 dmAppQuit	退出 D2R Mobile	Quit D2R Mobile	Mac App 菜单栏（host/front_mac.m）
 dmAppOK	好	OK	Mac App 提示框的按钮（host/app_mac.m，下同）
 dmAppPickUse	用这个文件夹	Use This Folder	选资源文件夹对话框的确认按钮
-dmAppPickMsg	请选择游戏资源文件夹（里面有 data 文件夹）。只需要选这一次。	Choose the game data folder (the one that contains a “data” folder). You only need to do this once.	第一次启动选资源文件夹时对话框上的说明
+dmAppPickMsg	请选择游戏资源文件夹（里面有 data 文件夹），或者直接选 data 文件夹。只需要选这一次。	Choose the game data folder (the one that contains a “data” folder), or the “data” folder itself. You only need to do this once.	第一次启动选资源文件夹时对话框上的说明
 dmAppPickAgain	%s\n\n请重新选择游戏资源文件夹。	%s\n\nPlease choose the game data folder again.	选错后再弹对话框时的说明（%s = 上一次的原因）
 dmAppNotRomfsTitle	这不是游戏资源文件夹	This is not the game data folder	选错文件夹的提示框标题
-dmAppNotRomfs	「%s」里没有 data/build_manifest.psv。\n要选的是游戏资源文件夹：里面有一个 data 文件夹，data 里有 build_manifest.psv 和若干很大的数据文件。	“%s” has no data/build_manifest.psv.\nChoose the game data folder: it contains a “data” folder with build_manifest.psv and several very large data files.	选错文件夹的原因（%s = 所选文件夹名）
+dmAppNotRomfs	「%s」里没有找到 build_manifest.psv。\n可以选这两种文件夹之一：\n· 游戏资源文件夹：里面有一个 data 文件夹，data 里有 build_manifest.psv；\n· data 文件夹本身：里面直接就是 build_manifest.psv 和若干很大的 .data 文件。	“%s” has no build_manifest.psv.\nChoose either:\n· the game data folder, which contains a “data” folder with build_manifest.psv inside; or\n· the “data” folder itself, which directly holds build_manifest.psv and several very large .data files.	选错文件夹的原因（%s = 所选文件夹名）
 dmAppNoRead	找到了资源清单，但没有读取权限。	The data manifest was found but cannot be read.	资源清单读不了
 dmAppRomfsGone	上次选的资源文件夹用不了了：\n%s	The data folder chosen last time can no longer be used:\n%s	上次选的文件夹失效（挪走 / 删了 / 外接盘没插）
 dmAppBrokenTitle	这个 App 不完整	This app is incomplete	包里缺程序文件
@@ -347,3 +359,14 @@ dmAppKeysText	用键盘时，界面上的按键提示显示的就是键盘上的
 dmAppShareLog	分享日志…	Share Logs…	帮助菜单：把两份日志与版本信息打成压缩包，玩家选位置存下（不上传）
 dmAppShareInfo	版本信息	Version Info	分享日志压缩包里版本信息那份文件的标题行
 dmAppShareFail	日志打包失败	Could Not Pack the Logs	分享日志失败时提示框的标题
+dmTvChecking	正在检查游戏文件…	Checking game files…	Apple TV 版启动页（dm/tvos/main.m，下同）
+dmTvNoRomfs	游戏文件还不齐全：\n%s	The game files are incomplete:\n%s	游戏文件校验没过；%s = 校验给的原因
+dmTvNoAstcIndex	老机型补充包的覆盖层索引不在（romfs_overlay_astc/data/.build.config）	The Legacy Device Pack index is missing (romfs_overlay_astc/data/.build.config)	补充包到了、配套的覆盖层索引没拷进来
+dmTvGpuFail	图形设备初始化失败，请看启动日志	Could not set up the graphics device; see the launch log	建不起 Metal 4 命令队列
+dmTcMap	地图	Map	触屏圆钮的字：右上地图键（DmTouchOverlay.m，取不到图标时）
+dmTcCancel	取消	Cancel	触屏圆钮的字：全屏地图开着时地图键变成「取消」（DmTouchOverlay.m）
+dmTcNavConfirm	确认／交换	Confirm / Swap	触屏圆钮的字：面板态的虚拟手柄圆钮（只在 DM_TOUCH_NAV_PAD=1 调试时出现）
+dmTcNavBack	返回	Back	同上
+dmTcNavAction	操作	Action	同上
+dmTcNavBind	绑定	Bind	同上
+dmTcNavNext	下一页	Next Page	同上

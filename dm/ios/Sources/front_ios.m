@@ -89,6 +89,14 @@ static void world_norm(UIView *v, CGFloat x, CGFloat y, float *nx, float *ny) { 
 @property (nonatomic) CGPoint scriptPoint;
 @property (nonatomic) UITouchPhase scriptPhase;   // 抬起 / 取消时置 Ended / Cancelled，与真触摸一样（扫槽兜底靠它认「已结束」） | Set to Ended / Cancelled on lift / cancel, same as a real touch (the slot-scan backstop relies on it to recognize "ended")
 @end
+@interface DmVolumeWatch : NSObject
+@end
+@implementation DmVolumeWatch
+- (void)observeValueForKeyPath:(NSString *)k ofObject:(id)o change:(NSDictionary *)c context:(void *)x {
+    (void)k; (void)o; (void)x; double mtl_link_tick_age_ms(void);
+    LOG("前端：系统音量 %.2f → %.2f（显示节拍上次回调 %.0f ms 前）", [c[NSKeyValueChangeOldKey] doubleValue], [c[NSKeyValueChangeNewKey] doubleValue], mtl_link_tick_age_ms());
+}
+@end
 @implementation DmScriptTouch
 - (CGPoint)locationInView:(UIView *)v { (void)v; return _scriptPoint; }
 - (CGPoint)previousLocationInView:(UIView *)v { (void)v; return _scriptPoint; }
@@ -256,17 +264,21 @@ static void restart_cover_hook(int on) { dispatch_async(dispatch_get_main_queue(
     if(_uiDragOn) { _uiDragOn=NO; dm_ui_drag_end(); }
     _mapTouch=_mapBackTouch=_bindTouch=nil;
 }
-// 技能绑定入口（技能为空时一个单色十字，点击进入绑定技能）：游戏态下触点落在技能钮（F1–F4，含当前组）上——
+// 技能绑定入口（技能为空时一个单色十字，点击进入绑定技能）：游戏态下触点落在技能钮（主攻击大钮 A 与 F1–F4，含当前组）上——
 //   空位：这根手指不进手势层，点一下 = 给这个位选技能（dm_ui_bind_begin，宿主开技能树）；
 //   已绑定：照常进手势层（按下瞄准、松手施放、拖拽定方向）；按住不动超过 0.5 秒且位移 ≤ 10 点 = 长按换绑，取消这次施放（tickTouchControls 里判）。攻击键按住是连续攻击，不做长按。
-// 返回这个点命中的技能钮要绑的手柄键（第二组带 ZL），没命中返回 0；*empty = 该位当前是空的
-// Skill binding entry (a single-color cross when the skill is empty; tap to bind a skill): in game mode a touch point lands on a skill button (F1–F4, including the current set) --
-//   empty slot: this finger does not enter the gesture layer, and one tap = choose a skill for this slot (dm_ui_bind_begin, the host opens the skill tree);
-//   bound: enters the gesture layer as usual (press to aim, release to cast, drag to set direction); held still over 0.5 seconds with displacement ≤ 10 points = long press to rebind, cancelling this cast (judged in tickTouchControls). Holding the attack button is continuous attack, with no long press.
-// Returns the controller key to bind for the skill button hit by this point (the second set carries ZL), or 0 if none is hit; *empty = this slot is currently empty
+// 返回这个点命中的技能钮要绑的手柄键（第二组带 ZL），没命中返回 0；*empty = 该位当前是空的。
+// 主攻击大钮（DM_TC_MAIN，A 键）也在内（复现：主技能置空后点它的「＋」弹不出选技能——原先这里只认 F1–F4，主钮空着时这一下进了手势层当攻击按下去）；
+// 宿主的绑定流程本来就认 A（绑定框第 1 列 = A = 主技能，dm_cursor.c ui_bind_modal_tap）。长按换绑只给 F1–F4（攻击键按住是连续攻击），这里只管「空位点一下」
+// Skill binding entry (a monochrome cross when the skill is empty; tap to bind a skill): in game state, a touch landing on a skill button (main attack button A and F1–F4, including the current set):
+//   Empty slot: this finger does not enter the gesture layer; a tap = choose a skill for this slot (dm_ui_bind_begin, the host opens the skill tree);
+//   Bound: enters the gesture layer as usual (press to aim, release to cast, drag to set direction); holding still for over 0.5 seconds with movement ≤ 10 points = long-press rebind, cancelling this cast (decided in tickTouchControls). Holding the attack key is continuous attack, so it has no long press.
+// Returns the gamepad key to bind for the skill button hit by this point (second set includes ZL), 0 if none hit; *empty = the slot is currently empty.
+// The main attack button (DM_TC_MAIN, A key) is included too (repro: after clearing the main skill, tapping its "+" did not bring up skill selection; this used to accept only F1–F4, so with the main button empty the tap entered the gesture layer as an attack press);
+// the host binding flow already accepts A (binding dialog column 1 = A = main skill, dm_cursor.c ui_bind_modal_tap). Long-press rebind is only for F1–F4 (holding the attack key is continuous attack); this only handles "tap on an empty slot"
 - (uint64_t)skillKeyAt:(CGPoint)p empty:(BOOL *)empty {
     int i=dm_tc_hit(&_controls.layout,(float)p.x,(float)p.y);   // 与手势层同一个命中判定 | Same hit test as the gesture layer
-    if(i>=DM_TC_SKILL1 && i<=DM_TC_SKILL4 && (_controls.enabled_targets&(1u<<i))) { const dm_tc_target *t=&_controls.layout.target[i];
+    if((i==DM_TC_MAIN || (i>=DM_TC_SKILL1 && i<=DM_TC_SKILL4)) && (_controls.enabled_targets&(1u<<i))) { const dm_tc_target *t=&_controls.layout.target[i];
         dm_tg_snapshot n=_overlay.nativeMapping; uint64_t now_ns(void);
         dm_ta_glyph g=dm_ta_current_set(&n,t->button,now_ns(),_controls.skill_set); *empty=g.status==DM_TA_EMPTY;   // 与画十字用同一份读数（DmTouchOverlay） | Same reading as used for drawing the cross (DmTouchOverlay)
         return t->button|(_controls.skill_set?DM_BTN_ZL:0); }
@@ -750,65 +762,16 @@ static BOOL touch_done(UITouch *t) { UITouchPhase ph=t.phase; return ph==UITouch
 // 底部 UI v4 的 UIKit 底栏只在「局内常态」画：维护面板开合栈，常驻 HUD 层之外任何面板开着就不画（未知面板默认让开，免挡游戏自己的画面）。
 // 常驻层 = 营地无操作时 OpenPanel 后一直不关的 13 个（实测 UI 消息流）+ 存档提示 / 通知 / 组队消息 / 帮助按钮 / 手柄提示层 / 自动地图（战斗叠加）
 // 名单在宿主 dm_cursor.c 的 dm_ui_panel_resident（面板状态安全阀同用一份）
-// The UIKit bottom bar of bottom UI v4 is drawn only in the "normal in-run state": maintain a panel open / close stack, and do not draw when any panel other than the always-on HUD layers is open (unknown panels yield by default, to avoid covering the game's own picture).
-// Always-on layers = the 13 that stay open after OpenPanel when idle in camp (measured UI message stream) + save hint / notification / party message / help button / controller hint layer / automap (combat overlay)
-// The list is in the host's dm_cursor.c dm_ui_panel_resident (shared with the panel state safety valve)
-enum { HUD_STACK_MAX=64 };
-static struct { char name[64]; int open; } g_hud_stack[HUD_STACK_MAX];
-static _Atomic int g_hud_blocked;   // 栈里还开着的非常驻面板数 | Number of panels other than the always-on layers still open in the stack
+// 面板开合栈搬到宿主 dm_cursor.c（dm_hud_stack_msg，Mac touch_mac.c 共用同一份）；这里只记「连续多久非零」并通知 UIKit 底栏让开
+// The UIKit bottom bar of bottom UI v4 is only drawn in the normal in-game state: maintain the panel stack; whenever any panel other than the resident HUD layers is open, it is not drawn (unknown panels make way by default so they do not cover the game's own picture).
+// Resident layers = the 13 panels that are opened and never closed in camp when idle (measured from the UI message stream) + save notice / notifications / party messages / help button / gamepad hint layer / automap (combat overlay).
+// The list is dm_ui_panel_resident in the host's dm_cursor.c (shared with the panel state safety valve).
+// The panel stack moved to the host's dm_cursor.c (dm_hud_stack_msg, shared with Mac touch_mac.c); here we only track how long it has been non-zero and tell the UIKit bottom bar to make way
+int dm_hud_stack_msg(const char *act, const char *arg); void dm_hud_stack_dump(void);
+static _Atomic int g_hud_blocked;   // 栈读数：开着的非常驻面板数（只开着 NPC 对话菜单时 -1） | Stack reading: number of open non-resident panels (-1 when only the NPC dialog menu is open)
 static uint64_t g_hud_blocked_since;
 static void hud_stack_message(const char *act,const char *arg) {
-    // 读取画面撤下：清掉此刻在游戏面板树里已经看不见的记录（防只开不关的漏配），屏上还在的照记——
-    // 通关页是读取画面撤下前 0.5 秒开的（OpenExclusivePanel EndScreenPanelExpansion → UnloadPanel LoadScreenPanel），原先整栈清零把它也清了：
-    // 底栏和技能钮盖在通关页上、点「好」变成点世界
-    // Loading screen removed: clear the records no longer visible in the game's panel tree at this moment (guards against open-without-close mismatches), and keep those still on screen --
-    // the game-completion page is opened 0.5 seconds before the loading screen is removed (OpenExclusivePanel EndScreenPanelExpansion → UnloadPanel LoadScreenPanel); previously the whole stack was zeroed, clearing it too:
-    // the bottom bar and skill buttons covered the game-completion page, and tapping 「好」(OK) became a world tap
-    if(!strcmp(act,"UnloadPanel") && !strcmp(arg,"LoadScreenPanel")) {
-        for(int i=0;i<HUD_STACK_MAX;i++) {
-            if(g_hud_stack[i].open>0 && strcmp(g_hud_stack[i].name,"LoadScreenPanel") && dm_ui_panel_shown(g_hud_stack[i].name)) fprintf(stderr,"[hud] 面板栈 读取画面撤下：%s 屏上还在，照记\n",g_hud_stack[i].name);
-            else memset(&g_hud_stack[i],0,sizeof g_hud_stack[i]);
-        }
-    }
-    else if(!strcmp(act,"UnloadAll")) memset(g_hud_stack,0,sizeof g_hud_stack);
-    else {
-        // PanelManager 的面板动作全集（读码：它的消息分发 main+0xb1dc60 只认这 8 个，与全部日志里出现过的一致）：
-        //   OpenPanel / OpenExclusivePanel = 开；ClosePanel / UnloadPanel = 关（读取画面那条见上）；TogglePanel = 按当前记录翻转（高级属性页走它）；
-        //   UnloadAll = 全清（见上）；LoadPanel = 预载、不上屏，不算开关；HideGameInfo = 隐藏游戏信息层，与面板开关无关
-        // Full set of PanelManager panel actions (from reading the code: its message dispatch main+0xb1dc60 only recognizes these 8, matching what has appeared across all logs):
-        //   OpenPanel / OpenExclusivePanel = open; ClosePanel / UnloadPanel = close (for the loading screen one see above); TogglePanel = flip according to the current record (the advanced stats page uses it);
-        //   UnloadAll = clear all (see above); LoadPanel = preload without showing, not counted as open or close; HideGameInfo = hide the game info layer, unrelated to panel open / close
-        int tog=!strcmp(act,"TogglePanel");
-        int open=!strcmp(act,"OpenPanel")||!strcmp(act,"OpenExclusivePanel"), close=!strcmp(act,"ClosePanel")||!strcmp(act,"UnloadPanel");
-        if(!open && !close && !tog) return;
-        if(dm_ui_panel_resident(arg)) return;
-        int slot=-1; for(int i=0;i<HUD_STACK_MAX;i++) if(!strcmp(g_hud_stack[i].name,arg)) { slot=i; break; }
-        if(slot<0) for(int i=0;i<HUD_STACK_MAX;i++) if(!g_hud_stack[i].name[0]) { slot=i; strlcpy(g_hud_stack[i].name,arg,sizeof g_hud_stack[i].name); break; }
-        if(slot<0) return;
-        if(tog) { open=g_hud_stack[slot].open<=0; close=!open; }
-        // 没开着就收到关闭 = 空操作，不是漏配：游戏开功能页 / 切页签时对一批互斥面板（仓库、方块、商店、小站、对话…）统一发 ClosePanel，不管开没开；
-        // 启动时选角页也是先关再开（读界面消息流水；之前记成红，玩家路径每次启动 14 条假红）。真漏接了打开的后果是底栏不让开，由下面 60 秒巡检兜
-        // A close received while not open = no-op, not a missing mapping: when opening a function page / switching tabs the game sends ClosePanel to a batch of mutually exclusive panels (storage, cube, shop, waypoint, dialog…) regardless of whether they are open;
-        // at launch the character select page is also closed first and then opened (from reading the UI message log; previously logged as a failure, 14 false failures per launch on the player path). The consequence of really missing an open is the bottom bar not yielding, which the 60-second patrol below covers
-        if(close && g_hud_stack[slot].open<=0) return;
-        // 按「开 / 没开」记，不按次数累加：游戏对已经开着的面板再发一次 OpenPanel 是常态——雇佣列表上的替换确认框每被关掉一次，
-        // 就重发一次 OpenPanel HireMenuPanel（中间没有关闭），而整段对话结束时只发固定次数的关闭。按次数加的话多出确认框两回再雇成，计数留在 1：
-        // 屏上已没有面板，前端却一直按面板态（没摇杆、没技能钮、点哪里都是「面板外」）。809 份日志里计数到过 2 以上的只有 4 个面板
-        // （主菜单链接、选角页、起名候选栏、雇佣列表），没有一个是真叠两层要关两次的。dm_tc_navigation 那一路本来就是幂等位图，两路口径一致了
-        // Recorded as "open / not open", not accumulated by count: the game sending OpenPanel again for an already open panel is normal -- each time the replacement confirmation box on the hire list is dismissed,
-        // OpenPanel HireMenuPanel is sent again (with no close in between), while at the end of the whole dialog only a fixed number of closes is sent. Adding by count, when the confirmation box comes up two extra times and the hire then succeeds, leaves the count at 1:
-        // no panel left on screen, yet the front end stays in panel mode (no stick, no skill buttons, every tap is "outside the panel"). Across 809 logs only 4 panels ever reached a count of 2 or more
-        // (main menu links, character select page, naming candidate bar, hire list), and none of them was a real two-layer stack needing two closes. The dm_tc_navigation path was already an idempotent bitmap, so the two paths now agree
-        if(open && g_hud_stack[slot].open>0) { fprintf(stderr,"[hud] 面板栈 %s %s：已经开着，不重复计\n",act,arg); return; }
-        g_hud_stack[slot].open=open?1:0;
-        fprintf(stderr,"[hud] 面板栈 %s %s → %d\n",act,arg,g_hud_stack[slot].open);
-    }
-    // NPC 对话菜单（交谈 / 交易…那一小列）不挡底栏：只开着它时底栏照常显示（否则 UIKit 层让开、露出游戏层那份底栏，难度格和回城书不见、腰带样子也变）。
-    // 编码进同一个数：对话菜单开着且没有别的面板 → -1（底栏不让开、且免除导航态的隐藏）
-    // The NPC dialog menu (the small column of Talk / Trade…) does not block the bottom bar: with only it open the bottom bar shows as usual (otherwise the UIKit layer yields and exposes the game layer's bottom bar; the difficulty cell and Tome of Town Portal disappear and the belt looks different too).
-    // Encoded into the same number: dialog menu open with no other panel → -1 (the bottom bar does not yield, and navigation-mode hiding is waived)
-    int n=0, dlg=0; for(int i=0;i<HUD_STACK_MAX;i++) { if(!strcmp(g_hud_stack[i].name,"NpcDialogPanel")||!strcmp(g_hud_stack[i].name,"ScrollSpeechPanel")) dlg|=g_hud_stack[i].open>0; else n+=g_hud_stack[i].open; }   // ScrollSpeechPanel = NPC 说话的滚动文字框（屏幕上方一小块），同样不挡底栏 | ScrollSpeechPanel = the scrolling text box of NPC speech (a small block at the top of the screen); it likewise does not block the bottom bar
-    if(!n && dlg) n=-1;
+    int n=dm_hud_stack_msg(act,arg);
     uint64_t t=now_ns();
     if(n>0 && !g_hud_blocked_since) g_hud_blocked_since=t;
     if(n<=0) g_hud_blocked_since=0;
@@ -823,7 +786,7 @@ static void hud_stack_message(const char *act,const char *arg) {
 static void hud_stack_watch(void) {
     if(g_hud_blocked_since && now_ns()-g_hud_blocked_since>60000000000ull) {
         fprintf(stderr,"[hud] 面板栈已连续 60 秒非零（线索，非缺陷）：");
-        for(int i=0;i<HUD_STACK_MAX;i++) if(g_hud_stack[i].open) fprintf(stderr,"%s×%d ",g_hud_stack[i].name,g_hud_stack[i].open);
+        dm_hud_stack_dump();
         fprintf(stderr,"\n"); g_hud_blocked_since=now_ns();
     }
 }
@@ -855,7 +818,7 @@ static void touch_ui_message(const char *cat,const char *act,const char *arg) {
     // 测试：DM_TOUCH_SCRIPT_START=menu 时触点脚本从主菜单出现起计时（缺省从首次进局起），前端页面的玩家路径用例用
     // Test: with DM_TOUCH_SCRIPT_START=menu the touch script times from when the main menu appears (default: from first entering a run); used by player-path cases on front-end pages
     if(getenv("DM_TOUCH_SCRIPT_START") && !strcmp(cat,"PanelManager") && !strcmp(act,"OpenPanel") && !strcmp(arg,"MainMenuButtonRibbon")) dispatch_async(dispatch_get_main_queue(),^{ touch_script_start(); });
-    int nmode=mode ? (dm_tc_scene_dead() ? 2 : dm_tc_scene_dialog_only(&scene) && atomic_load(&g_hud_blocked)<=0 ? 3 : 1) : 0;   // 3 = 只开着 NPC 对话菜单（面板栈读数 -1）；菜单上又开了雇佣列表这类不在名单里的页就不算（那时底栏十字不该露出来） | 3 = only the NPC dialog menu is open (panel stack reading -1); if a page not on the list such as the hire list is opened on top of the menu, it does not count (the bottom bar cross should not show then)
+    int nmode=dm_tc_panel_mode(mode,&scene,atomic_load(&g_hud_blocked));   // 3 = 只开着 NPC 对话菜单（面板栈读数 -1）；菜单上又开了雇佣列表这类不在名单里的页就不算（那时底栏十字不该露出来） | 3 = only the NPC dialog menu is open (panel stack reading -1); if a page not on the list such as the hire list is opened on top of the menu, it does not count (the bottom bar cross should not show then)
     if(atomic_exchange(&g_touch_navigation,nmode)!=nmode) dispatch_async(dispatch_get_main_queue(),^{ [g_touch_view navigationMode:nmode]; });
     dm_uiscreen_set_panel(nmode==1);   // iPad 真全屏：面板模式下界面移到正中；没开真全屏时宿主不动 | iPad true fullscreen: in panel mode the UI moves to the center; without true fullscreen the host does nothing
 }
@@ -1177,20 +1140,13 @@ static void audio_apply(void) { dm_audio_suspend(g_audio_bg || g_audio_intr); }
 // In the enter-background callback (the system gives this callback 10 seconds): wait only in a run. Wait until "a save commit has appeared after sending the background focus, and no new commit for 0.2 seconds after that" (character and shared stash are two containers and may commit separately), at most 2.5 seconds.
 // During this time the game main loop runs as usual and presented frames are simply dropped. Outside a run (main menu / character select) do not wait: there is no unsaved progress there
 static void background_wait_save(void) {
-    int dm_ingame_now(void); uint64_t dm_fs_commit_count(void); void mtl_present_discard(int on); uint64_t now_ns(void);
-    int dm_request_save(void);
-    if (!dm_ingame_now() || !dm_request_save()) return;   // 让游戏下一拍走它自己的定时自动存盘（diag.c） | Let the game run its own timed auto-save on the next tick (diag.c)
-    uint64_t c0 = dm_fs_commit_count(), t0 = now_ns(), last = c0, last_t = 0;
+    int dm_ingame_now(void); void mtl_present_discard(int on); int dm_save_wait(double max_s, uint64_t *commits, int *froze, double *ms);
+    if (!dm_ingame_now()) return;
+    uint64_t n = 0; int froze = 0; double ms = 0;
     mtl_present_discard(1);
-    for (;;) {
-        usleep(20000);
-        uint64_t c = dm_fs_commit_count(), t = now_ns();
-        if (c != last) { last = c; last_t = t; }
-        if (last_t && t - last_t >= 200000000ull) break;
-        if (t - t0 >= 2500000000ull) break;
-    }
+    dm_save_wait(2.5, &n, &froze, &ms);   // 游戏停着（暂停菜单开着）时冻住世界、临时放开暂停存这一次，存完写回（diag.c） | If the game is stopped (pause menu open), freeze the world and temporarily release the pause for this one save, then write it back (diag.c)
     mtl_present_discard(0);
-    LOG("前端：进后台等游戏存盘 %.0f ms，期间存档提交 %llu 次%s", (now_ns() - t0) / 1e6, (unsigned long long)(last - c0), last == c0 ? "【红】（2.5 秒内没等到）" : "");
+    LOG("前端：进后台等游戏存盘 %.0f ms，期间存档提交 %llu 次%s%s", ms, (unsigned long long)n, froze ? "（原先暂停着：冻结世界存盘、已恢复暂停）" : "", n ? "" : "【红】（2.5 秒内没等到）");
 }
 // 失活时也请游戏存一次盘（查 #22 发现的缺口）：上划进多任务界面时 App 多半只「失活」、不进后台，在那里直接划掉进程
 // 走不到进后台的存盘，丢掉距上次定时存盘（游戏 5 分钟一次）以来的进度。只置游戏「下一拍就自动存盘」的计时（同 dm_request_save），不等提交、不挡主线程；
@@ -1371,8 +1327,12 @@ static void touch_script_start(void) {
             else if([op isEqualToString:@"tap_unit"] && f.count>=4) { dm_world_watch([f[2] intValue],(uint32_t)[f[3] intValue]); tu_on=1; tu_tick=0; tu_dead=now+(f.count>4?[f[4] doubleValue]:10);
                 NSString *last=f.lastObject; tu_dx=tu_dy=0; if([last hasPrefix:@"+"]) { NSArray *o=[[last substringFromIndex:1] componentsSeparatedByString:@","]; if(o.count==2) { tu_dx=[o[0] doubleValue]; tu_dy=[o[1] doubleValue]; } }
                 tu_rect=f.count>=9 && ![f[5] hasPrefix:@"+"]; if(tu_rect) for(int i=0;i<4;i++) tu_r[i]=[f[5+i] doubleValue]; }
-            else if([op isEqualToString:@"tap_ui"] && f.count>=3) { ui_name=f[2]; dm_ui_watch(ui_name.UTF8String); ui_on=1; ui_tick=0; ui_dead=now+(f.count>3?[f[3] doubleValue]:10); }
-            else if([op isEqualToString:@"await"] && f.count>=4 && [f[2] isEqualToString:@"ui"]) { aui_name=f[3]; dm_ui_watch(aui_name.UTF8String); aui_on=1; aui_tick=0; aui_dead=now+(f.count>4?[f[4] doubleValue]:30); }
+            // tap_ui / await ui 的控件名里「+」代表空格：脚本按空格拆参数，带空格的控件名（技能树的技能格 SkillButton3 2,0 = 第 3 页第 2 列第 0 行）要这样写，
+            // 如 tap_ui SkillButton3+2,0@SkillsTreePanel。按名字点不受屏幕比例 / 真全屏贴顶上提影响（真机按 16:9 量的裸坐标点技能树偏了 134 单位）
+            // In widget names for tap_ui / await ui, "+" stands for a space: scripts split arguments on spaces, so widget names with spaces (skill tree slot SkillButton3 2,0 = page 3, column 2, row 0) must be written this way,
+            // e.g. tap_ui SkillButton3+2,0@SkillsTreePanel. Tapping by name is unaffected by screen aspect / the top shift in true fullscreen (raw coordinates measured at 16:9 on a real device missed the skill tree by 134 units)
+            else if([op isEqualToString:@"tap_ui"] && f.count>=3) { ui_name=[f[2] stringByReplacingOccurrencesOfString:@"+" withString:@" "]; dm_ui_watch(ui_name.UTF8String); ui_on=1; ui_tick=0; ui_dead=now+(f.count>3?[f[3] doubleValue]:10); }
+            else if([op isEqualToString:@"await"] && f.count>=4 && [f[2] isEqualToString:@"ui"]) { aui_name=[f[3] stringByReplacingOccurrencesOfString:@"+" withString:@" "]; dm_ui_watch(aui_name.UTF8String); aui_on=1; aui_tick=0; aui_dead=now+(f.count>4?[f[4] doubleValue]:30); }
             else if([op isEqualToString:@"await"] && f.count>=3 && [f[2] isEqualToString:@"rw"]) { int dm_runeword_done_count(void); awr_on=1; awr_tick=0; awr_base=dm_runeword_done_count(); awr_dead=now+(f.count>3?[f[3] doubleValue]:30); }
             else if([op isEqualToString:@"await"] && f.count>=3 && [f[2] isEqualToString:@"pos"]) { aw_on=1; aw_tick=0; aw_r=f.count>=6?[f[5] intValue]:0; aw_x=f.count>=6?[f[3] intValue]:0; aw_y=f.count>=6?[f[4] intValue]:0; }
             else if([op isEqualToString:@"pad"] && f.count>=3) { void dm_gamepad_inject(uint64_t,int32_t,int32_t,int32_t,int32_t); uint64_t m=strtoull([f[2] UTF8String],NULL,0);   // pad <按键位（同 dm_input.h）> [lx ly rx ry]：模拟手柄（没有实体手柄时测手柄路径） | pad <button bits (same as dm_input.h)> [lx ly rx ry]: simulated controller (tests the controller path without a physical controller)
@@ -1456,6 +1416,12 @@ void front_ios_lifecycle_install(void) {
         // Interruption ended: clear this reason whether or not the system gave "should resume" (cases without it, e.g. an alarm swiped away, should still produce sound back in the game); actually starting the audio device is decided by audio_apply according to whether we are in background
         g_audio_intr = 0; [AVAudioSession.sharedInstance setActive:YES error:nil]; audio_apply(); LOG("前端：打断结束%s", g_audio_bg ? "（仍在后台，回前台再出声）" : "，恢复音频");
     }];
+    // 系统音量 / 输出路由变化记一行（「按音量键黑屏、闪退」，日志里看不出按键时刻）：带上显示节拍上一次回调距今多久，好和停节拍对时刻
+    // Log one line on system volume / output route changes ("pressing the volume keys causes a black screen or crash", and the log does not show when keys were pressed): include how long since the display link's last callback, to line up with display-link stalls
+    static DmVolumeWatch *vw; vw = [DmVolumeWatch new]; [as addObserver:vw forKeyPath:@"outputVolume" options:NSKeyValueObservingOptionOld | NSKeyValueObservingOptionNew context:NULL];
+    [nc addObserverForName:AVAudioSessionRouteChangeNotification object:as queue:mq usingBlock:^(NSNotification *n) {
+        double mtl_link_tick_age_ms(void);
+        LOG("前端：音频路由变化 原因 %lu（显示节拍上次回调 %.0f ms 前）", (unsigned long)[n.userInfo[AVAudioSessionRouteChangeReasonKey] unsignedIntegerValue], mtl_link_tick_age_ms()); }];
     LOG("前端：生命周期 / 过热 / 音频会话已接（类别 Playback）");
     // 测试开关 DM_TEST_AUDIO_INTERRUPT=起始秒,时长秒：按时向本进程投递音频会话打断开始 / 结束（带 ShouldResume），模拟来电 / 闹钟；
     // 结束后 2 s 打出声卡回调增量（真出声 DM_AUDIO=1 时应 > 0）
@@ -1479,7 +1445,7 @@ void front_ios_lifecycle_install(void) {
             LOG("前端：测试回前台（DM_TEST_BG）"); mtl_link_pause(0); front_ios_focus_event(2); front_ios_focus_event(3);
             uint64_t c0 = dm_audio_render_calls();
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2000000000), dispatch_get_main_queue(), ^{
-                LOG("前端：测试回前台后 2 s 声卡回调 +%llu（客体时钟 %.3f s）", (unsigned long long)(dm_audio_render_calls() - c0), guest_ns() / 1e9); }); });
+                int dm_game_paused(void); LOG("前端：测试回前台后 2 s 声卡回调 +%llu（客体时钟 %.3f s；原版暂停 %d）", (unsigned long long)(dm_audio_render_calls() - c0), guest_ns() / 1e9, dm_game_paused()); }); });
     }
     // 测试开关 DM_TEST_RESIGN=秒：到点只发「失活」（sceneWillResignActive），不进后台——模仿上划停在多任务界面；配合测试脚本随后 kill -9 = 在多任务界面里划掉
     // Test switch DM_TEST_RESIGN=seconds: at that time send only "resign active" (sceneWillResignActive) without going to background -- mimics swiping up and stopping in the app switcher; combined with the test script's subsequent kill -9 = swiping it away in the app switcher
