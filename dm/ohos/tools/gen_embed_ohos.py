@@ -21,6 +21,8 @@
 #
 #   --embed-bytes  不写 .incbin，而是把字节直接展开成 .byte/.space。
 #                  产物自包含、可提交进仓库（真机测试用）；连续零字节用 .space 压缩。
+#   --layout-header <输出.h>  把 fixups 表头（PATCH_OFF/TEXT_END/…）写成 #define，
+#                  供探针组装 module_t（运行时装载要用这些布局常数）。
 import os
 import sys
 
@@ -117,6 +119,11 @@ def gen_one(out_dir, name, asm, embed_bytes):
 def main():
     argv = sys.argv[1:]
     embed_bytes = '--embed-bytes' in argv
+    layout_hdr = None
+    if '--layout-header' in argv:
+        k = argv.index('--layout-header')
+        layout_hdr = argv[k + 1]
+        del argv[k:k + 2]
     if embed_bytes:
         argv.remove('--embed-bytes')
     if len(argv) < 3:
@@ -138,6 +145,23 @@ def main():
         f.write('\n'.join(asm) + '\n')
     print(f'已写出 {dst}')
     print(f'合计 {total} 字节（{total/1024/1024:.2f} MiB），将全部进入 .so')
+
+    if layout_hdr:
+        # 布局常数头：fixups 表头的 KEY → #define（探针组装 module_t 用）。
+        # 常量名 = DM_IMG_<模块名大写>_<KEY 大写>；换代/改写器变更后随 .S 一起重新生成。
+        lines = ['// 【生成文件】由 gen_embed_ohos.py --layout-header 生成，勿手改。',
+                 '// 来源：各模块 <名>.fixups.tsv 表头（改写器输出的布局与键页表）。',
+                 '#pragma once', '']
+        for n in names:
+            hdr = read_hdr(os.path.join(out_dir, f'{n}.fixups.tsv'))
+            up = n.upper()
+            for key, val in hdr.items():
+                kk = key.replace(' ', '_').upper()
+                lines.append(f'#define DM_IMG_{up}_{kk} {val}')
+            lines.append('')
+        with open(layout_hdr, 'w', encoding='utf-8') as f:
+            f.write('\n'.join(lines) + '\n')
+        print(f'已写出 {layout_hdr}')
 
 
 if __name__ == '__main__':

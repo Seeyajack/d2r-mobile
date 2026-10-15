@@ -17,6 +17,15 @@
 
 #include "dm.h"                 // module_t
 #include "map_image_ohos.h"     // 鸿蒙版 map_image —— 实验 D 的被测对象
+#include "dm_main_layout.h"     // 旷野之息 main 的布局常数（fixups 表头生成）
+
+// 旷野之息 main 的嵌入段（dm_images.S）：装载验证要把「映射区」与「嵌入段」逐字节对拍
+extern const unsigned char __start_dmmainx0[];
+extern const unsigned char __stop_dmmainx0[];
+extern const unsigned char __start_dmmainw[];
+extern const unsigned char __stop_dmmainw[];
+extern const unsigned char __start_dmmainx1[];
+extern const unsigned char __stop_dmmainx1[];
 
 // ───────────────────────── 输出小工具 ─────────────────────────
 
@@ -516,6 +525,88 @@ static void exp_f(char *out, size_t cap, size_t *used) {
 
 // ─────────────────────── 入口 ───────────────────────
 
+// ───────── 实验 G：真实模块装载（旷野之息 main，改写器真实产物）─────────
+// 与实验 D 的差别：D 用的是自造测试映像（49KB），G 用的是 **真实游戏模块**——
+// patch_nso.py（DM_PATCH_TARGET=ohos）改写旷野之息 main 之后的 main.patched.bin（37MB），
+// 经 gen_embed_ohos.py 内嵌成 dmmainx0/w/x1 三段。判据四条，**不做执行**
+//（执行需要 93 个宿主门的接线，另立一步）：
+//   ① alloc 成功（内含布局自检：x0+w == PATCH_OFF）
+//   ② 三段**逐字节全等**：映射区 vs 嵌入段（37MB 全比，不止抽查）
+//   ③ seal 后代码区 R+X 生效（/proc/self/maps 权限位）
+//   ④ 布局常数与 fixups 一致（module_t 的常数来自 dm_main_layout.h，同源）
+static void exp_g(char *out, size_t cap, size_t *used) {
+    app(out, cap, used, "【实验 G】真实模块装载（旷野之息 main，37MB 改写产物）\n");
+    app(out, cap, used, "  素材：patch_nso.py（DM_PATCH_TARGET=ohos）的 main.patched.bin\n");
+
+    module_t m;
+    memset(&m, 0, sizeof m);
+    strncpy(m.name, "main", sizeof m.name - 1);
+    m.text_end      = DM_IMG_MAIN_TEXT_END;
+    m.patch_off     = DM_IMG_MAIN_PATCH_OFF;
+    m.ro_off        = DM_IMG_MAIN_RO_OFF;
+    m.data_off      = DM_IMG_MAIN_DATA_OFF;
+    m.key_page_off  = DM_IMG_MAIN_KEY_PAGE_OFF;
+    m.key_page_size = DM_IMG_MAIN_KEY_PAGE_SIZE;
+    appf(out, cap, used, "  布局：TEXT_END %#llx / PATCH_OFF %#llx / KEY_PAGE %#llx\n",
+         (unsigned long long)m.text_end, (unsigned long long)m.patch_off,
+         (unsigned long long)m.key_page_off);
+
+    if (dm_ohos_map_image_alloc(&m)) {
+        app(out, cap, used, "  ✗ alloc 失败（布局自检或 mmap，见 hilog）\n\n");
+        return;
+    }
+    appf(out, cap, used, "  ✓ 定位 + 拷贝：base %p，size %zu\n", (void *)m.base, m.size);
+
+    // 判据②：三段**全量** memcmp —— 映射区必须与嵌入段逐字节一致
+    const struct { const unsigned char *s, *e; uint8_t *dst; const char *nm; } regions[] = {
+        { __start_dmmainx0, __stop_dmmainx0, m.base,                 "x0(代码)" },
+        { __start_dmmainw,  __stop_dmmainw,  m.base + (__stop_dmmainx0 - __start_dmmainx0), "w(数据)" },
+        { __start_dmmainx1, __stop_dmmainx1, m.base + DM_IMG_MAIN_PATCH_OFF, "x1(补丁区)" },
+    };
+    int cmp_ok = 1;
+    for (int k = 0; k < 3; k++) {
+        size_t len = (size_t)(regions[k].e - regions[k].s);
+        int same = (memcmp(regions[k].dst, regions[k].s, len) == 0);
+        appf(out, cap, used, "  %s %s 段逐字节一致（%zu 字节）\n", same ? "✓" : "✗", regions[k].nm, len);
+        if (!same) cmp_ok = 0;
+    }
+    if (cmp_ok)
+        app(out, cap, used, "  ✅ 判据②：映射区与嵌入段**全量一致**（37MB 全比）\n");
+    else
+        app(out, cap, used, "  ❌ 判据②：映射内容与嵌入段不一致\n");
+
+    if (dm_ohos_map_image_seal(&m)) {
+        app(out, cap, used, "  ✗ seal 失败（见 hilog）\n\n");
+        return;
+    }
+    app(out, cap, used, "  ✓ 代码区与补丁区已封 R+X\n");
+
+    // 判据③：/proc/self/maps 里找 base 所在行，验权限位
+    int map_ok = 0; char perms[8] = "?";
+    {
+        FILE *f = fopen("/proc/self/maps", "r");
+        char line[512];
+        while (f && fgets(line, sizeof line, f)) {
+            unsigned long lo, hi;
+            if (sscanf(line, "%lx-%lx %7s", &lo, &hi, perms) == 3) {
+                if ((uintptr_t)m.base + 0x1000 >= lo && (uintptr_t)m.base + 0x1000 < hi) { map_ok = 1; break; }
+            }
+        }
+        if (f) fclose(f);
+    }
+    if (map_ok) {
+        int rx = (perms[0] == 'r' && perms[1] == '-' && perms[2] == 'x');
+        appf(out, cap, used, "  %s 判据③：代码区权限 = %s（期望 r-x）\n", rx ? "✅" : "❌", perms);
+        if (!rx) cmp_ok = 0;
+    } else {
+        app(out, cap, used, "  ❌ 判据③：/proc/self/maps 里找不到映射区\n");
+        cmp_ok = 0;
+    }
+
+    appf(out, cap, used, "  结论：%s\n\n",
+         (cmp_ok && map_ok) ? "**真实模块装载成立** —— 装载链吃下了第一个真实游戏模块" : "链路有问题，见上");
+}
+
 int dm_probe_run(const char *files_dir, char *out, size_t cap) {
     if (!out || cap < 64) return -1;
     size_t used = 0;
@@ -535,6 +626,7 @@ int dm_probe_run(const char *files_dir, char *out, size_t cap) {
     logline(">>> 实验 E 开始"); exp_e(out, cap, &used); logline(">>> 实验 E 返回");
     logline(">>> 实验 E2 开始"); exp_e2(out, cap, &used); logline(">>> 实验 E2 返回");
     logline(">>> 实验 F 开始"); exp_f(out, cap, &used); logline(">>> 实验 F 返回");
+    logline(">>> 实验 G 开始"); exp_g(out, cap, &used); logline(">>> 实验 G 返回");
     logline(">>> 实验 C 开始"); exp_c(out, cap, &used); logline(">>> 实验 C 返回");
     logline(">>> 实验 B 开始"); exp_b(files_dir, out, cap, &used); logline(">>> 实验 B 返回");
     logline(">>> 实验 A 开始"); exp_a(out, cap, &used); logline(">>> 实验 A 返回");

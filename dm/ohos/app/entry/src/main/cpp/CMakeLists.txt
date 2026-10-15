@@ -41,6 +41,9 @@ add_library(dmprobe SHARED
     # 测试映像：由 dm/ohos/tools/gen_embed_ohos.py --embed-bytes 生成，
     # 里面是自定义段 dmmainx0 / dmmainw / dmmainx1（实验 D 用）
     test_image.S
+    # 真实模块：旷野之息 main 的改写产物（同款工具，默认 .incbin 引 F:/switch-work 的
+    # main.patched.bin；实验 G 装载验证用。换游戏/换代后重新生成）
+    ${DM_DIR}/ohos/dm_images.S
 )
 
 target_include_directories(dmprobe PRIVATE

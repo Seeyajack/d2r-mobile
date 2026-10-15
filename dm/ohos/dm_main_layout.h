@@ -1,0 +1,19 @@
+// 【生成文件】由 gen_embed_ohos.py --layout-header 生成，勿手改。
+// 来源：各模块 <名>.fixups.tsv 表头（改写器输出的布局与键页表）。
+#pragma once
+
+#define DM_IMG_MAIN_PATCH_OFF 0x2390000
+#define DM_IMG_MAIN_KEY_PAGE_OFF 0x2384000
+#define DM_IMG_MAIN_KEY_PAGE_SIZE 0x4000
+#define DM_IMG_MAIN_TEXT_END 0x1633b30
+#define DM_IMG_MAIN_RO_OFF 0x1634000
+#define DM_IMG_MAIN_DATA_OFF 0x2068000
+#define DM_IMG_MAIN_KEY_K18_IDX 0
+#define DM_IMG_MAIN_KEY_KTLS_IDX 1
+#define DM_IMG_MAIN_KEY_KTLR_IDX 2
+#define DM_IMG_MAIN_KEY_KGATE_IDX 3
+#define DM_IMG_MAIN_KEY_KRES0_IDX 4
+#define DM_IMG_MAIN_KEY_KRES1_IDX 5
+#define DM_IMG_MAIN_KEY_KASPECT_IDX 6
+#define DM_IMG_MAIN_KEY_KASPECTUI_IDX 7
+
