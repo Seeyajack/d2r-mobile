@@ -16,7 +16,8 @@
 #include "vk_ctx_ohos.h"
 #include "vk_surface_ohos.h"
 
-#include "../gfx/tex/nvn_bcdec.h"   // 3.4-A：上游那份"给没有 BC 的 GPU 用"的 CPU 解码器（平台中立）
+#include "../gfx/tex/nvn_bcdec.h"       // 3.4-A：上游那份"给没有 BC 的 GPU 用"的 CPU 解码器（平台中立）
+#include "../gfx/tex/nvn_deswizzle.h"   // 3.4-C：块线性 ↔ 线性（含 nvn_tex.h 的布局类型 nvn_texdesc/nvn_texlayout）
 
 #include <dlfcn.h>         // 3.4-B：按名字载入上游贴图单测的 .so（与宿主单测同一套做法）
 #include <pthread.h>
@@ -2530,7 +2531,7 @@ int vk_backend_pace_xc(char *out, size_t cap) {
 //   ⇒ 应**逐像素一致**（离屏目标与贴图同为 RGBA8 UNORM；NEAREST + 像素中心对齐 ⇒ 没有插值误差）
 //
 // 为什么 A 必须先做：无论最后选"CPU 解→未压缩"（C1）还是"GPU 转码"（C3），**参照链都是它**；
-// 而"图像创建 / 上传 / 描述符 / 采样"这一套是接真贴图必然要写的东西。
+// 而"图像创建 / 上传 / 描述符 / 采样"这一套是接真贴图必然要写的东西（下面抽成了 tex_gpu_render 共用）。
 #define TEX_W      32
 #define TEX_H      32
 #define TEX_BLK     4
@@ -2540,6 +2541,7 @@ int vk_backend_pace_xc(char *out, size_t cap) {
 // 行距错、块序错，下面的逐像素比对立刻抓到（纯色图抓不到这些）。
 // 颜色取 5:6:5 能精确表示的值（R/B 是 8 的倍数、G 是 4 的倍数）⇒ 编解码无损，参照干净。
 // 块布局：c0(2B) c1(2B) 再 16 个 2 位索引（像素 (x,y) 占 bit 2*(y*4+x)；先写的在低位）。
+// w / h 需是 4 的倍数；pitch = 每"块行"字节数 = (w/4)*8。
 static void tex_make_bc1(uint8_t *dst, size_t pitch, uint32_t w, uint32_t h) {
     for (uint32_t by = 0; by * TEX_BLK < h; by++) {
         for (uint32_t bx = 0; bx * TEX_BLK < w; bx++) {
@@ -2564,7 +2566,11 @@ static void tex_make_bc1(uint8_t *dst, size_t pitch, uint32_t w, uint32_t h) {
     }
 }
 
-typedef struct { VkImage img; VkBuffer stg; } tex_up_pack;
+// ---- 上传 + 采样 + 读回（3.4-A 与 3.4-C 共用）----
+// 为什么抽出来而不是各写一份：这段是**接真贴图必然要写的管道**（图像/暂存/布局转换/采样器/描述符/管线），
+// 两处各抄一份的话，以后改一处就会漏另一处；而且它已经被 3.4-A 的逐像素判据验过了。
+typedef struct { VkImage img; VkBuffer stg; uint32_t w, h; } tex_up_pack;
+typedef struct { vk_rt *t; VkPipeline pl; VkPipelineLayout lay; VkDescriptorSet set; uint32_t w, h; } tex_draw_pack;
 
 // 上传：暂存缓冲 → 纹理图像（两次布局转换夹一次拷贝）
 static void rec_tex_upload(VkCommandBuffer cb, void *ud) {
@@ -2580,15 +2586,13 @@ static void rec_tex_upload(VkCommandBuffer cb, void *ud) {
     VkBufferImageCopy reg = { 0 };
     reg.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     reg.imageSubresource.layerCount = 1;
-    reg.imageExtent.width = TEX_W; reg.imageExtent.height = TEX_H; reg.imageExtent.depth = 1;
+    reg.imageExtent.width = u->w; reg.imageExtent.height = u->h; reg.imageExtent.depth = 1;
     vkCmdCopyBufferToImage(cb, u->stg, u->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &reg);
 
     b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL; b.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT; b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
     vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, NULL, 0, NULL, 1, &b);
 }
-
-typedef struct { vk_rt *t; VkPipeline pl; VkPipelineLayout lay; VkDescriptorSet set; } tex_draw_pack;
 
 // 画全屏三角形采样贴图，然后读回（finalLayout 已经是 TRANSFER_SRC，参考阶段 2 的 rec_draw）
 static void rec_tex_draw(VkCommandBuffer cb, void *ud) {
@@ -2599,13 +2603,13 @@ static void rec_tex_draw(VkCommandBuffer cb, void *ud) {
     cv.color.float32[0] = 1.f; cv.color.float32[2] = 1.f; cv.color.float32[3] = 1.f;
     VkRenderPassBeginInfo bi = { VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
     bi.renderPass = t->rp; bi.framebuffer = t->fb;
-    bi.renderArea.extent.width = TEX_W; bi.renderArea.extent.height = TEX_H;
+    bi.renderArea.extent.width = d->w; bi.renderArea.extent.height = d->h;
     bi.clearValueCount = 1; bi.pClearValues = &cv;
     vkCmdBeginRenderPass(cb, &bi, VK_SUBPASS_CONTENTS_INLINE);
 
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, d->pl);
-    VkViewport vp = { 0.f, 0.f, (float)TEX_W, (float)TEX_H, 0.f, 1.f };
-    VkRect2D sc = { { 0, 0 }, { TEX_W, TEX_H } };
+    VkViewport vp = { 0.f, 0.f, (float)d->w, (float)d->h, 0.f, 1.f };
+    VkRect2D sc = { { 0, 0 }, { d->w, d->h } };
     vkCmdSetViewport(cb, 0, 1, &vp);
     vkCmdSetScissor(cb, 0, 1, &sc);
     vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, d->lay, 0, 1, &d->set, 0, NULL);
@@ -2615,49 +2619,26 @@ static void rec_tex_draw(VkCommandBuffer cb, void *ud) {
     VkBufferImageCopy reg = { 0 };
     reg.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     reg.imageSubresource.layerCount = 1;
-    reg.imageExtent.width = TEX_W; reg.imageExtent.height = TEX_H; reg.imageExtent.depth = 1;
+    reg.imageExtent.width = d->w; reg.imageExtent.height = d->h; reg.imageExtent.depth = 1;
     vkCmdCopyImageToBuffer(cb, t->img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, t->rb, 1, &reg);
 }
 
-int vk_backend_tex(char *out, size_t cap) {
-    if (!out || cap < 256) return -1;
-    os_emit *em = &(os_emit){ out, out + cap - 1 };
-    int fails = 0;
-    uint64_t t0 = ms_now();
-
-    OS_EMIT(em, "=== 阶段 4（3.4-A）：贴图通道最小闭环 —— BC 解压 → 上传 → 采样 ===");
-    OS_EMIT(em, "贴图 %d×%d（BC1 RGB_DXT1，块大小 %d×%d），离屏目标同尺寸 1:1 采样（NEAREST + CLAMP）",
-            TEX_W, TEX_H, TEX_BLK, TEX_BLK);
-
-    char err[256] = "";
-    vk_ctx *c = vk_backend_init(err, sizeof err);
-    if (!c) { OS_EMIT(em, "❌ 初始化失败：%s", err); OS_EMIT(em, "===== 失败 ====="); *em->p = 0; return 1; }
-    OS_EMIT(em, "✓ Vulkan 就绪（设备 %s）", c->devname);
-    vk_rt *t = vk_backend_target(c, TEX_W, TEX_H, err, sizeof err);
-    if (!t) { OS_EMIT(em, "❌ 建离屏目标失败：%s", err); vk_backend_shutdown(c); *em->p = 0; return 1; }
-
-    // ---- ① CPU 参照：造 BC1 数据 → 上游解码器解成 RGBA8 ----
-    static uint8_t bc[TEX_W / TEX_BLK * 8 * (TEX_H / TEX_BLK)];    // 每块行 (W/4)*8 字节
-    static uint8_t ref[TEX_W * TEX_H * 4];
-    static uint8_t pix[TEX_W * TEX_H * 4];
-    const size_t bc_pitch = (size_t)(TEX_W / TEX_BLK) * 8;
-    tex_make_bc1(bc, bc_pitch, TEX_W, TEX_H);
-    if (nvn_bc_decode(0x41, bc, bc_pitch, TEX_W, TEX_H, ref, TEX_W * 4) != 0) {
-        OS_EMIT(em, "❌ nvn_bc_decode 拒绝了这个格式（0x41）");
-        vk_backend_target_free(c, t); vk_backend_shutdown(c); *em->p = 0; return 1;
-    }
-    OS_EMIT(em, "✓ CPU 参照解出（nvn_bc_decode，BC1 %zu 字节 → RGBA8 %d 字节）", bc_pitch * (TEX_H / TEX_BLK), TEX_W * TEX_H * 4);
-
-    // ---- ② 自建纹理图像 + 暂存缓冲，把参照传上去 ----
+// 把一张 w×h 的 RGBA8 图上传成纹理、用 NEAREST 1:1 采样画满离屏目标 t、再读回 out_pix。
+// 调用方负责：t 已经按 **同一个 w×h** 建好；out_pix 至少 w*h*4 字节。
+// 返回 0 成功；非 0 失败（失败原因已打进报告）。
+static int tex_gpu_render(os_emit *em, vk_ctx *c, vk_rt *t, const uint8_t *rgba, uint32_t w, uint32_t h, uint8_t *out_pix) {
+    const size_t nbytes = (size_t)w * h * 4;
     VkImage img = NULL; VkDeviceMemory img_mem = NULL; VkBuffer stg = NULL; VkDeviceMemory stg_mem = NULL;
     VkSampler smp = NULL; VkImageView view = NULL;
     VkDescriptorSetLayout dsl = NULL; VkDescriptorPool dpool = NULL; VkDescriptorSet dset = NULL;
     VkPipelineLayout lay = NULL; VkPipeline pl = NULL;
+    char err[256] = "";
+    int fails = 0;
 
     {
         VkImageCreateInfo ii = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
         ii.imageType = VK_IMAGE_TYPE_2D; ii.format = VK_FORMAT_R8G8B8A8_UNORM;
-        ii.extent = (VkExtent3D){ TEX_W, TEX_H, 1 };
+        ii.extent = (VkExtent3D){ w, h, 1 };
         ii.mipLevels = 1; ii.arrayLayers = 1; ii.samples = VK_SAMPLE_COUNT_1_BIT;
         ii.tiling = VK_IMAGE_TILING_OPTIMAL;
         ii.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
@@ -2675,7 +2656,7 @@ int vk_backend_tex(char *out, size_t cap) {
     }
     {
         VkBufferCreateInfo bi = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
-        bi.size = TEX_W * TEX_H * 4; bi.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+        bi.size = nbytes; bi.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
         bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
         VkResult r = vkCreateBuffer(c->dev, &bi, NULL, &stg);
         if (r != VK_SUCCESS) { set_err(err, sizeof err, "vkCreateBuffer(stg)", r); goto fail; }
@@ -2689,20 +2670,19 @@ int vk_backend_tex(char *out, size_t cap) {
         if (r != VK_SUCCESS) { set_err(err, sizeof err, "vkAllocateMemory(stg)", r); goto fail; }
         vkBindBufferMemory(c->dev, stg, stg_mem, 0);
         void *mp = NULL;
-        if (vkMapMemory(c->dev, stg_mem, 0, TEX_W * TEX_H * 4, 0, &mp) != VK_SUCCESS) {
+        if (vkMapMemory(c->dev, stg_mem, 0, nbytes, 0, &mp) != VK_SUCCESS) {
             OS_EMIT(em, "❌ 暂存缓冲映射失败"); goto fail;
         }
-        memcpy(mp, ref, TEX_W * TEX_H * 4); vkUnmapMemory(c->dev, stg_mem);
+        memcpy(mp, rgba, nbytes); vkUnmapMemory(c->dev, stg_mem);
     }
-    OS_EMIT(em, "✓ 自建纹理图像（RGBA8 UNORM，device-local）+ 暂存缓冲就绪");
+    OS_EMIT(em, "✓ 自建纹理图像（RGBA8 UNORM %ux%u，device-local）+ 暂存缓冲就绪", w, h);
 
     {
-        tex_up_pack u = { img, stg };
+        tex_up_pack u = { img, stg, w, h };
         if (one_shot(c, rec_tex_upload, &u) != 0) { OS_EMIT(em, "❌ 上传提交失败"); fails++; goto done; }
     }
     OS_EMIT(em, "✓ 上传完成（暂存缓冲 → vkCmdCopyBufferToImage，含两次布局转换）");
 
-    // ---- ③ 采样器 / 视图 / 描述符 / 管线 ----
     {
         VkSamplerCreateInfo si = { VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
         si.magFilter = VK_FILTER_NEAREST; si.minFilter = VK_FILTER_NEAREST;
@@ -2793,33 +2773,95 @@ int vk_backend_tex(char *out, size_t cap) {
         OS_EMIT(em, "✓ 采样管线创建成功（全屏三角形 + sampler2D，SPIR-V 来自 glslang）");
     }
 
-    // ---- ④ 画 + 读回 + 逐像素比对 ----
     {
-        tex_draw_pack dp = { t, pl, lay, dset };
+        tex_draw_pack dp = { t, pl, lay, dset, w, h };
         if (one_shot(c, rec_tex_draw, &dp) != 0) { OS_EMIT(em, "❌ 绘制提交失败"); fails++; goto done; }
-        if (vk_backend_readback(c, t, pix, sizeof pix) < 0) { OS_EMIT(em, "❌ 读回失败"); fails++; goto done; }
+        if (vk_backend_readback(c, t, out_pix, nbytes) < 0) { OS_EMIT(em, "❌ 读回失败"); fails++; goto done; }
     }
-    {
-        int mismatch = 0, worst = 0, first = -1;
-        const uint32_t npix = TEX_W * TEX_H;
-        for (uint32_t i = 0; i < npix; i++) {
-            const uint8_t *a = ref + i * 4, *b = pix + i * 4;
-            int d = 0;
-            for (int k = 0; k < 4; k++) { int e = (int)a[k] - (int)b[k]; if (e < 0) e = -e; if (e > d) d = e; }
-            if (d > worst) worst = d;
-            if (d > 1) { if (first < 0) first = (int)i; mismatch++; }
+
+done:
+    if (pl) vkDestroyPipeline(c->dev, pl, NULL);
+    if (lay) vkDestroyPipelineLayout(c->dev, lay, NULL);
+    if (dpool) vkDestroyDescriptorPool(c->dev, dpool, NULL);
+    if (dsl) vkDestroyDescriptorSetLayout(c->dev, dsl, NULL);
+    if (view) vkDestroyImageView(c->dev, view, NULL);
+    if (smp) vkDestroySampler(c->dev, smp, NULL);
+    if (stg) vkDestroyBuffer(c->dev, stg, NULL);
+    if (stg_mem) vkFreeMemory(c->dev, stg_mem, NULL);
+    if (img) vkDestroyImage(c->dev, img, NULL);
+    if (img_mem) vkFreeMemory(c->dev, img_mem, NULL);
+    return fails;
+fail:
+    OS_EMIT(em, "❌ 失败：%s", err);
+    fails++;
+    goto done;
+}
+
+// 逐像素比对：返回"差 >1 的像素数"，并把最大通道差写进 *worst_out
+static int tex_diff(const uint8_t *a, const uint8_t *b, uint32_t npix, int *worst_out, int *first_out) {
+    int mismatch = 0, worst = 0, first = -1;
+    for (uint32_t i = 0; i < npix; i++) {
+        int d = 0;
+        for (int k = 0; k < 4; k++) {
+            int e = (int)a[i * 4 + k] - (int)b[i * 4 + k];
+            if (e < 0) e = -e;
+            if (e > d) d = e;
         }
+        if (d > worst) worst = d;
+        if (d > 1) { if (first < 0) first = (int)i; mismatch++; }
+    }
+    if (worst_out) *worst_out = worst;
+    if (first_out) *first_out = first;
+    return mismatch;
+}
+
+int vk_backend_tex(char *out, size_t cap) {
+    if (!out || cap < 256) return -1;
+    os_emit *em = &(os_emit){ out, out + cap - 1 };
+    int fails = 0;
+    uint64_t t0 = ms_now();
+
+    OS_EMIT(em, "=== 阶段 4（3.4-A）：贴图通道最小闭环 —— BC 解压 → 上传 → 采样 ===");
+    OS_EMIT(em, "贴图 %d×%d（BC1 RGB_DXT1，块大小 %d×%d），离屏目标同尺寸 1:1 采样（NEAREST + CLAMP）",
+            TEX_W, TEX_H, TEX_BLK, TEX_BLK);
+
+    char err[256] = "";
+    vk_ctx *c = vk_backend_init(err, sizeof err);
+    if (!c) { OS_EMIT(em, "❌ 初始化失败：%s", err); OS_EMIT(em, "===== 失败 ====="); *em->p = 0; return 1; }
+    OS_EMIT(em, "✓ Vulkan 就绪（设备 %s）", c->devname);
+    vk_rt *t = vk_backend_target(c, TEX_W, TEX_H, err, sizeof err);
+    if (!t) { OS_EMIT(em, "❌ 建离屏目标失败：%s", err); vk_backend_shutdown(c); *em->p = 0; return 1; }
+
+    // ---- ① CPU 参照：造 BC1 数据 → 上游解码器解成 RGBA8 ----
+    static uint8_t bc[TEX_W / TEX_BLK * 8 * (TEX_H / TEX_BLK)];    // 每块行 (W/4)*8 字节
+    static uint8_t ref[TEX_W * TEX_H * 4];
+    static uint8_t pix[TEX_W * TEX_H * 4];
+    const size_t bc_pitch = (size_t)(TEX_W / TEX_BLK) * 8;
+    tex_make_bc1(bc, bc_pitch, TEX_W, TEX_H);
+    if (nvn_bc_decode(0x41, bc, bc_pitch, TEX_W, TEX_H, ref, TEX_W * 4) != 0) {
+        OS_EMIT(em, "❌ nvn_bc_decode 拒绝了这个格式（0x41）");
+        vk_backend_target_free(c, t); vk_backend_shutdown(c); *em->p = 0; return 1;
+    }
+    OS_EMIT(em, "✓ CPU 参照解出（nvn_bc_decode，BC1 %zu 字节 → RGBA8 %d 字节）", bc_pitch * (TEX_H / TEX_BLK), TEX_W * TEX_H * 4);
+
+    // ---- ② 上传 + 采样 + 读回（管道在 tex_gpu_render 里，3.4-C 用的是同一份）----
+    fails = tex_gpu_render(em, c, t, ref, TEX_W, TEX_H, pix);
+
+    // ---- ③ 判据 ----
+    if (!fails) {
+        int worst = 0, first = -1;
+        int mismatch = tex_diff(ref, pix, TEX_W * TEX_H, &worst, &first);
         OS_EMIT(em, "");
-        OS_EMIT(em, "---- 判据：GPU 采到的 vs CPU 解出来的（%u 像素逐点比）----", npix);
-        OS_EMIT(em, "  差 >1 的像素：%d / %u；最大通道差：%d", mismatch, npix, worst);
+        OS_EMIT(em, "---- 判据：GPU 采到的 vs CPU 解出来的（%u 像素逐点比）----", TEX_W * TEX_H);
+        OS_EMIT(em, "  差 >1 的像素：%d / %u；最大通道差：%d", mismatch, TEX_W * TEX_H, worst);
         if (mismatch == 0) {
             OS_EMIT(em, "  ✅ 逐像素一致（±1 以内）—— 贴图通道（图像/上传/描述符/采样）通了");
             if (worst == 0) OS_EMIT(em, "  （而且一个字节都没差：NEAREST 1:1 采样按预期精确命中纹素中心）");
         } else {
             fails++;
-            const uint8_t *a = ref + (size_t)first * 4, *b = pix + (size_t)first * 4;
-            OS_EMIT(em, "  ❌ 首个不符的像素 #%d：CPU=(%u,%u,%u,%u) GPU=(%u,%u,%u,%u)",
-                    first, a[0], a[1], a[2], a[3], b[0], b[1], b[2], b[3]);
+            OS_EMIT(em, "  ❌ 首个不符的像素 #%d：CPU=(%u,%u,%u,%u) GPU=(%u,%u,%u,%u)", first,
+                    ref[(size_t)first * 4], ref[(size_t)first * 4 + 1], ref[(size_t)first * 4 + 2], ref[(size_t)first * 4 + 3],
+                    pix[(size_t)first * 4], pix[(size_t)first * 4 + 1], pix[(size_t)first * 4 + 2], pix[(size_t)first * 4 + 3]);
         }
         // 反"两边一起错"的旁证：测试图案每块应恰好两种颜色、且块内棋盘交错。
         // 这一条只看参照自己，不依赖任何 GPU 结果 —— 万一上传/采样与我造的数据"错得一致"，它会先炸。
@@ -2845,27 +2887,146 @@ int vk_backend_tex(char *out, size_t cap) {
         }
     }
 
-done:
-    if (pl) vkDestroyPipeline(c->dev, pl, NULL);
-    if (lay) vkDestroyPipelineLayout(c->dev, lay, NULL);
-    if (dpool) vkDestroyDescriptorPool(c->dev, dpool, NULL);
-    if (dsl) vkDestroyDescriptorSetLayout(c->dev, dsl, NULL);
-    if (view) vkDestroyImageView(c->dev, view, NULL);
-    if (smp) vkDestroySampler(c->dev, smp, NULL);
-    if (stg) vkDestroyBuffer(c->dev, stg, NULL);
-    if (stg_mem) vkFreeMemory(c->dev, stg_mem, NULL);
-    if (img) vkDestroyImage(c->dev, img, NULL);
-    if (img_mem) vkFreeMemory(c->dev, img_mem, NULL);
     vk_backend_target_free(c, t);
     vk_backend_shutdown(c);
-    goto report;
-fail:
-    OS_EMIT(em, "❌ 失败：%s", err);
-    fails++;
-    goto done;
-report:
     OS_EMIT(em, "");
     OS_EMIT(em, "===== 3.4-A %s：失败 %d 项（总耗时 %llums）=====",
+            fails ? "未全通过" : "全部通过", fails, (unsigned long long)(ms_now() - t0));
+    *em->p = 0;
+    return fails;
+}
+
+// ================= 阶段 4（3.4-C）：贴图转码 C1 —— 把真场景那条链串起来 =================
+// 设备不支持 BC（能力探测已验）。**C1 = 忠实上游的做法**：运行时在 CPU 上把 BC 解成未压缩再上传。
+// 上游对"设备没有 BC"本来就这么干（`gfx/tex/nvn_bcdec.c` 就是写给苹果 A15/A16 的），所以这一步零新算法。
+//
+// 这一步做的事就是把前面几段串成**接真场景要走的那条链**：
+//   游戏给的字节（**块线性**）→ 解排布 → 解 BC → 上传未压缩 → 采样上屏
+// 而 3.4-A 只验了"线性 RGBA → 上传 → 采样"，3.4-B 只验了"块线性 ↔ 线性"。这里验的是**它们的组合**。
+//
+// 三条判据：
+//   ① 解排布往返逐字节一致（写进块线性存储，再解回来必须与线性原件一样）
+//   ② 上传 + 采样 + 读回 与 CPU 解码结果逐像素一致（±1）
+//   ③ **负向判据**：跳过解排布那一步、直接拿块线性字节去解 BC ⇒ 结果必须**不同**
+//      （否则说明"解排布"是个空转步骤，那 3.4-B 那一整套就是白做的）
+// 另附 C1 的账：压缩字节 → 未压缩字节，显存与带宽各翻几倍。
+#define TEXC_W 40
+#define TEXC_H 24
+
+int vk_backend_tex_c1(char *out, size_t cap) {
+    if (!out || cap < 256) return -1;
+    os_emit *em = &(os_emit){ out, out + cap - 1 };
+    int fails = 0;
+    uint64_t t0 = ms_now();
+
+    OS_EMIT(em, "=== 阶段 4（3.4-C）：贴图转码 C1 —— 真贴图那条链 ===");
+    OS_EMIT(em, "块线性字节 → 解排布 → CPU 解 BC → 上传未压缩 → 采样；贴图 %d×%d BC1（RGB_DXT1）", TEXC_W, TEXC_H);
+
+    // ---- 贴图描述与布局（用上游 nvn_tex_layout 算，不是我们自己拍的数）----
+    nvn_texdesc d;
+    memset(&d, 0, sizeof d);
+    d.target = 1;          // 2D
+    d.format = 0x41;       // RGB_DXT1（BC1）
+    d.width = TEXC_W; d.height = TEXC_H; d.depth = 1; d.levels = 1;
+    nvn_texlayout L;
+    nvn_tex_layout(&d, &L);
+    const size_t row_bytes = (size_t)(TEXC_W / TEX_BLK) * 8;      // 每"块行"字节
+    const size_t lin_bytes = row_bytes * (TEXC_H / TEX_BLK);      // 线性 BC1 字节数
+    OS_EMIT(em, "✓ 布局（上游 nvn_tex_layout）：块线性存储 %llu 字节、每块 %u 字节、块高 %u GOB、层 %u",
+            (unsigned long long)L.size, L.bpb, L.tileH, L.layers);
+    OS_EMIT(em, "  线性 BC1 是 %zu 字节（%zu 字节/块行 × %u 块行）；块线性存储更大是因为 GOB 边界要对齐",
+            lin_bytes, row_bytes, TEXC_H / TEX_BLK);
+
+    uint8_t *bc_lin = (uint8_t *)malloc(lin_bytes);
+    uint8_t *bl = (uint8_t *)malloc((size_t)L.size + 4096);
+    uint8_t *bc_back = (uint8_t *)malloc(lin_bytes);
+    uint8_t *ref = (uint8_t *)malloc((size_t)TEXC_W * TEXC_H * 4);
+    uint8_t *bad = (uint8_t *)malloc((size_t)TEXC_W * TEXC_H * 4);
+    uint8_t *pix = (uint8_t *)malloc((size_t)TEXC_W * TEXC_H * 4);
+    if (!bc_lin || !bl || !bc_back || !ref || !bad || !pix) {
+        OS_EMIT(em, "❌ 内存不足"); free(bc_lin); free(bl); free(bc_back); free(ref); free(bad); free(pix);
+        *em->p = 0; return 1;
+    }
+    memset(bl, 0xAB, (size_t)L.size + 4096);      // 存满哨兵：越界写会破坏它，下面的自检能抓到
+
+    tex_make_bc1(bc_lin, row_bytes, TEXC_W, TEXC_H);
+
+    // ---- ① 写进块线性存储，再解回来（模拟"游戏给的就是块线性"）----
+    if (nvn_swizzle(&d, 0, 0, bc_lin, row_bytes, bl) != 0) {
+        OS_EMIT(em, "❌ nvn_swizzle 失败（贴图不受支持？）"); fails++;
+    } else if (nvn_deswizzle(&d, 0, 0, bl, bc_back, row_bytes) != 0) {
+        OS_EMIT(em, "❌ nvn_deswizzle 失败"); fails++;
+    } else {
+        int same = memcmp(bc_lin, bc_back, lin_bytes) == 0;
+        int guard_ok = 1;
+        for (size_t i = 0; i < 4096; i++) if (bl[L.size + i] != 0xAB) { guard_ok = 0; break; }
+        OS_EMIT(em, "");
+        OS_EMIT(em, "---- ① 解排布往返 ----");
+        OS_EMIT(em, "  %s：线性 → 块线性 → 线性 回来与原件逐字节%s", same ? "✅" : "❌", same ? "一致" : "**不一致**");
+        OS_EMIT(em, "  %s：存储末尾 4096 字节哨兵%s（写出边界会破坏它）", guard_ok ? "✅" : "❌", guard_ok ? "完好" : "**被破坏**");
+        if (!same || !guard_ok) fails++;
+    }
+
+    // ---- ② 上传 + 采样 + 读回，与 CPU 解码逐像素比 ----
+    if (!fails) {
+        if (nvn_bc_decode(0x41, bc_back, row_bytes, TEXC_W, TEXC_H, ref, TEXC_W * 4) != 0) {
+            OS_EMIT(em, "❌ nvn_bc_decode 失败"); fails++;
+        } else {
+            char err[256] = "";
+            vk_ctx *c = vk_backend_init(err, sizeof err);
+            vk_rt *t = c ? vk_backend_target(c, TEXC_W, TEXC_H, err, sizeof err) : NULL;
+            if (!c || !t) {
+                OS_EMIT(em, "❌ Vulkan 初始化/建目标失败：%s", err); fails++;
+            } else {
+                if (tex_gpu_render(em, c, t, ref, TEXC_W, TEXC_H, pix) == 0) {
+                    int worst = 0, first = -1;
+                    int mismatch = tex_diff(ref, pix, TEXC_W * TEXC_H, &worst, &first);
+                    OS_EMIT(em, "");
+                    OS_EMIT(em, "---- ② 上传 + 采样 + 读回 vs CPU 解码（%u 像素逐点比）----", TEXC_W * TEXC_H);
+                    OS_EMIT(em, "  差 >1 的像素：%d / %u；最大通道差：%d", mismatch, TEXC_W * TEXC_H, worst);
+                    if (mismatch == 0) OS_EMIT(em, "  ✅ 逐像素一致 —— 这条链（解排布→解码→上传→采样）通了");
+                    else {
+                        fails++;
+                        OS_EMIT(em, "  ❌ 首个不符的像素 #%d：CPU=(%u,%u,%u,%u) GPU=(%u,%u,%u,%u)", first,
+                                ref[(size_t)first * 4], ref[(size_t)first * 4 + 1], ref[(size_t)first * 4 + 2], ref[(size_t)first * 4 + 3],
+                                pix[(size_t)first * 4], pix[(size_t)first * 4 + 1], pix[(size_t)first * 4 + 2], pix[(size_t)first * 4 + 3]);
+                    }
+                } else fails++;
+            }
+            if (t) vk_backend_target_free(c, t);
+            if (c) vk_backend_shutdown(c);
+        }
+    }
+
+    // ---- ③ 负向判据：不解排布直接解码，**必须不同** ----
+    if (!fails) {
+        if (nvn_bc_decode(0x41, bl, row_bytes, TEXC_W, TEXC_H, bad, TEXC_W * 4) != 0) {
+            OS_EMIT(em, "❌ 负向对照：nvn_bc_decode 拒绝"); fails++;
+        } else {
+            int same = memcmp(ref, bad, (size_t)TEXC_W * TEXC_H * 4) == 0;
+            int nbad = 0;
+            for (uint32_t i = 0; i < (uint32_t)TEXC_W * TEXC_H; i++)
+                if (memcmp(ref + i * 4, bad + i * 4, 4) != 0) nbad++;
+            OS_EMIT(em, "");
+            OS_EMIT(em, "---- ③ 负向判据：跳过解排布，直接拿块线性字节去解 BC ----");
+            OS_EMIT(em, "  与正确结果不同的像素：%d / %d", nbad, TEXC_W * TEXC_H);
+            OS_EMIT(em, "  %s：解排布这一步**确实在干活**（若两者相同，说明它是空转的）",
+                    same ? "❌ 竟然一样 —— 说明解排布没起作用，要查" : "✅ 如预期地不同");
+            if (same) fails++;
+        }
+    }
+
+    // ---- C1 的账（诚实报出：这就是 C1 的代价）----
+    OS_EMIT(em, "");
+    OS_EMIT(em, "---- C1 的账（这是「忠实上游」这一路要付的代价）----");
+    OS_EMIT(em, "  压缩字节 %zu → 未压缩字节 %d（×%.1f）", lin_bytes, TEXC_W * TEXC_H * 4,
+            (double)(TEXC_W * TEXC_H * 4) / (double)lin_bytes);
+    OS_EMIT(em, "  按每像素算：BC1 是 0.5 字节/像素，RGBA8 是 4 字节/像素 ⇒ **显存与带宽都 ×8**");
+    OS_EMIT(em, "  收益：零新算法、当天就能接上真场景；这也是为什么 C3（GPU 转码成 ASTC）值得后面再做");
+
+    free(bc_lin); free(bl); free(bc_back); free(ref); free(bad); free(pix);
+    OS_EMIT(em, "");
+    OS_EMIT(em, "===== 3.4-C（C1）%s：失败 %d 项（总耗时 %llums）=====",
             fails ? "未全通过" : "全部通过", fails, (unsigned long long)(ms_now() - t0));
     *em->p = 0;
     return fails;

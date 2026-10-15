@@ -132,3 +132,10 @@ int     vk_backend_tex(char *out, size_t cap);
 // ⚠️ C/D 段要游戏样本（fetch_samples.py 产出）；缺样本时它会报两处红 —— 那是"未跑"，报告里会按段归类分清。
 // dir = 应用数据目录（捕获文件与样本目录都放它下面）。
 int     vk_backend_tex_layout(const char *dir, char *out, size_t cap);
+
+// 阶段 4（3.4-C）：**贴图转码 C1**（忠实上游）——把真场景那条链串起来：
+// 块线性字节 → 解排布（`nvn_deswizzle`）→ CPU 解 BC（`nvn_bc_decode`）→ 上传未压缩 → 采样。
+// 三条判据：① 解排布往返逐字节一致 + 越界哨兵完好；② 上传/采样结果与 CPU 解码逐像素一致（±1）；
+// ③ **负向判据**：跳过解排布直接解码 ⇒ 结果必须不同（证明解排布不是空转）。
+// 报告里另附 C1 的代价：BC1 0.5 B/px → RGBA8 4 B/px（显存与带宽 ×8）。
+int     vk_backend_tex_c1(char *out, size_t cap);

@@ -75,6 +75,17 @@ struct Index {
         }
       })
 
+    Button('贴图转码 C1（3.4-C：块线性→解排布→解码→上传）')
+      .width('100%')
+      .onClick(() => {
+        try {
+          const ctx = getContext(this) as common.UIAbilityContext;
+          this.result = dmprobe.runVkTexC1(ctx.filesDir);
+        } catch (err) {
+          this.result = '调用原生模块失败：' + JSON.stringify(err);
+        }
+      })
+
     Button('块线性解排布（3.4-B：收编上游单测 t_tex）')
       .width('100%')
       .onClick(() => {

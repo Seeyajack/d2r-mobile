@@ -291,6 +291,19 @@ static napi_value RunVkTexLayout(napi_env env, napi_callback_info info) {
     return ret;
 }
 
+static napi_value RunVkTexC1(napi_env env, napi_callback_info info) {
+    // 阶段 4（3.4-C）：贴图转码 C1 —— 块线性 → 解排布 → CPU 解 BC → 上传 → 采样。
+    char files_dir[1024];
+    Arg0String(env, info, files_dir, sizeof files_dir);
+    napi_value ret = NULL;
+    char *buf = (char *)malloc(VKSMOKE_BUF);
+    if (!buf) { napi_create_string_utf8(env, "内存不足", NAPI_AUTO_LENGTH, &ret); return ret; }
+    vk_backend_tex_c1(buf, VKSMOKE_BUF);
+    napi_create_string_utf8(env, buf, NAPI_AUTO_LENGTH, &ret);
+    free(buf);
+    return ret;
+}
+
 static napi_value Init(napi_env env, napi_value exports) {
     // 取 ArkUI 传进来的 XComponent 实例并注册回调（照 dm/ohos/front_ohos.c 的写法）
     napi_value exportInstance = NULL;
@@ -326,6 +339,7 @@ static napi_value Init(napi_env env, napi_value exports) {
         { "runVkPaceXc",    NULL, RunVkPaceXc,    NULL, NULL, NULL, napi_default, NULL },
         { "runVkTex",       NULL, RunVkTex,       NULL, NULL, NULL, napi_default, NULL },
         { "runVkTexLayout", NULL, RunVkTexLayout, NULL, NULL, NULL, napi_default, NULL },
+        { "runVkTexC1",     NULL, RunVkTexC1,     NULL, NULL, NULL, napi_default, NULL },
     };
     napi_define_properties(env, exports, sizeof desc / sizeof desc[0], desc);
     return exports;
