@@ -3401,3 +3401,195 @@ int vk_backend_onscreen_replay(char *out, size_t cap) {
     *em->p = 0;
     return fails;
 }
+
+// ================= 零成本实测两条（待办 8）=================
+// 两条都是"花几分钟就能拿到、但后面每一步的写法都要用到"的数：
+//   ① 设备有没有 `VK_EXT_descriptor_buffer` / `VK_KHR_push_descriptor` ⇒ **描述符到底该怎么写**
+//      （回放层每帧都要更新大量描述符；这三条路子的写法差别很大，先知道有什么再设计，
+//        比先按某一种写完整套再发现设备不支持要省得多。）
+//   ② 预留的那块 4 GiB 客体堆**是不是懒提交**：分配完就占满物理内存，还是"摸到哪页才算哪页"
+//      ⇒ **内存账怎么算**（按 4 GiB 满额算，还是按实际用到多少算）。
+//
+// 为什么叫"零成本"：两条都只是查询与一次采样，不动渲染管线、不依赖游戏文件。
+// 为什么"实测"不"查文档"：文档说的是规范允许什么；我们要的是**这台设备上到底是哪一种行为**。
+
+// 读 /proc/self/statm 的第 2 个字段（常驻页数）→ 字节。读不到返回 0。
+static uint64_t rss_bytes(void) {
+    FILE *f = fopen("/proc/self/statm", "r");
+    if (!f) return 0;
+    unsigned long size = 0, resident = 0;
+    int n = fscanf(f, "%lu %lu", &size, &resident);
+    fclose(f);
+    if (n < 2) return 0;
+    long ps = sysconf(_SC_PAGESIZE);
+    if (ps <= 0) ps = 4096;
+    return (uint64_t)resident * (uint64_t)ps;
+}
+
+// 从 /proc/meminfo 取一个字段（KB）；取不到返回 0
+static uint64_t meminfo_kb(const char *key) {
+    FILE *f = fopen("/proc/meminfo", "r");
+    if (!f) return 0;
+    char line[256]; uint64_t v = 0;
+    while (fgets(line, sizeof line, f)) {
+        size_t kl = strlen(key);
+        if (strncmp(line, key, kl) == 0) { sscanf(line + kl, ": %llu", (unsigned long long *)&v); break; }
+    }
+    fclose(f);
+    return v;
+}
+
+int vk_backend_zero_cost(char *out, size_t cap) {
+    if (!out || cap < 256) return -1;
+    os_emit *em = &(os_emit){ out, out + cap - 1 };
+    int fails = 0;
+    uint64_t t0 = ms_now();
+
+    OS_EMIT(em, "=== 零成本实测两条：描述符能力 + 4 GiB 客体堆的提交行为 ===");
+
+    VkPhysicalDevice pd = dm_ohos_vk_phys();
+    VkInstance inst = dm_ohos_vk_instance();
+    if (!pd) { OS_EMIT(em, "❌ 共享上下文不可用：%s", dm_ohos_vk_err()); *em->p = 0; return 1; }
+
+    // ---------- ① 描述符能力 ----------
+    OS_EMIT(em, "");
+    OS_EMIT(em, "---- ① 描述符怎么写（回放层每帧要更新大量描述符，先知道有哪些路子）----");
+    uint32_t n = 0;
+    vkEnumerateDeviceExtensionProperties(pd, NULL, &n, NULL);
+    VkExtensionProperties *ext = n ? (VkExtensionProperties *)calloc(n, sizeof *ext) : NULL;
+    if (ext) {
+        uint32_t got = n;
+        if (vkEnumerateDeviceExtensionProperties(pd, NULL, &got, ext) != VK_SUCCESS) got = 0;
+        struct { const char *name; const char *why; } want[] = {
+            { "VK_EXT_descriptor_buffer", "**把描述符本身放进缓冲**：写一段内存就完事，不用描述符池/集（Vulkan 1.4 的新路子）" },
+            { "VK_KHR_push_descriptor", "**即时推描述符**：录命令时直接推，不必事先建集（对每帧大量更新的场景很省事）" },
+            { "VK_EXT_descriptor_indexing", "描述符数组可动态索引（Vulkan 1.2 已并入核心，这里看扩展形态）" },
+            { "VK_EXT_mutable_descriptor_type", "一个描述符可以改类型（省池子）" },
+            { "VK_KHR_buffer_device_address", "着色器里用缓冲设备指针（1.2 起核心）" },
+        };
+        for (unsigned i = 0; i < sizeof want / sizeof *want; i++) {
+            int has = 0;
+            for (uint32_t k = 0; k < got; k++) if (!strcmp(ext[k].extensionName, want[i].name)) { has = 1; break; }
+            OS_EMIT(em, "  %-32s %s   %s", want[i].name, has ? "有" : "无", want[i].why);
+        }
+        free(ext);
+    } else OS_EMIT(em, "  （枚举设备扩展失败）");
+
+    // update-after-bind 那一组上限在 **VkPhysicalDeviceVulkan12Properties** 里（⾮ VkPhysicalDeviceLimits）
+    PFN_vkGetPhysicalDeviceProperties2 pGet2 =
+        (PFN_vkGetPhysicalDeviceProperties2)vkGetInstanceProcAddr(inst, "vkGetPhysicalDeviceProperties2");
+    {
+        VkPhysicalDeviceProperties pr;
+        vkGetPhysicalDeviceProperties(pd, &pr);
+        OS_EMIT(em, "  与描述符相关的上限（决定能不能「一个大集打天下」）：");
+        OS_EMIT(em, "    每阶段 采样贴图 %u / 采样器 %u / 存储缓冲 %u / uniform 缓冲 %u",
+                pr.limits.maxPerStageDescriptorSampledImages, pr.limits.maxPerStageDescriptorSamplers,
+                pr.limits.maxPerStageDescriptorStorageBuffers, pr.limits.maxPerStageDescriptorUniformBuffers);
+        OS_EMIT(em, "    单个描述符集 采样贴图 %u / 采样器 %u / 存储缓冲 %u / uniform 缓冲 %u",
+                pr.limits.maxDescriptorSetSampledImages, pr.limits.maxDescriptorSetSamplers,
+                pr.limits.maxDescriptorSetStorageBuffers, pr.limits.maxDescriptorSetUniformBuffers);
+    }
+    if (pGet2) {
+        VkPhysicalDeviceVulkan12Properties p12;
+        memset(&p12, 0, sizeof p12);
+        p12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES;
+        VkPhysicalDeviceProperties2 p2;
+        memset(&p2, 0, sizeof p2);
+        p2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+        p2.pNext = &p12;
+        pGet2(pd, &p2);
+        OS_EMIT(em, "    更新后绑定·每阶段：采样贴图 %u / 采样器 %u / 存储缓冲 %u / uniform 缓冲 %u",
+                p12.maxPerStageDescriptorUpdateAfterBindSampledImages,
+                p12.maxPerStageDescriptorUpdateAfterBindSamplers,
+                p12.maxPerStageDescriptorUpdateAfterBindStorageBuffers,
+                p12.maxPerStageDescriptorUpdateAfterBindUniformBuffers);
+        OS_EMIT(em, "    更新后绑定·集内上限：采样贴图 %u / 存储缓冲 %u / 采样器 %u / uniform 缓冲 %u",
+                p12.maxDescriptorSetUpdateAfterBindSampledImages,
+                p12.maxDescriptorSetUpdateAfterBindStorageBuffers,
+                p12.maxDescriptorSetUpdateAfterBindSamplers,
+                p12.maxDescriptorSetUpdateAfterBindUniformBuffers);
+    } else OS_EMIT(em, "  （查不到 vkGetPhysicalDeviceProperties2，update-after-bind 上限跳过）");
+
+#ifdef VK_EXT_descriptor_buffer
+    {
+        if (pGet2) {
+            VkPhysicalDeviceDescriptorBufferPropertiesEXT db;
+            memset(&db, 0, sizeof db);
+            db.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_BUFFER_PROPERTIES_EXT;
+            VkPhysicalDeviceProperties2 p2;
+            memset(&p2, 0, sizeof p2);
+            p2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+            p2.pNext = &db;
+            pGet2(pd, &p2);
+            OS_EMIT(em, "  descriptor buffer 若可用，几种描述符的字节数：组合图像采样器 %llu、采样器 %llu、存储缓冲 %llu、uniform 缓冲 %llu",
+                    (unsigned long long)db.combinedImageSamplerDescriptorSize,
+                    (unsigned long long)db.samplerDescriptorSize,
+                    (unsigned long long)db.storageBufferDescriptorSize,
+                    (unsigned long long)db.uniformBufferDescriptorSize);
+            OS_EMIT(em, "    对齐：描述符缓冲偏移 %llu；地址空间：描述符 %llu MiB / 资源 %llu MiB / 采样器 %llu MiB",
+                    (unsigned long long)db.descriptorBufferOffsetAlignment,
+                    (unsigned long long)(db.descriptorBufferAddressSpaceSize >> 20),
+                    (unsigned long long)(db.resourceDescriptorBufferAddressSpaceSize >> 20),
+                    (unsigned long long)(db.samplerDescriptorBufferAddressSpaceSize >> 20));
+        }
+    }
+#endif
+
+    // ---------- ② 4 GiB 客体堆的提交行为 ----------
+    OS_EMIT(em, "");
+    OS_EMIT(em, "---- ② 预留的 4 GiB 客体堆是不是懒提交（决定内存账按满额算还是按实际用量算）----");
+    {
+        uint64_t mt = meminfo_kb("MemTotal"), ma = meminfo_kb("MemAvailable");
+        if (mt) OS_EMIT(em, "  机器内存：总 %.2f GiB，当前可用 %.2f GiB",
+                        (double)mt / 1048576.0, (double)ma / 1048576.0);
+    }
+
+    uint64_t rss0 = rss_bytes();
+    void *heap = dm_ohos_heap_reserve(4ull << 30);
+    uint64_t heap_sz = dm_ohos_heap_size();
+    uint64_t rss1 = rss_bytes();
+    if (!heap) {
+        OS_EMIT(em, "❌ 客体堆预留失败：%s", dm_ohos_vk_err()); fails++;
+    } else {
+        OS_EMIT(em, "  预留 %llu MiB，CPU 映射 %p",
+                (unsigned long long)(heap_sz >> 20), heap);
+        OS_EMIT(em, "  进程常驻内存（RSS）：预留前 %.1f MiB → 预留后 %.1f MiB（差 %+.1f MiB）",
+                (double)rss0 / 1048576.0, (double)rss1 / 1048576.0,
+                ((double)rss1 - (double)rss0) / 1048576.0);
+
+        // 每 1 MiB 摸一页（0.4 MiB → 4 GiB 共 4096 页）：摸过之后那些页才算真的占住物理内存。
+        // 不整块摸：4 GiB 全摸会把设备内存一次性压满，没必要也不安全。
+        const uint64_t STEP = 1ull << 20;
+        uint64_t pages = 0;
+        for (uint64_t off = 0; off + STEP <= heap_sz; off += STEP) {
+            ((volatile uint8_t *)heap)[off] = 0x5A;
+            pages++;
+        }
+        ((volatile uint8_t *)heap)[heap_sz - 1] = 0x5A;   // 顺带确认最后一页也能写
+        uint64_t rss2 = rss_bytes();
+        OS_EMIT(em, "  摸过 %llu 页（每 1 MiB 摸一页，共 %llu MiB）之后 RSS：%.1f MiB（又 %+.1f MiB）",
+                (unsigned long long)pages, (unsigned long long)(pages),
+                (double)rss2 / 1048576.0, ((double)rss2 - (double)rss1) / 1048576.0);
+
+        double grow1 = ((double)rss1 - (double)rss0) / 1048576.0;   // 预留即涨
+        double grow2 = ((double)rss2 - (double)rss1) / 1048576.0;   // 摸过才涨
+        OS_EMIT(em, "");
+        if (grow1 > 2048.0) {
+            OS_EMIT(em, "  结论：**分配即占满**（预留就涨了 %.0f MiB）⇒ 内存账要**按满额**算。", grow1);
+        } else if (grow2 > 4.0) {
+            OS_EMIT(em, "  结论：**懒提交**（预留只涨 %.1f MiB，摸过才涨 %.1f MiB）⇒ 内存账可**按实际用量**算；"
+                        "没摸到的部分不占物理内存。", grow1, grow2);
+            OS_EMIT(em, "  （这一条对「4 GiB 能不能常在」很重要：它是「地址空间」而不是「已经花掉的内存」）");
+        } else {
+            OS_EMIT(em, "  结论：预留几乎没涨、摸过的也没明显涨（grow1=%.1f、grow2=%.1f MiB）——"
+                        "可能 /proc/self/statm 读数不可靠，**如实记为没测出来**。", grow1, grow2);
+            fails++;
+        }
+    }
+
+    OS_EMIT(em, "");
+    OS_EMIT(em, "===== 零成本实测 %s：失败 %d 项（总耗时 %llums）=====",
+            fails ? "未全通过" : "全部通过", fails, (unsigned long long)(ms_now() - t0));
+    *em->p = 0;
+    return fails;
+}

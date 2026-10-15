@@ -146,3 +146,11 @@ int     vk_backend_tex_c1(char *out, size_t cap);
 // 判据：① 从交换链图像读回 (32,16)=蓝 / (600,400)=红（与 3.2、阶段 2 同一组像素）；
 // ② `nvn_vk_target_image()` 必须就是本帧的交换链图像；③ 屏幕上肉眼可见。
 int     vk_backend_onscreen_replay(char *out, size_t cap);
+
+// 待办 8「零成本实测两条」：**描述符能力** + **4 GiB 客体堆的提交行为**。
+//   ① 有没有 `VK_EXT_descriptor_buffer` / `VK_KHR_push_descriptor`，以及各类描述符上限
+//      ⇒ 回放层每帧要更新大量描述符，**先知道有哪几条路子再设计**，比写完一整套再发现设备不支持省事；
+//   ② 预留 4 GiB 之后进程 RSS 涨不涨、摸过之后涨多少 ⇒ **内存账按满额算还是按实际用量算**
+//      （懒提交 ⇒ 那 4 GiB 是"地址空间"而不是"已经花掉的内存"）。
+// 两条都只是查询 + 一次采样，不动渲染管线、不依赖游戏文件，所以叫"零成本"。
+int     vk_backend_zero_cost(char *out, size_t cap);

@@ -75,6 +75,17 @@ struct Index {
         }
       })
 
+    Button('零成本实测（描述符能力 + 4GB 堆 RSS）')
+      .width('100%')
+      .onClick(() => {
+        try {
+          const ctx = getContext(this) as common.UIAbilityContext;
+          this.result = dmprobe.runVkZeroCost(ctx.filesDir);
+        } catch (err) {
+          this.result = '调用原生模块失败：' + JSON.stringify(err);
+        }
+      })
+
     Button('合流（3.4-D：记录流→回放→上屏）')
       .width('100%')
       .onClick(() => {
