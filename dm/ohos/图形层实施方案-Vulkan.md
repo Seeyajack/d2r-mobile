@@ -409,9 +409,19 @@ Vulkan 版）+ 渲染通道（传统 renderPass）+ 绘制（顶点缓冲走 3.1
 |---|---|---|
 | `VK_OHOS_surface` + `OHNativeWindow` | **已证实存在**（NDK 的 `vulkan_ohos.h`，`VkSurfaceCreateInfoOHOS.window` 直接收 `OHNativeWindow*`）⇒ 阶段 4 走**标准 swapchain**，不需要离屏 blit 的退路 | 4 |
 | `IMPORT_NATIVE_BUFFER_INFO_OHOS` | `OH_NativeBuffer` 可**导入为 Vulkan 内存/图像** ⇒ 游戏内存池与显示的零拷贝候选（与"统一内存零拷贝"方案互补） | 3（池内存）/4（出图） |
-| `OH_DisplaySoloist`（可变帧率自渲染调度） | 自渲染视区的帧率控制，可按负载设定帧率 ⇒ `nvn_pace.h` 节拍器的**鸿蒙等价物**，且比固定 vsync 强（低负载降帧省电） | 4 |
-| 图形加速服务（超帧 / 稳态帧率） | AI 插帧与稳态帧率 ⇒ 对"60fps 跑稳"有直接价值；可能需要 AGC 配置/上架路径 | 后期调研项 |
-| 游戏服务 / 性能调度 | 游戏模式的调度与资源保障 | 后期调研项 |
+| `OH_DisplaySoloist`（可变帧率自渲染调度） | 自渲染视区的帧率控制，可按负载设定帧率 ⇒ `nvn_pace.h` 节拍器的**鸿蒙等价物**。**已完成 3.3-B/3.3-C：接入口定为它**（回调在系统另起的独立线程） | ✅ 4 已完成 |
+| **Graphics Accelerate Kit · OpenGTX** | 官方开放的 **LTPO 屏幕动态刷新率调控**接口（按场景配置刷新率）。**与我们刚撞上的"面板换档 / 节拍不可控"正面对上** ⇒ **可能是"让面板按我们要的档位走"的正规手段**，值得在贴图之后试一轮 | **建议提前调研（下一项之后）** |
+| Graphics Accelerate Kit · 超帧 / ABR | 超帧（MEMC 插帧，含 AI 超帧、支持 Vulkan）/ ABR 自适应稳态渲染（按 GPU 负载动态缩放渲染分辨率）⇒ 对"60fps 跑稳 + 控热"有直接价值；**但只有在真游戏跑起来、GPU 吃紧时才有意义** | 后期（待办 4 之后） |
+| Graphics Accelerate Kit · 资源包后台下载 / 秒级启动 | 前者针对需要热更的手游（我们**用不上**：本地映像）；后者是**内存镜像精准恢复**，理论上对"把游戏映像加载起来"这件事可能有用 | 后期（待办 4 之后再看） |
+| 游戏性能诊断（HiSmartPerf / GPM / APMS） | 官方性能分析工具（内存、CPU/GPU 占用、场景感知）⇒ **可能省掉自建测量骨架的功夫**，值得早点看一眼 | **建议提前摸底** |
+| Game Service Kit：基础游戏服务（账号登录）/ 应用内支付 / 广告 / 推送 | 这是**"上架一款鸿蒙游戏"**才需要的东西（官方文档把它列为"必选"是在游戏上架语境下）。本项目的账号与购买是**平台侧**的东西，不卖它 | **不接**（若将来要发 Demo/社区版再谈） |
+| 游戏预约 / 内测 / 发布 / 运营（测评、圈子、攻略站…） | 发行与运营链路 | **不接** |
+
+> **Game Kit 全家桶的结论（2026-10-15 调研）**：**不需要提前接整包**。值得提前碰的只有两处——
+> **OpenGTX**（正对"面板换档/节拍"这个真痛点）与**官方性能诊断工具**（可能省掉自建测量骨架）；
+> 其余要么是"上架运营"才需要的（登录/支付/广告/运营），要么要等真游戏跑起来才有意义（超帧/ABR/秒级启动）。
+> 另注：图形加速服务**模拟器不支持**（我们本来就走真机），系统能力 `SystemCapability.Graphics.Accelerate`。
+> **诚实边界**：它的**接入条件**（是否要上架/白名单/AGC 配置、权限怎么开）尚未核实 —— 要推进时先查清再定。
 
 > 侦察证据：`$NDK/sysroot/usr/include/vulkan/vulkan_ohos.h`（`VkSurfaceCreateInfoOHOS.window: OHNativeWindow*`）、
 > `vulkan_core.h` 的 `VK_STRUCTURE_TYPE_*_OHOS` 系列（surface / native buffer 导入 / swapchain image）。
