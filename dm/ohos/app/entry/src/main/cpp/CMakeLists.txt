@@ -74,3 +74,11 @@ add_library(dmt_tex_layout SHARED
     "${DM_REPO}/dm/gfx/nvn/nvn_tex.c"
 )
 dm_host_test_config(dmt_tex_layout)
+
+# ---- 图形层的节拍单测（并入上游时新带进来的 t_pace）：nvn_pace / nvn_pace_hz ----
+# 纯 C、只依赖 stdio 与 nvn_pace.h（上游的构建规则就是 `clang -O1 -Wall -o t_pace t_pace.c`），
+# 所以照同一形状收编。期望值都是上游**手算**的，正好给"出图帧率该取哪一档"一个现成判据。
+add_library(dmt_t_pace SHARED
+    "${DM_REPO}/dm/gfx/tests/t_pace.c"
+)
+dm_host_test_config(dmt_t_pace)

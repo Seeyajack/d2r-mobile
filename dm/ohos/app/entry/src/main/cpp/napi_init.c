@@ -330,6 +330,19 @@ static napi_value RunVkZeroCost(napi_env env, napi_callback_info info) {
     return ret;
 }
 
+static napi_value RunVkPaceTest(napi_env env, napi_callback_info info) {
+    // 收编上游节拍单测 t_pace（节拍等待 + 出图帧率档位）。
+    char files_dir[1024];
+    Arg0String(env, info, files_dir, sizeof files_dir);
+    napi_value ret = NULL;
+    char *buf = (char *)malloc(VKPROBE_BUF);
+    if (!buf) { napi_create_string_utf8(env, "内存不足", NAPI_AUTO_LENGTH, &ret); return ret; }
+    vk_backend_pace_test(files_dir, buf, VKPROBE_BUF);
+    napi_create_string_utf8(env, buf, NAPI_AUTO_LENGTH, &ret);
+    free(buf);
+    return ret;
+}
+
 static napi_value Init(napi_env env, napi_value exports) {
     // 取 ArkUI 传进来的 XComponent 实例并注册回调（照 dm/ohos/front_ohos.c 的写法）
     napi_value exportInstance = NULL;
@@ -368,6 +381,7 @@ static napi_value Init(napi_env env, napi_value exports) {
         { "runVkTexC1",     NULL, RunVkTexC1,     NULL, NULL, NULL, napi_default, NULL },
         { "runVkOnScreenReplay", NULL, RunVkOnScreenReplay, NULL, NULL, NULL, napi_default, NULL },
         { "runVkZeroCost",  NULL, RunVkZeroCost,  NULL, NULL, NULL, napi_default, NULL },
+        { "runVkPaceTest",  NULL, RunVkPaceTest,  NULL, NULL, NULL, napi_default, NULL },
     };
     napi_define_properties(env, exports, sizeof desc / sizeof desc[0], desc);
     return exports;

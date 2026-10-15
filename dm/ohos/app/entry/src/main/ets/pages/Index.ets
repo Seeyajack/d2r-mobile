@@ -75,6 +75,17 @@ struct Index {
         }
       })
 
+    Button('节拍单测（收编上游 t_pace：节拍 + 帧率档位）')
+      .width('100%')
+      .onClick(() => {
+        try {
+          const ctx = getContext(this) as common.UIAbilityContext;
+          this.result = dmprobe.runVkPaceTest(ctx.filesDir);
+        } catch (err) {
+          this.result = '调用原生模块失败：' + JSON.stringify(err);
+        }
+      })
+
     Button('零成本实测（描述符能力 + 4GB 堆 RSS）')
       .width('100%')
       .onClick(() => {

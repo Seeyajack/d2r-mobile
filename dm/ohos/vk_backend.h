@@ -154,3 +154,9 @@ int     vk_backend_onscreen_replay(char *out, size_t cap);
 //      （懒提交 ⇒ 那 4 GiB 是"地址空间"而不是"已经花掉的内存"）。
 // 两条都只是查询 + 一次采样，不动渲染管线、不依赖游戏文件，所以叫"零成本"。
 int     vk_backend_zero_cost(char *out, size_t cap);
+
+// 收编上游新增的节拍单测 `dm/gfx/tests/t_pace.c`（并入上游 4 个提交时带进来的）：
+// 节拍等待 `nvn_pace()` 与**出图帧率档位** `nvn_pace_hz()`（= 刷新率整数分之一里不低于目标的最小一档：
+// 60/120 屏→60、144→72、119.88→59.94、50Hz 屏→50、读不到刷新率→按目标）。期望值全是上游手算的。
+// 这一条正好回答我们 3.3-B/C 实测「请求 60fps 得 44.8 / 59.7」的困惑。
+int     vk_backend_pace_test(const char *dir, char *out, size_t cap);

@@ -3049,6 +3049,56 @@ int vk_backend_tex_c1(char *out, size_t cap) {
 // 本探针会把红行**按段归类**打印出来，便于一眼分清。
 #define TEX_LAYOUT_LOG_MAX 12288
 
+// ---- 收编上游单测的**通用**部分（3.4-B 的块线性、t_pace 的节拍都用它）----
+// 按名字 dlopen → 取 main → 跑 → 把它的 stdout/stderr 捕获到文件 → 读回文本。
+// 为什么抽出来：收编第二、第三个上游单测时，重写一遍 dup2 捕获 + 读文件就是"抄第二份"，
+// 以后改一处会漏另一处。
+// 返回 0 成功；*text_out 是读回的文本（调用方 free）；*rc_out 是单测自己的返回值。
+static int run_upstream_test(os_emit *em, const char *dir, const char *sofile, const char *arg1,
+                             const char *capname, char **text_out, int *rc_out) {
+    *text_out = NULL; *rc_out = 0;
+    void *h = dlopen(sofile, RTLD_NOW);
+    if (!h) { OS_EMIT(em, "❌ 载入 %s 失败：%s", sofile, dlerror()); return -1; }
+    int (*fn)(int, char **) = (int (*)(int, char **))dlsym(h, "main");
+    if (!fn) { OS_EMIT(em, "❌ dlsym(main) 失败：%s", dlerror()); dlclose(h); return -1; }
+
+    char logpath[1200];
+    snprintf(logpath, sizeof logpath, "%s/%s", (dir && *dir) ? dir : ".", capname);
+    int saved = dm_test_capture_begin(logpath);
+    if (saved < 0) { OS_EMIT(em, "❌ 打不开捕获文件：%s", logpath); dlclose(h); return -1; }
+    char *argv[3];
+    argv[0] = (char *)sofile; argv[1] = (char *)(arg1 ? arg1 : ""); argv[2] = NULL;
+    int rc = fn(2, argv);
+    dm_test_capture_end(saved);
+    dlclose(h);
+
+    char *text = (char *)malloc(TEX_LAYOUT_LOG_MAX + 1);
+    if (!text) { OS_EMIT(em, "❌ 内存不足，读不回单测输出（文件在 %s）", logpath); return -1; }
+    size_t got = 0;
+    FILE *f = fopen(logpath, "rb");
+    if (f) { got = fread(text, 1, TEX_LAYOUT_LOG_MAX, f); fclose(f); }
+    text[got] = 0;
+    if (!got) { OS_EMIT(em, "❌ 单测没有任何输出（捕获文件空）"); free(text); return -1; }
+    OS_EMIT(em, "✓ 单测跑完，返回 %d（0 = 全过；输出 %zu 字节%s）", rc, got,
+            got >= TEX_LAYOUT_LOG_MAX ? "，已截断" : "");
+    *text_out = text; *rc_out = rc;
+    return 0;
+}
+
+// 打印捕获到的原文（逐行缩进），供报告里贴出上游自己的输出
+static void emit_captured(os_emit *em, const char *text) {
+    for (const char *p = text; *p; ) {
+        const char *nl = strchr(p, '\n');
+        size_t n = nl ? (size_t)(nl - p) : strlen(p);
+        char line[1024];
+        size_t m = n < sizeof line - 1 ? n : sizeof line - 1;
+        memcpy(line, p, m); line[m] = 0;
+        OS_EMIT(em, "  %s", line);
+        if (!nl) break;
+        p = nl + 1;
+    }
+}
+
 int vk_backend_tex_layout(const char *dir, char *out, size_t cap) {
     if (!out || cap < 256) return -1;
     os_emit *em = &(os_emit){ out, out + cap - 1 };
@@ -3058,33 +3108,13 @@ int vk_backend_tex_layout(const char *dir, char *out, size_t cap) {
     OS_EMIT(em, "=== 阶段 4（3.4-B）：块线性解排布 —— 收编上游单测 t_tex ===");
     OS_EMIT(em, "判据全部来自上游：A 往返 ／ B 手算地址 ／ C/D 真数据对拍+错块高负对照 ／ E 手工 3D");
 
-    void *h = dlopen("dmt_tex_layout.so", RTLD_NOW);
-    if (!h) { OS_EMIT(em, "❌ 载入 dmt_tex_layout.so 失败：%s", dlerror()); *em->p = 0; return 1; }
-    int (*tex_main)(int, char **) = (int (*)(int, char **))dlsym(h, "main");
-    if (!tex_main) { OS_EMIT(em, "❌ dlsym(main) 失败：%s", dlerror()); dlclose(h); *em->p = 0; return 1; }
-    OS_EMIT(em, "✓ 已载入单测并取到入口（块线性那套代码平台中立，零改动复用）");
-
-    char logpath[1200], sample_dir[1200];
-    snprintf(logpath, sizeof logpath, "%s/tex_layout.log", (dir && *dir) ? dir : ".");
+    char *text = NULL; int rc = 0;
+    char sample_dir[1200];
     snprintf(sample_dir, sizeof sample_dir, "%s/tex_samples", (dir && *dir) ? dir : ".");
-
-    int saved = dm_test_capture_begin(logpath);
-    if (saved < 0) { OS_EMIT(em, "❌ 打不开捕获文件：%s", logpath); dlclose(h); *em->p = 0; return 1; }
-    char *argv[3];
-    argv[0] = (char *)"t_tex"; argv[1] = sample_dir; argv[2] = NULL;
-    int rc = tex_main(2, argv);
-    dm_test_capture_end(saved);
-    dlclose(h);
-    OS_EMIT(em, "✓ 单测跑完，返回 %d（0 = 全过）", rc);
-
-    // ---- 把它自己的输出读回来（顺带按段归类红行）----
-    char *text = (char *)malloc(TEX_LAYOUT_LOG_MAX + 1);
-    if (!text) { OS_EMIT(em, "❌ 内存不足，读不回单测输出（文件在 %s）", logpath); *em->p = 0; return 1; }
-    size_t got = 0;
-    FILE *f = fopen(logpath, "rb");
-    if (f) { got = fread(text, 1, TEX_LAYOUT_LOG_MAX, f); fclose(f); }
-    text[got] = 0;
-    if (!got) { OS_EMIT(em, "❌ 单测没有任何输出（捕获文件空）"); free(text); *em->p = 0; return 1; }
+    if (run_upstream_test(em, dir, "dmt_tex_layout.so", sample_dir, "tex_layout.log", &text, &rc)) {
+        *em->p = 0; return 1;
+    }
+    size_t got = strlen(text);
 
     // 段归类：红行归给**最近一次见到的段头**。
     // 注意上游的输出顺序是 A → B → E → **C/D**（C/D 在最后），所以不能按"序号最大"归，
@@ -3109,16 +3139,7 @@ int vk_backend_tex_layout(const char *dir, char *out, size_t cap) {
     OS_EMIT(em, "");
     OS_EMIT(em, "---- 单测自己的输出（原文，%zu 字节%s）----", got,
             got >= TEX_LAYOUT_LOG_MAX ? "，已截断" : "");
-    for (char *p = text; *p; ) {
-        char *nl = strchr(p, '\n');
-        size_t n = nl ? (size_t)(nl - p) : strlen(p);
-        char line[1024];
-        size_t m = n < sizeof line - 1 ? n : sizeof line - 1;
-        memcpy(line, p, m); line[m] = 0;
-        OS_EMIT(em, "  %s", line);
-        if (!nl) break;
-        p = nl + 1;
-    }
+    emit_captured(em, text);
 
     OS_EMIT(em, "");
     OS_EMIT(em, "---- 判据归类（哪一段红，一眼分清）----");
@@ -3589,6 +3610,55 @@ int vk_backend_zero_cost(char *out, size_t cap) {
 
     OS_EMIT(em, "");
     OS_EMIT(em, "===== 零成本实测 %s：失败 %d 项（总耗时 %llums）=====",
+            fails ? "未全通过" : "全部通过", fails, (unsigned long long)(ms_now() - t0));
+    *em->p = 0;
+    return fails;
+}
+
+// ================= 收编上游新增的节拍单测 t_pace（并入上游时带进来的）=================
+// 为什么它值得单独跑：它把两件事的**手算期望值**列成表 ——
+//   · `nvn_pace()`：节拍等待（首帧起拍 / 早到等到点 / 迟到不足一周期照出 / 落后两周期不连发追帧 / 切周期…）
+//   · `nvn_pace_hz()`：**出图帧率 = 刷新率整数分之一里、不低于目标的最小一档**
+//     （60/120 屏→60；**144→72**；165→82.5；100→100；240→60；**119.88→59.94**；50Hz 屏→50；读不到刷新率→按目标；
+//       省电 30：120→30、**144→36**）
+// 第二件正是我们 3.3-B/C 实测"**请求 60fps 却得到 44.8 / 59.7**"要解决的问题：不是系统在敷衍，
+// 而是**帧率该按刷新率的整数分之一取档**（每帧在屏上停整数个刷新周期，才不会交替抖动）。
+// 收编方式与 3.4-B 共用同一个助手；判据是上游手算的，我们只数红行、并把原文贴出来。
+int vk_backend_pace_test(const char *dir, char *out, size_t cap) {
+    if (!out || cap < 256) return -1;
+    os_emit *em = &(os_emit){ out, out + cap - 1 };
+    int fails = 0;
+    uint64_t t0 = ms_now();
+
+    OS_EMIT(em, "=== 节拍单测（收编上游 t_pace）：节拍等待 + 出图帧率档位 ===");
+    OS_EMIT(em, "判据全是上游手算的；这一条正好回答我们 3.3-B/C「请求 60 得 44.8 / 59.7」的困惑");
+
+    char *text = NULL; int rc = 0;
+    if (run_upstream_test(em, dir, "dmt_t_pace.so", "", "t_pace.log", &text, &rc)) {
+        *em->p = 0; return 1;
+    }
+    // 数它自己的对钩与叉（✓ = E2 9C 93、✗ = E2 9C 97）
+    int ok = 0, bad = 0;
+    for (const uint8_t *p = (const uint8_t *)text; *p; p++) {
+        if (p[0] == 0xE2 && p[1] == 0x9C && p[2] == 0x93) ok++;
+        else if (p[0] == 0xE2 && p[1] == 0x9C && p[2] == 0x97) bad++;
+    }
+    OS_EMIT(em, "");
+    OS_EMIT(em, "---- 单测自己的输出（原文）----");
+    emit_captured(em, text);
+
+    OS_EMIT(em, "");
+    OS_EMIT(em, "---- 判据 ----");
+    OS_EMIT(em, "  对钩 %d 个、叉 %d 个（上游返回 %d）", ok, bad, rc);
+    if (bad == 0 && rc == 0) {
+        OS_EMIT(em, "  ✅ 全过 —— 节拍算法与帧率档位算法在鸿蒙侧与上游完全一致");
+    } else {
+        fails++;
+        OS_EMIT(em, "  ❌ 有 %d 项不符（或返回非 0）—— 那才是要看的东西", bad);
+    }
+
+    OS_EMIT(em, "");
+    OS_EMIT(em, "===== t_pace %s：失败 %d 项（总耗时 %llums）=====",
             fails ? "未全通过" : "全部通过", fails, (unsigned long long)(ms_now() - t0));
     *em->p = 0;
     return fails;

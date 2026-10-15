@@ -42,11 +42,14 @@ set(DM_HOST_TEST_LIBS
     dmt_t_hid_script
     dmt_t_hud_dead
     dmt_t_i18n
+    dmt_t_interaction_diag
+    dmt_t_map_diag
     dmt_t_modetx
     dmt_t_movie
     dmt_t_namegen
     dmt_t_oe
     dmt_t_padmap
+    dmt_t_rift_wave
     dmt_t_romfs_validate
     dmt_t_rwlv
     dmt_t_swkbd
@@ -56,6 +59,7 @@ set(DM_HOST_TEST_LIBS
     dmt_t_touch
     dmt_t_touch_mac
     dmt_t_unit_level
+    dmt_t_warp_diag
     dmt_t_widget
 )
 
@@ -194,6 +198,7 @@ add_library(dmt_t_hid_receipt SHARED
     "${DM_REPO}/dm/host/dm_hud.c"
     "${DM_REPO}/dm/host/touch_mac.c"
     "${DM_REPO}/dm/ios/Sources/dm_touch_controls.c"
+    "${DM_REPO}/dm/host/dm_prof.c"
     "${DM_REPO}/dm/ohos/compat/src/dm_compat_dispatch.c"
     "${DM_REPO}/dm/ohos/compat/src/dm_compat_fs.c"
     "${DM_REPO}/dm/ohos/compat/src/dm_compat_hash.c"
@@ -212,6 +217,7 @@ add_library(dmt_t_hid_script SHARED
     "${DM_REPO}/dm/host/dm_hud.c"
     "${DM_REPO}/dm/host/touch_mac.c"
     "${DM_REPO}/dm/ios/Sources/dm_touch_controls.c"
+    "${DM_REPO}/dm/host/dm_prof.c"
     "${DM_REPO}/dm/ohos/compat/src/dm_compat_dispatch.c"
     "${DM_REPO}/dm/ohos/compat/src/dm_compat_fs.c"
     "${DM_REPO}/dm/ohos/compat/src/dm_compat_hash.c"
@@ -248,6 +254,32 @@ add_library(dmt_t_i18n SHARED
     "${DM_REPO}/dm/ohos/audio_ohos.c"
 )
 dm_host_test_config(dmt_t_i18n)
+
+# ---- t_interaction_diag ----
+add_library(dmt_t_interaction_diag SHARED
+    "${DM_REPO}/dm/host/tests/t_interaction_diag.c"
+    "${DM_REPO}/dm/ohos/compat/src/dm_compat_dispatch.c"
+    "${DM_REPO}/dm/ohos/compat/src/dm_compat_fs.c"
+    "${DM_REPO}/dm/ohos/compat/src/dm_compat_hash.c"
+    "${DM_REPO}/dm/ohos/compat/src/dm_compat_mach.c"
+    "${DM_REPO}/dm/ohos/compat/src/dm_compat_str.c"
+    "${DM_REPO}/dm/ohos/dm_log.c"
+    "${DM_REPO}/dm/ohos/audio_ohos.c"
+)
+dm_host_test_config(dmt_t_interaction_diag)
+
+# ---- t_map_diag ----
+add_library(dmt_t_map_diag SHARED
+    "${DM_REPO}/dm/host/tests/t_map_diag.c"
+    "${DM_REPO}/dm/ohos/compat/src/dm_compat_dispatch.c"
+    "${DM_REPO}/dm/ohos/compat/src/dm_compat_fs.c"
+    "${DM_REPO}/dm/ohos/compat/src/dm_compat_hash.c"
+    "${DM_REPO}/dm/ohos/compat/src/dm_compat_mach.c"
+    "${DM_REPO}/dm/ohos/compat/src/dm_compat_str.c"
+    "${DM_REPO}/dm/ohos/dm_log.c"
+    "${DM_REPO}/dm/ohos/audio_ohos.c"
+)
+dm_host_test_config(dmt_t_map_diag)
 
 # ---- t_modetx ----
 add_library(dmt_t_modetx SHARED
@@ -315,6 +347,20 @@ add_library(dmt_t_padmap SHARED
     "${DM_REPO}/dm/ohos/audio_ohos.c"
 )
 dm_host_test_config(dmt_t_padmap)
+
+# ---- t_rift_wave ----
+add_library(dmt_t_rift_wave SHARED
+    "${DM_REPO}/dm/host/tests/t_rift_wave.c"
+    "${DM_REPO}/dm/host/hle_os.c"
+    "${DM_REPO}/dm/ohos/compat/src/dm_compat_dispatch.c"
+    "${DM_REPO}/dm/ohos/compat/src/dm_compat_fs.c"
+    "${DM_REPO}/dm/ohos/compat/src/dm_compat_hash.c"
+    "${DM_REPO}/dm/ohos/compat/src/dm_compat_mach.c"
+    "${DM_REPO}/dm/ohos/compat/src/dm_compat_str.c"
+    "${DM_REPO}/dm/ohos/dm_log.c"
+    "${DM_REPO}/dm/ohos/audio_ohos.c"
+)
+dm_host_test_config(dmt_t_rift_wave)
 
 # ---- t_romfs_validate ----
 add_library(dmt_t_romfs_validate SHARED
@@ -419,6 +465,7 @@ add_library(dmt_t_touch_mac SHARED
     "${DM_REPO}/dm/host/tests/t_touch_mac.c"
     "${DM_REPO}/dm/host/dm_cursor.c"
     "${DM_REPO}/dm/host/dm_hud.c"
+    "${DM_REPO}/dm/host/dm_prof.c"
     "${DM_REPO}/dm/ohos/compat/src/dm_compat_dispatch.c"
     "${DM_REPO}/dm/ohos/compat/src/dm_compat_fs.c"
     "${DM_REPO}/dm/ohos/compat/src/dm_compat_hash.c"
@@ -441,6 +488,19 @@ add_library(dmt_t_unit_level SHARED
     "${DM_REPO}/dm/ohos/audio_ohos.c"
 )
 dm_host_test_config(dmt_t_unit_level)
+
+# ---- t_warp_diag ----
+add_library(dmt_t_warp_diag SHARED
+    "${DM_REPO}/dm/host/tests/t_warp_diag.c"
+    "${DM_REPO}/dm/ohos/compat/src/dm_compat_dispatch.c"
+    "${DM_REPO}/dm/ohos/compat/src/dm_compat_fs.c"
+    "${DM_REPO}/dm/ohos/compat/src/dm_compat_hash.c"
+    "${DM_REPO}/dm/ohos/compat/src/dm_compat_mach.c"
+    "${DM_REPO}/dm/ohos/compat/src/dm_compat_str.c"
+    "${DM_REPO}/dm/ohos/dm_log.c"
+    "${DM_REPO}/dm/ohos/audio_ohos.c"
+)
+dm_host_test_config(dmt_t_warp_diag)
 
 # ---- t_widget ----
 add_library(dmt_t_widget SHARED
