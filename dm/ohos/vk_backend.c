@@ -3147,3 +3147,207 @@ int vk_backend_tex_layout(const char *dir, char *out, size_t cap) {
     *em->p = 0;
     return fails;
 }
+
+// ================= 阶段 4（3.4-D）：出图与回放层合流 =================
+// 之前两条路是分开的：
+//   3.3-A 的"上屏"走的是**探针自己搭的最小管线**（自己建管线、自己录一个三角形）；
+//   3.2 的"回放"是**离屏的**（画到自建目标，再读回来看像素）。
+// 这一步把两条接起来，让画面真的从**回放层**出来：
+//   手写命令流 → `nvn_vk_exec` 回放 → 画进**交换链图像** → 上屏
+//
+// 接法就是给回放层的那道缝（`nvn_vk_target_bind_external`）：回放层平时自建渲染目标、结束布局是
+// TRANSFER_SRC（供读回）；上屏要求画进交换链图像、结束布局是 PRESENT_SRC_KHR。所以由**这条出图路径**
+// 把"画到哪"递进去，回放层本身不认识交换链 —— 职责没有串。
+//
+// 判据（与 3.2 / 阶段 2 同一组像素，便于逐条对照）：
+//   ① 从交换链图像读回：视口内 (32,16) 应是三角形蓝、视口外 (600,400) 应是清屏红
+//   ② `nvn_vk_target_image()` 必须就是这一帧的交换链图像（证明确实画在它上面，不是又自建了一个）
+//   ③ 屏幕上肉眼可见（截图由人确认）
+// 已知未做：本步的视口还是 3.2 那套 64×64（所以屏幕上是左上角一个小三角形），
+//           "整屏视口 / 多通道 / 贴图绑定"留到后面按需扩。
+int vk_backend_onscreen_replay(char *out, size_t cap) {
+    if (!out || cap < 256) return -1;
+    os_emit *em = &(os_emit){ out, out + cap - 1 };
+    os_ctx o;
+    int fails = 0;
+    uint64_t t0 = ms_now();
+
+    OS_EMIT(em, "=== 阶段 4（3.4-D）：出图与回放层合流 —— 记录流 → 回放 → 上屏 ===");
+    OS_EMIT(em, "复用 3.3-A 的交换链骨架 + 3.2 的手写命令流；画的目标由本路径递进回放层");
+
+    // ---- ① 交换链骨架（3.3-A 那一套，原样复用）----
+    fails = os_setup(em, &o);
+    if (fails) { os_teardown(&o); OS_EMIT(em, ""); OS_EMIT(em, "===== 3.4-D 未全通过：出图骨架都没搭起来（失败 %d 项）=====", fails); *em->p = 0; return fails; }
+
+    // ---- ② 回放环境（3.2 那一套，幂等；含客体堆 + 池 + 手写命令流）----
+    char env_err[256] = "";
+    if (replay_env_build(env_err, sizeof env_err)) {
+        OS_EMIT(em, "❌ 回放环境搭建失败：%s", env_err); fails++;
+    }
+    VkDevice dev = dm_ohos_vk_device();
+
+    // ---- ③ 同一段命令流**先离屏跑一遍**：判据①在这条干净的路上取 ----
+    // 为什么不在交换链图像上读回：真机实测——对交换链图像做
+    // PRESENT_SRC → TRANSFER_SRC → PRESENT_SRC 的往返之后，present 返回成功、像素也对，**但屏幕上什么都不显示**。
+    // 与其去猜驱动的脾气，不如把两件事分开：**离屏那条路负责"画得对不对"，出图那条路只负责"上屏"**。
+    if (!fails) {
+        if (nvn_vk_frame_begin() != 0) { OS_EMIT(em, "❌ 离屏回放 frame_begin 失败：%s", nvn_vk_last_error()); fails++; }
+        else {
+            nvn_vk_exec(g_env_stream);
+            if (nvn_vk_frame_end() != 0) { OS_EMIT(em, "❌ 离屏回放 frame_end 失败：%s", nvn_vk_last_error()); fails++; }
+        }
+    }
+    if (!fails) {
+        nvn_vk_stats_t st; nvn_vk_stats_get(&st);
+        uint32_t tw = 0, th = 0; nvn_vk_target_extent(&tw, &th);
+        OS_EMIT(em, "✓ 离屏回放完成：命令 %llu 条、未处理 %llu、绘制 %llu、通道 %llu、新建管线 %llu / 命中缓存 %llu、GPU %.3f ms（离屏目标 %ux%u）",
+                (unsigned long long)st.ops, (unsigned long long)st.ops_skipped,
+                (unsigned long long)st.draws, (unsigned long long)st.passes,
+                (unsigned long long)st.pso_built, (unsigned long long)st.pso_hit, (double)st.gpu_ns / 1e6, tw, th);
+        // 回放层**自建**目标的结束布局就是 TRANSFER_SRC ⇒ 直接拷，不用任何布局转换
+        VkImage src = nvn_vk_target_image();
+        VkBuffer rb = NULL; VkDeviceMemory rb_mem = NULL; void *rb_map = NULL;
+        const int PX[2][2] = { { 32, 16 }, { 0, 63 } };      // 与 3.2 / 阶段 2 同一组像素
+        VkBufferCreateInfo bi = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+        bi.size = 8; bi.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT; bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        VkMemoryRequirements mr; VkMemoryAllocateInfo mi = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+        VkBufferImageCopy reg[2]; memset(reg, 0, sizeof reg);
+        for (int i = 0; i < 2; i++) {
+            reg[i].bufferOffset = (VkDeviceSize)(i * 4);
+            reg[i].imageSubresource = (VkImageSubresourceLayers){ VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+            reg[i].imageOffset = (VkOffset3D){ PX[i][0], PX[i][1], 0 };
+            reg[i].imageExtent = (VkExtent3D){ 1, 1, 1 };
+        }
+        if (!src || vkCreateBuffer(dev, &bi, NULL, &rb) != VK_SUCCESS) { OS_EMIT(em, "❌ 读回缓冲创建失败"); fails++; }
+        else {
+            vkGetBufferMemoryRequirements(dev, rb, &mr);
+            mi.allocationSize = mr.size; mi.memoryTypeIndex = dm_ohos_heap_mem_type();
+            if (vkAllocateMemory(dev, &mi, NULL, &rb_mem) != VK_SUCCESS ||
+                vkBindBufferMemory(dev, rb, rb_mem, 0) != VK_SUCCESS ||
+                vkMapMemory(dev, rb_mem, 0, 8, 0, &rb_map) != VK_SUCCESS) {
+                OS_EMIT(em, "❌ 读回缓冲映射失败"); fails++;
+            }
+        }
+        if (!fails) {
+            VkCommandBufferAllocateInfo ai = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+            ai.commandPool = dm_ohos_vk_pool(); ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY; ai.commandBufferCount = 1;
+            VkCommandBuffer cb = NULL;
+            if (vkAllocateCommandBuffers(dev, &ai, &cb) != VK_SUCCESS) { OS_EMIT(em, "❌ 取命令缓冲失败"); fails++; }
+            else {
+                VkCommandBufferBeginInfo cbi = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+                cbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+                vkBeginCommandBuffer(cb, &cbi);
+                vkCmdCopyImageToBuffer(cb, src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, rb, 2, reg);
+                vkEndCommandBuffer(cb);
+                VkSubmitInfo si = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
+                si.commandBufferCount = 1; si.pCommandBuffers = &cb;
+                VkQueue q = dm_ohos_vk_queue();
+                if (vkQueueSubmit(q, 1, &si, NULL) != VK_SUCCESS || vkQueueWaitIdle(q) != VK_SUCCESS) {
+                    OS_EMIT(em, "❌ 读回提交失败"); fails++;
+                }
+                vkFreeCommandBuffers(dev, dm_ohos_vk_pool(), 1, &cb);
+            }
+        }
+        if (rb_map) {
+            const uint8_t *px = (const uint8_t *)rb_map;
+            OS_EMIT(em, "");
+            OS_EMIT(em, "---- 判据①：离屏读回（画面是不是从记录流回放出来的）----");
+            OS_EMIT(em, "  三角形内 (%d,%d) 读到 (%u,%u,%u,%u)，预期蓝 (0,0,255,255)",
+                    PX[0][0], PX[0][1], px[0], px[1], px[2], px[3]);
+            OS_EMIT(em, "  三角形外 (%d,%d) 读到 (%u,%u,%u,%u)，预期红 (255,0,0,255)",
+                    PX[1][0], PX[1][1], px[4], px[5], px[6], px[7]);
+            int ok_in = px[0] == 0 && px[1] == 0 && px[2] == 255 && px[3] == 255;
+            int ok_out = px[4] == 255 && px[5] == 0 && px[6] == 0 && px[7] == 255;
+            OS_EMIT(em, "  %s 与 3.2 / 阶段 2 同一组像素一致", (ok_in && ok_out) ? "✅" : "❌");
+            if (!ok_in || !ok_out) fails++;
+            vkUnmapMemory(dev, rb_mem);
+        }
+        if (rb) vkDestroyBuffer(dev, rb, NULL);
+        if (rb_mem) vkFreeMemory(dev, rb_mem, NULL);
+    }
+
+    // ---- ④⑤⑥ 出图：取图 → 建视图/通道/帧缓冲 → 登记外部目标 → 回放 → present ----
+    // 这一段刻意**照抄 3.3-A 那套已经验过的东西**，只在"画的目标"上换成回放层：
+    //   · 取图用**信号量**（不是栅栏）、且由一次提交把它等掉 —— 3.3-A 就是这么做的；
+    //   · present 等一个由提交 signal 的信号量；
+    //   · **连续出几帧**（合成器往往要看到这个 surface 连续被交上来才接管）。
+    // 真机踩到的坑记在这：只 present 一帧、或取图只给栅栏不给信号量时，present 返回成功、像素也对，
+    // 但**屏幕上什么都不显示**（XComponent 全黑）。这两条都是"不报错的错"。
+    {
+        VkSemaphore sem_avail = NULL, sem_done = NULL;
+        VkSemaphoreCreateInfo sci = { VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
+        vkCreateSemaphore(dev, &sci, NULL, &sem_avail);
+        vkCreateSemaphore(dev, &sci, NULL, &sem_done);
+
+        const int FRAMES = 3;
+        int ok_frames = 0;
+        for (int f = 0; f < FRAMES && !fails; f++) {
+            uint32_t idx = 0;
+
+            VkResult r = vkAcquireNextImageKHR(dev, o.sc, 2000000000ull, sem_avail, VK_NULL_HANDLE, &idx);
+            if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) { OS_EMIT(em, "❌ 第 %d 帧取图失败 VkResult=%d", f, (int)r); fails++; break; }
+            if (idx > 7) { OS_EMIT(em, "❌ 交换链图像下标异常（%u）", idx); fails++; break; }
+
+            // **直接用 os_setup 建好的那一套**（view[idx] / 共用 rp / fb[idx]）—— 别自己另建一套：
+            // 3.3-A 能上屏用的就是这一套，自建的那套（参数一样）真机上画面出不来。
+            VkImageView view = o.view[idx]; VkRenderPass rp = o.rp; VkFramebuffer fb = o.fb[idx];
+
+            if (nvn_vk_target_bind_external(&g_tex, o.img[idx], view, rp, fb, o.ext.width, o.ext.height,
+                                            o.fmt, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR)) {
+                OS_EMIT(em, "❌ 绑定外部渲染目标失败：%s", nvn_vk_last_error()); fails++; break;
+            }
+            if (f == 0) OS_EMIT(em, "✓ 交换链图像已登记为回放层的外部渲染目标（含 PRESENT_SRC 结束布局）");
+
+            if (nvn_vk_frame_begin() != 0) { OS_EMIT(em, "❌ 回放 frame_begin 失败：%s", nvn_vk_last_error()); fails++; break; }
+            nvn_vk_exec(g_env_stream);
+            if (nvn_vk_frame_end() != 0) { OS_EMIT(em, "❌ 回放 frame_end 失败：%s", nvn_vk_last_error()); fails++; break; }
+
+            if (f == 0) {
+                // 判据②：证明确实画在交换链图像上，而不是回放层又自建了一个
+                int same = (nvn_vk_target_image() == o.img[idx]);
+                OS_EMIT(em, "---- 判据②：回放层的目标图像 %s 本帧交换链图像 #%u ----", same ? "=" : "**≠**", idx);
+                if (!same) { fails++; break; }
+            }
+
+            // 把取图的信号量等掉、并 signal 给 present 等的那个（与 3.3-A 同一套语义）
+            {
+                VkPipelineStageFlags st = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+                VkSubmitInfo si = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
+                si.waitSemaphoreCount = 1; si.pWaitSemaphores = &sem_avail; si.pWaitDstStageMask = &st;
+                si.signalSemaphoreCount = 1; si.pSignalSemaphores = &sem_done;
+                if (vkQueueSubmit(dm_ohos_vk_queue(), 1, &si, NULL) != VK_SUCCESS) { OS_EMIT(em, "❌ 第 %d 帧同步提交失败", f); fails++; break; }
+            }
+
+            VkPresentInfoKHR pi = { VK_STRUCTURE_TYPE_PRESENT_INFO_KHR };
+            pi.waitSemaphoreCount = 1; pi.pWaitSemaphores = &sem_done;
+            pi.swapchainCount = 1; pi.pSwapchains = &o.sc; pi.pImageIndices = &idx;
+            r = vkQueuePresentKHR(o.qpresent, &pi);
+            if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) { OS_EMIT(em, "❌ 第 %d 帧 present 失败 VkResult=%d", f, (int)r); fails++; }
+            else ok_frames++;
+
+            vkQueueWaitIdle(dm_ohos_vk_queue());
+            // view / rp / fb 都归 os_setup 那一套，由 os_teardown 统一销毁，这里不碰
+        }
+        if (!fails) {
+            OS_EMIT(em, "---- 判据③：present %d 帧 ----", ok_frames);
+            OS_EMIT(em, "  ❌ **未通过**：真机上 XComponent 区域全黑，屏幕上看不到画面（截图确认过）");
+            OS_EMIT(em, "     present 返回成功、离屏读回也对 ⇒ 问题在「交上去的东西没被合成器采纳」这一段。");
+            OS_EMIT(em, "     已排除：present 不带等待信号量／只 present 一帧／取图不给信号量／自建 view·通道·帧缓冲／");
+            OS_EMIT(em, "             对交换链图像做 PRESENT_SRC↔TRANSFER_SRC 往返（这几条都试过，仍是黑的）。");
+            OS_EMIT(em, "     对照：同一设备、同一 surface 上 3.3-A（探针自己的最小管线）**能显示** ⇒ 差异还没定位。");
+            fails++;      // 判据没成立就不许说"全部通过"——这是本项目的铁律
+        }
+        if (sem_avail) vkDestroySemaphore(dev, sem_avail, NULL);
+        if (sem_done) vkDestroySemaphore(dev, sem_done, NULL);
+    }
+
+    nvn_vk_target_unbind_external(&g_tex);
+    os_teardown(&o);
+
+    OS_EMIT(em, "");
+    OS_EMIT(em, "===== 3.4-D %s：失败 %d 项（总耗时 %llums）=====",
+            fails ? "未全通过" : "全部通过", fails, (unsigned long long)(ms_now() - t0));
+    if (fails) OS_EMIT(em, "说明：判据①②过（画面确实从记录流回放出来、且画在交换链图像上），**判据③（上屏）未过**。");
+    *em->p = 0;
+    return fails;
+}

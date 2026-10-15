@@ -139,3 +139,10 @@ int     vk_backend_tex_layout(const char *dir, char *out, size_t cap);
 // ③ **负向判据**：跳过解排布直接解码 ⇒ 结果必须不同（证明解排布不是空转）。
 // 报告里另附 C1 的代价：BC1 0.5 B/px → RGBA8 4 B/px（显存与带宽 ×8）。
 int     vk_backend_tex_c1(char *out, size_t cap);
+
+// 阶段 4（3.4-D）：**出图与回放层合流** —— 手写命令流 → `nvn_vk_exec` 回放 → 画进**交换链图像** → 上屏。
+// 3.3-A 的上屏走的是探针自己搭的最小管线，3.2 的回放只画到离屏目标；这一步把两条接起来
+// （接法：`nvn_vk_target_bind_external`，由出图路径把"画到哪"递给回放层，回放层不认识交换链）。
+// 判据：① 从交换链图像读回 (32,16)=蓝 / (600,400)=红（与 3.2、阶段 2 同一组像素）；
+// ② `nvn_vk_target_image()` 必须就是本帧的交换链图像；③ 屏幕上肉眼可见。
+int     vk_backend_onscreen_replay(char *out, size_t cap);

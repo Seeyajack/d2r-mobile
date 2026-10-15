@@ -75,6 +75,17 @@ struct Index {
         }
       })
 
+    Button('合流（3.4-D：记录流→回放→上屏）')
+      .width('100%')
+      .onClick(() => {
+        try {
+          const ctx = getContext(this) as common.UIAbilityContext;
+          this.result = dmprobe.runVkOnScreenReplay(ctx.filesDir);
+        } catch (err) {
+          this.result = '调用原生模块失败：' + JSON.stringify(err);
+        }
+      })
+
     Button('贴图转码 C1（3.4-C：块线性→解排布→解码→上传）')
       .width('100%')
       .onClick(() => {
