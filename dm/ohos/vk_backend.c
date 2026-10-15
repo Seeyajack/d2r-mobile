@@ -10,9 +10,12 @@
 #include "dm_log.h"
 #include "nvn_obj.h"       // 3.2 手写命令流要用它的记录格式（op_hdr / p_*）
 #include "nvn_vk.h"
+#include "tex_shaders.h"   // 3.4-A：采样贴图用的 SPIR-V（生成文件，见 tools/gen_spv_header.py）
 #include "tri_shaders.h"
 #include "vk_ctx_ohos.h"
 #include "vk_surface_ohos.h"
+
+#include "../gfx/tex/nvn_bcdec.h"   // 3.4-A：上游那份"给没有 BC 的 GPU 用"的 CPU 解码器（平台中立）
 
 #include <pthread.h>
 #include <stdatomic.h>
@@ -2514,3 +2517,354 @@ int vk_backend_pace_xc(char *out, size_t cap) {
     return fails;
 }
 
+
+// ================= 阶段 4（3.4-A）：贴图通道最小闭环 —— BC 解压 → 上传 → 采样 =================
+// 目标：把"贴图这条通道"打通（自建 VkImage → 上传 → 描述符/采样器 → 着色器采样 → 读回），
+// 并给后面 BC→ASTC 转码留一个**谁都绕不开的参照**：CPU 解出来的那份 RGBA。
+//
+// 判据是**两条独立路径互证**：
+//   CPU 参照：上游 `dm/gfx/tex/nvn_bcdec.c`（就是写给"没有 BC 的 GPU"用的那份，平台中立）解同一段 BC 字节 → RGBA8
+//   GPU 实测：把那 RGBA 上传成 VkImage，NEAREST 全屏 1:1 采样画一遍 → 读回
+//   ⇒ 应**逐像素一致**（离屏目标与贴图同为 RGBA8 UNORM；NEAREST + 像素中心对齐 ⇒ 没有插值误差）
+//
+// 为什么 A 必须先做：无论最后选"CPU 解→未压缩"（C1）还是"GPU 转码"（C3），**参照链都是它**；
+// 而"图像创建 / 上传 / 描述符 / 采样"这一套是接真贴图必然要写的东西。
+#define TEX_W      32
+#define TEX_H      32
+#define TEX_BLK     4
+
+// 造一段 BC1（NVN 0x41 RGB_DXT1）测试数据。
+// 设计意图：**每个 4×4 块两种颜色、块内棋盘交错，颜色随块坐标变化** —— 一旦有 x/y 翻转、
+// 行距错、块序错，下面的逐像素比对立刻抓到（纯色图抓不到这些）。
+// 颜色取 5:6:5 能精确表示的值（R/B 是 8 的倍数、G 是 4 的倍数）⇒ 编解码无损，参照干净。
+// 块布局：c0(2B) c1(2B) 再 16 个 2 位索引（像素 (x,y) 占 bit 2*(y*4+x)；先写的在低位）。
+static void tex_make_bc1(uint8_t *dst, size_t pitch, uint32_t w, uint32_t h) {
+    for (uint32_t by = 0; by * TEX_BLK < h; by++) {
+        for (uint32_t bx = 0; bx * TEX_BLK < w; bx++) {
+            uint32_t r5a = (bx * 4u) & 0x1Fu, g6a = (by * 8u) & 0x3Fu, b5a = ((bx + by) * 4u) & 0x1Fu;
+            uint32_t r5b = (r5a + 12u) & 0x1Fu, g6b = (g6a + 24u) & 0x3Fu, b5b = (b5a + 12u) & 0x1Fu;
+            uint32_t ca = (r5a << 11) | (g6a << 5) | b5a;
+            uint32_t cb = (r5b << 11) | (g6b << 5) | b5b;
+            // BC1：c0 > c1 ⇒ 4 色模式（alpha 全 255，没有透明）。若要交换，索引位一起反过来，
+            // 这样"颜色 A 占哪些像素"保持不变 —— 测试图案的可预测性靠这一点。
+            uint32_t inv = 0;
+            if (ca < cb) { uint32_t t = ca; ca = cb; cb = t; inv = 1; }
+            uint32_t idx = 0;
+            for (uint32_t y = 0; y < TEX_BLK; y++)
+                for (uint32_t x = 0; x < TEX_BLK; x++)
+                    if ((((x ^ y) & 1u) ^ inv) != 0) idx |= 1u << (2 * (y * TEX_BLK + x));
+            uint8_t *b = dst + (size_t)by * pitch + (size_t)bx * 8;
+            b[0] = (uint8_t)(ca & 0xFF); b[1] = (uint8_t)(ca >> 8);
+            b[2] = (uint8_t)(cb & 0xFF); b[3] = (uint8_t)(cb >> 8);
+            b[4] = (uint8_t)(idx & 0xFF);      b[5] = (uint8_t)((idx >> 8) & 0xFF);
+            b[6] = (uint8_t)((idx >> 16) & 0xFF); b[7] = (uint8_t)((idx >> 24) & 0xFF);
+        }
+    }
+}
+
+typedef struct { VkImage img; VkBuffer stg; } tex_up_pack;
+
+// 上传：暂存缓冲 → 纹理图像（两次布局转换夹一次拷贝）
+static void rec_tex_upload(VkCommandBuffer cb, void *ud) {
+    tex_up_pack *u = (tex_up_pack *)ud;
+    VkImageMemoryBarrier b = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+    b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED; b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    b.image = u->img;
+    b.subresourceRange = (VkImageSubresourceRange){ VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+    b.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED; b.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    b.srcAccessMask = 0; b.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &b);
+
+    VkBufferImageCopy reg = { 0 };
+    reg.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    reg.imageSubresource.layerCount = 1;
+    reg.imageExtent.width = TEX_W; reg.imageExtent.height = TEX_H; reg.imageExtent.depth = 1;
+    vkCmdCopyBufferToImage(cb, u->stg, u->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &reg);
+
+    b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL; b.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT; b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, NULL, 0, NULL, 1, &b);
+}
+
+typedef struct { vk_rt *t; VkPipeline pl; VkPipelineLayout lay; VkDescriptorSet set; } tex_draw_pack;
+
+// 画全屏三角形采样贴图，然后读回（finalLayout 已经是 TRANSFER_SRC，参考阶段 2 的 rec_draw）
+static void rec_tex_draw(VkCommandBuffer cb, void *ud) {
+    tex_draw_pack *d = (tex_draw_pack *)ud;
+    vk_rt *t = d->t;
+    // 清成品红：本测试图案取不到这个颜色（R 最大 224），所以"看到品红"＝那个像素根本没被画到
+    VkClearValue cv = { 0 };
+    cv.color.float32[0] = 1.f; cv.color.float32[2] = 1.f; cv.color.float32[3] = 1.f;
+    VkRenderPassBeginInfo bi = { VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
+    bi.renderPass = t->rp; bi.framebuffer = t->fb;
+    bi.renderArea.extent.width = TEX_W; bi.renderArea.extent.height = TEX_H;
+    bi.clearValueCount = 1; bi.pClearValues = &cv;
+    vkCmdBeginRenderPass(cb, &bi, VK_SUBPASS_CONTENTS_INLINE);
+
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, d->pl);
+    VkViewport vp = { 0.f, 0.f, (float)TEX_W, (float)TEX_H, 0.f, 1.f };
+    VkRect2D sc = { { 0, 0 }, { TEX_W, TEX_H } };
+    vkCmdSetViewport(cb, 0, 1, &vp);
+    vkCmdSetScissor(cb, 0, 1, &sc);
+    vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, d->lay, 0, 1, &d->set, 0, NULL);
+    vkCmdDraw(cb, 3, 1, 0, 0);            // 全屏三角形：顶点位置由 gl_VertexIndex 算，不用顶点缓冲
+    vkCmdEndRenderPass(cb);
+
+    VkBufferImageCopy reg = { 0 };
+    reg.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    reg.imageSubresource.layerCount = 1;
+    reg.imageExtent.width = TEX_W; reg.imageExtent.height = TEX_H; reg.imageExtent.depth = 1;
+    vkCmdCopyImageToBuffer(cb, t->img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, t->rb, 1, &reg);
+}
+
+int vk_backend_tex(char *out, size_t cap) {
+    if (!out || cap < 256) return -1;
+    os_emit *em = &(os_emit){ out, out + cap - 1 };
+    int fails = 0;
+    uint64_t t0 = ms_now();
+
+    OS_EMIT(em, "=== 阶段 4（3.4-A）：贴图通道最小闭环 —— BC 解压 → 上传 → 采样 ===");
+    OS_EMIT(em, "贴图 %d×%d（BC1 RGB_DXT1，%d×%d 块），离屏目标同尺寸 1:1 采样（NEAREST + CLAMP）",
+            TEX_W, TEX_H, TEX_BLK, TEX_BLK);
+
+    char err[256] = "";
+    vk_ctx *c = vk_backend_init(err, sizeof err);
+    if (!c) { OS_EMIT(em, "❌ 初始化失败：%s", err); OS_EMIT(em, "===== 失败 ====="); *em->p = 0; return 1; }
+    OS_EMIT(em, "✓ Vulkan 就绪（设备 %s）", c->devname);
+    vk_rt *t = vk_backend_target(c, TEX_W, TEX_H, err, sizeof err);
+    if (!t) { OS_EMIT(em, "❌ 建离屏目标失败：%s", err); vk_backend_shutdown(c); *em->p = 0; return 1; }
+
+    // ---- ① CPU 参照：造 BC1 数据 → 上游解码器解成 RGBA8 ----
+    static uint8_t bc[TEX_W / TEX_BLK * 8 * (TEX_H / TEX_BLK)];    // 每块行 (W/4)*8 字节
+    static uint8_t ref[TEX_W * TEX_H * 4];
+    static uint8_t pix[TEX_W * TEX_H * 4];
+    const size_t bc_pitch = (size_t)(TEX_W / TEX_BLK) * 8;
+    tex_make_bc1(bc, bc_pitch, TEX_W, TEX_H);
+    if (nvn_bc_decode(0x41, bc, bc_pitch, TEX_W, TEX_H, ref, TEX_W * 4) != 0) {
+        OS_EMIT(em, "❌ nvn_bc_decode 拒绝了这个格式（0x41）");
+        vk_backend_target_free(c, t); vk_backend_shutdown(c); *em->p = 0; return 1;
+    }
+    OS_EMIT(em, "✓ CPU 参照解出（nvn_bc_decode，BC1 %zu 字节 → RGBA8 %d 字节）", bc_pitch * (TEX_H / TEX_BLK), TEX_W * TEX_H * 4);
+
+    // ---- ② 自建纹理图像 + 暂存缓冲，把参照传上去 ----
+    VkImage img = NULL; VkDeviceMemory img_mem = NULL; VkBuffer stg = NULL; VkDeviceMemory stg_mem = NULL;
+    VkSampler smp = NULL; VkImageView view = NULL;
+    VkDescriptorSetLayout dsl = NULL; VkDescriptorPool dpool = NULL; VkDescriptorSet dset = NULL;
+    VkPipelineLayout lay = NULL; VkPipeline pl = NULL;
+
+    {
+        VkImageCreateInfo ii = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+        ii.imageType = VK_IMAGE_TYPE_2D; ii.format = VK_FORMAT_R8G8B8A8_UNORM;
+        ii.extent = (VkExtent3D){ TEX_W, TEX_H, 1 };
+        ii.mipLevels = 1; ii.arrayLayers = 1; ii.samples = VK_SAMPLE_COUNT_1_BIT;
+        ii.tiling = VK_IMAGE_TILING_OPTIMAL;
+        ii.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        ii.sharingMode = VK_SHARING_MODE_EXCLUSIVE; ii.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        VkResult r = vkCreateImage(c->dev, &ii, NULL, &img);
+        if (r != VK_SUCCESS) { set_err(err, sizeof err, "vkCreateImage", r); goto fail; }
+        VkMemoryRequirements mr; vkGetImageMemoryRequirements(c->dev, img, &mr);
+        VkMemoryAllocateInfo mi = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+        mi.allocationSize = mr.size;
+        mi.memoryTypeIndex = find_mem_type(c, mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &r);
+        if (r != VK_SUCCESS) { OS_EMIT(em, "❌ 纹理找不到 device-local 内存类型"); goto fail; }
+        r = vkAllocateMemory(c->dev, &mi, NULL, &img_mem);
+        if (r != VK_SUCCESS) { set_err(err, sizeof err, "vkAllocateMemory(tex)", r); goto fail; }
+        vkBindImageMemory(c->dev, img, img_mem, 0);
+    }
+    {
+        VkBufferCreateInfo bi = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+        bi.size = TEX_W * TEX_H * 4; bi.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+        bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        VkResult r = vkCreateBuffer(c->dev, &bi, NULL, &stg);
+        if (r != VK_SUCCESS) { set_err(err, sizeof err, "vkCreateBuffer(stg)", r); goto fail; }
+        VkMemoryRequirements mr; vkGetBufferMemoryRequirements(c->dev, stg, &mr);
+        VkMemoryAllocateInfo mi = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+        mi.allocationSize = mr.size;
+        mi.memoryTypeIndex = find_mem_type(c, mr.memoryTypeBits,
+                                           VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &r);
+        if (r != VK_SUCCESS) { OS_EMIT(em, "❌ 暂存缓冲找不到 host-visible 内存类型"); goto fail; }
+        r = vkAllocateMemory(c->dev, &mi, NULL, &stg_mem);
+        if (r != VK_SUCCESS) { set_err(err, sizeof err, "vkAllocateMemory(stg)", r); goto fail; }
+        vkBindBufferMemory(c->dev, stg, stg_mem, 0);
+        void *mp = NULL;
+        if (vkMapMemory(c->dev, stg_mem, 0, TEX_W * TEX_H * 4, 0, &mp) != VK_SUCCESS) {
+            OS_EMIT(em, "❌ 暂存缓冲映射失败"); goto fail;
+        }
+        memcpy(mp, ref, TEX_W * TEX_H * 4); vkUnmapMemory(c->dev, stg_mem);
+    }
+    OS_EMIT(em, "✓ 自建纹理图像（RGBA8 UNORM，device-local）+ 暂存缓冲就绪");
+
+    {
+        tex_up_pack u = { img, stg };
+        if (one_shot(c, rec_tex_upload, &u) != 0) { OS_EMIT(em, "❌ 上传提交失败"); fails++; goto done; }
+    }
+    OS_EMIT(em, "✓ 上传完成（暂存缓冲 → vkCmdCopyBufferToImage，含两次布局转换）");
+
+    // ---- ③ 采样器 / 视图 / 描述符 / 管线 ----
+    {
+        VkSamplerCreateInfo si = { VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
+        si.magFilter = VK_FILTER_NEAREST; si.minFilter = VK_FILTER_NEAREST;
+        si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+        si.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        si.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        si.maxLod = 0.f;
+        VkResult r = vkCreateSampler(c->dev, &si, NULL, &smp);
+        if (r != VK_SUCCESS) { set_err(err, sizeof err, "vkCreateSampler", r); goto fail; }
+
+        VkImageViewCreateInfo vi = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+        vi.image = img; vi.viewType = VK_IMAGE_VIEW_TYPE_2D; vi.format = VK_FORMAT_R8G8B8A8_UNORM;
+        vi.subresourceRange = (VkImageSubresourceRange){ VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+        r = vkCreateImageView(c->dev, &vi, NULL, &view);
+        if (r != VK_SUCCESS) { set_err(err, sizeof err, "vkCreateImageView(tex)", r); goto fail; }
+
+        VkDescriptorSetLayoutBinding b = { 0 };
+        b.binding = 0; b.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        b.descriptorCount = 1; b.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        VkDescriptorSetLayoutCreateInfo dl = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+        dl.bindingCount = 1; dl.pBindings = &b;
+        r = vkCreateDescriptorSetLayout(c->dev, &dl, NULL, &dsl);
+        if (r != VK_SUCCESS) { set_err(err, sizeof err, "vkCreateDescriptorSetLayout", r); goto fail; }
+
+        VkDescriptorPoolSize ps = { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1 };
+        VkDescriptorPoolCreateInfo pi = { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
+        pi.maxSets = 1; pi.poolSizeCount = 1; pi.pPoolSizes = &ps;
+        r = vkCreateDescriptorPool(c->dev, &pi, NULL, &dpool);
+        if (r != VK_SUCCESS) { set_err(err, sizeof err, "vkCreateDescriptorPool", r); goto fail; }
+
+        VkDescriptorSetAllocateInfo ai = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
+        ai.descriptorPool = dpool; ai.descriptorSetCount = 1; ai.pSetLayouts = &dsl;
+        r = vkAllocateDescriptorSets(c->dev, &ai, &dset);
+        if (r != VK_SUCCESS) { set_err(err, sizeof err, "vkAllocateDescriptorSets", r); goto fail; }
+
+        VkDescriptorImageInfo di = { smp, view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+        VkWriteDescriptorSet wr = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+        wr.dstSet = dset; wr.dstBinding = 0; wr.descriptorCount = 1;
+        wr.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; wr.pImageInfo = &di;
+        vkUpdateDescriptorSets(c->dev, 1, &wr, 0, NULL);
+    }
+    OS_EMIT(em, "✓ 采样器（NEAREST/CLAMP）+ 图像视图 + 描述符集就绪");
+
+    {
+        VkShaderModule vm = make_module(c->dev, dm_spv_tex_vert, dm_spv_tex_vert_n, err, sizeof err);
+        VkShaderModule fm = vm ? make_module(c->dev, dm_spv_tex_frag, dm_spv_tex_frag_n, err, sizeof err) : NULL;
+        if (!vm || !fm) { OS_EMIT(em, "❌ 建着色器模块失败：%s", err); fails++; goto done; }
+        VkPipelineShaderStageCreateInfo st[2] = {
+            { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_VERTEX_BIT, vm, "main", NULL },
+            { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_FRAGMENT_BIT, fm, "main", NULL },
+        };
+        VkPipelineVertexInputStateCreateInfo vi = { VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
+        // 顶点绑定/属性都是 0：全屏三角形的顶点由 gl_VertexIndex 现算，不需要顶点缓冲
+        VkPipelineInputAssemblyStateCreateInfo ia = { VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
+        ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        VkPipelineViewportStateCreateInfo vps = { VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO };
+        vps.viewportCount = 1; vps.scissorCount = 1;
+        VkPipelineRasterizationStateCreateInfo rs = { VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
+        rs.polygonMode = VK_POLYGON_MODE_FILL; rs.cullMode = VK_CULL_MODE_NONE;
+        rs.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE; rs.lineWidth = 1.f;
+        VkPipelineMultisampleStateCreateInfo ms = { VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO };
+        ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+        VkPipelineDepthStencilStateCreateInfo dss = { VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO };
+        dss.depthTestEnable = VK_FALSE; dss.stencilTestEnable = VK_FALSE;    // 不留 NULL（真机崩过）
+        VkPipelineColorBlendAttachmentState at = { 0 };
+        at.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                            VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+        VkPipelineColorBlendStateCreateInfo cb = { VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
+        cb.attachmentCount = 1; cb.pAttachments = &at;
+        VkDynamicState dyn[2] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+        VkPipelineDynamicStateCreateInfo ds = { VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO };
+        ds.dynamicStateCount = 2; ds.pDynamicStates = dyn;
+        VkPipelineLayoutCreateInfo li = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+        li.setLayoutCount = 1; li.pSetLayouts = &dsl;
+        VkResult r = vkCreatePipelineLayout(c->dev, &li, NULL, &lay);
+        if (r != VK_SUCCESS) { set_err(err, sizeof err, "vkCreatePipelineLayout(tex)", r); vkDestroyShaderModule(c->dev, fm, NULL); vkDestroyShaderModule(c->dev, vm, NULL); fails++; goto done; }
+        VkGraphicsPipelineCreateInfo gi = { VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
+        gi.stageCount = 2; gi.pStages = st;
+        gi.pVertexInputState = &vi; gi.pInputAssemblyState = &ia;
+        gi.pViewportState = &vps; gi.pRasterizationState = &rs; gi.pMultisampleState = &ms;
+        gi.pDepthStencilState = &dss; gi.pColorBlendState = &cb; gi.pDynamicState = &ds;
+        gi.layout = lay; gi.renderPass = t->rp;
+        r = vkCreateGraphicsPipelines(c->dev, NULL, 1, &gi, NULL, &pl);
+        vkDestroyShaderModule(c->dev, fm, NULL);
+        vkDestroyShaderModule(c->dev, vm, NULL);
+        if (r != VK_SUCCESS) { set_err(err, sizeof err, "vkCreateGraphicsPipelines(tex)", r); fails++; goto done; }
+        OS_EMIT(em, "✓ 采样管线创建成功（全屏三角形 + sampler2D，SPIR-V 来自 glslang）");
+    }
+
+    // ---- ④ 画 + 读回 + 逐像素比对 ----
+    {
+        tex_draw_pack dp = { t, pl, lay, dset };
+        if (one_shot(c, rec_tex_draw, &dp) != 0) { OS_EMIT(em, "❌ 绘制提交失败"); fails++; goto done; }
+        if (vk_backend_readback(c, t, pix, sizeof pix) < 0) { OS_EMIT(em, "❌ 读回失败"); fails++; goto done; }
+    }
+    {
+        int mismatch = 0, worst = 0, first = -1;
+        const uint32_t npix = TEX_W * TEX_H;
+        for (uint32_t i = 0; i < npix; i++) {
+            const uint8_t *a = ref + i * 4, *b = pix + i * 4;
+            int d = 0;
+            for (int k = 0; k < 4; k++) { int e = (int)a[k] - (int)b[k]; if (e < 0) e = -e; if (e > d) d = e; }
+            if (d > worst) worst = d;
+            if (d > 1) { if (first < 0) first = (int)i; mismatch++; }
+        }
+        OS_EMIT(em, "");
+        OS_EMIT(em, "---- 判据：GPU 采到的 vs CPU 解出来的（%u 像素逐点比）----", npix);
+        OS_EMIT(em, "  差 >1 的像素：%d / %u；最大通道差：%d", mismatch, npix, worst);
+        if (mismatch == 0) {
+            OS_EMIT(em, "  ✅ 逐像素一致（±1 以内）—— 贴图通道（图像/上传/描述符/采样）通了");
+            if (worst == 0) OS_EMIT(em, "  （而且一个字节都没差：NEAREST 1:1 采样按预期精确命中纹素中心）");
+        } else {
+            fails++;
+            const uint8_t *a = ref + (size_t)first * 4, *b = pix + (size_t)first * 4;
+            OS_EMIT(em, "  ❌ 首个不符的像素 #%d：CPU=(%u,%u,%u,%u) GPU=(%u,%u,%u,%u)",
+                    first, a[0], a[1], a[2], a[3], b[0], b[1], b[2], b[3]);
+        }
+        // 反"两边一起错"的旁证：测试图案每块应恰好两种颜色、且块内棋盘交错。
+        // 这一条只看参照自己，不依赖任何 GPU 结果 —— 万一上传/采样与我造的数据"错得一致"，它会先炸。
+        {
+            int badblk = 0;
+            for (uint32_t by = 0; by * TEX_BLK < TEX_H; by++)
+                for (uint32_t bx = 0; bx * TEX_BLK < TEX_W; bx++) {
+                    uint32_t p0 = (uint32_t)ref[((by * TEX_BLK) * TEX_W + bx * TEX_BLK) * 4] |
+                                  ((uint32_t)ref[((by * TEX_BLK) * TEX_W + bx * TEX_BLK) * 4 + 1] << 8) |
+                                  ((uint32_t)ref[((by * TEX_BLK) * TEX_W + bx * TEX_BLK) * 4 + 2] << 16);
+                    int n1 = 0, n2 = 0;
+                    for (uint32_t y = 0; y < TEX_BLK; y++)
+                        for (uint32_t x = 0; x < TEX_BLK; x++) {
+                            const uint8_t *q = ref + ((size_t)(by * TEX_BLK + y) * TEX_W + bx * TEX_BLK + x) * 4;
+                            uint32_t v = (uint32_t)q[0] | ((uint32_t)q[1] << 8) | ((uint32_t)q[2] << 16);
+                            if (v == p0) n1++; else n2++;
+                        }
+                    if (n1 == 0 || n2 == 0) badblk++;    // 整块只有一种颜色 ⇒ 图案与预期不符
+                }
+            OS_EMIT(em, "  （旁证）参照的块图案自检：%s（每块应两种颜色、块内棋盘交错）",
+                    badblk ? "**有块不合格**" : "8×8 块全部合格");
+            if (badblk) fails++;
+        }
+    }
+
+done:
+    if (pl) vkDestroyPipeline(c->dev, pl, NULL);
+    if (lay) vkDestroyPipelineLayout(c->dev, lay, NULL);
+    if (dpool) vkDestroyDescriptorPool(c->dev, dpool, NULL);
+    if (dsl) vkDestroyDescriptorSetLayout(c->dev, dsl, NULL);
+    if (view) vkDestroyImageView(c->dev, view, NULL);
+    if (smp) vkDestroySampler(c->dev, smp, NULL);
+    if (stg) vkDestroyBuffer(c->dev, stg, NULL);
+    if (stg_mem) vkFreeMemory(c->dev, stg_mem, NULL);
+    if (img) vkDestroyImage(c->dev, img, NULL);
+    if (img_mem) vkFreeMemory(c->dev, img_mem, NULL);
+    vk_backend_target_free(c, t);
+    vk_backend_shutdown(c);
+    goto report;
+fail:
+    OS_EMIT(em, "❌ 失败：%s", err);
+    fails++;
+    goto done;
+report:
+    OS_EMIT(em, "");
+    OS_EMIT(em, "===== 3.4-A %s：失败 %d 项（总耗时 %llums）=====",
+            fails ? "未全通过" : "全部通过", fails, (unsigned long long)(ms_now() - t0));
+    *em->p = 0;
+    return fails;
+}

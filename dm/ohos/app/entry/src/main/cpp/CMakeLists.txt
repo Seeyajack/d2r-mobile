@@ -27,6 +27,9 @@ add_library(dmprobe SHARED
     ${DM_DIR}/ohos/vk_surface_ohos.c
     # 阶段 3 第一步的池模块：鸿蒙侧回放层的第一个文件（对标 nvn_mtl.m 的池那部分）
     ${DM_DIR}/gfx/nvn/nvn_vk.c
+    # 阶段 4（3.4-A）贴图：上游那份"给没有 BC 的 GPU 用"的 CPU 解码器（平台中立，直接复用；
+    # 它 include 的 bcdec 是 dm/third_party/bcdec 的单头文件）
+    ${DM_DIR}/gfx/tex/nvn_bcdec.c
     # 宿主单测跑测框架 + 统一日志（框架靠 dlopen 去载入各单测 .so，所以它自己很薄）
     ${DM_DIR}/ohos/host_tests.c
     ${DM_DIR}/ohos/host_tests_gen.c   # 生成：单测清单（哪些 .so、叫什么名字）

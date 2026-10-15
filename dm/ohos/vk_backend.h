@@ -118,3 +118,9 @@ int     vk_backend_pace(char *out, size_t cap);
 // 六组同轮紧挨着跑（60Hz/30Hz 各一对 + 两条入口的"等 GPU"对照），同轮内比（跨轮次读数会漂）。
 // 判据：同帧率下两条入口的拍子差 <10% ⇒ 节拍上同源，选哪条看工程便利性；回调是否都落在独立线程。
 int     vk_backend_pace_xc(char *out, size_t cap);
+
+// 阶段 4（3.4-A）：**贴图通道最小闭环** —— BC 解压 → 上传 → 采样。
+// CPU 用上游 `gfx/tex/nvn_bcdec.c`（就是写给"没有 BC 的 GPU"用的那份，平台中立）解一张 BC1 贴图当**参照**；
+// GPU 侧自建 `VkImage` + 暂存上传 + 采样器/描述符 + 全屏 1:1 采样，读回后**逐像素对照**（±1）。
+// 偏心地讲：无论后续选"CPU 解→未压缩"（C1）还是"GPU 转码"（C3），这条参照链都绕不开。
+int     vk_backend_tex(char *out, size_t cap);

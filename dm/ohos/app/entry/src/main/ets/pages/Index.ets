@@ -75,6 +75,17 @@ struct Index {
         }
       })
 
+    Button('贴图通道最小闭环（3.4-A：BC 解压→上传→采样）')
+      .width('100%')
+      .onClick(() => {
+        try {
+          const ctx = getContext(this) as common.UIAbilityContext;
+          this.result = dmprobe.runVkTex(ctx.filesDir);
+        } catch (err) {
+          this.result = '调用原生模块失败：' + JSON.stringify(err);
+        }
+      })
+
     Button('帧率接入口对照（3.3-C：DisplaySoloist vs XComponent 侧）')
       .width('100%')
       .onClick(() => {
