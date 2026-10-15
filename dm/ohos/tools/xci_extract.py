@@ -5,9 +5,11 @@
 **分区文件不加密**（加密在 NCA 内部，由 hactool 处理），所以这一层用几十行就够。
 
 用法：
-    python xci_extract_nso.py <XCI 文件> <输出目录> [匹配子串 ...]
+    python xci_extract.py <XCI 文件> <输出目录> [匹配子串 ...] [--max-bytes N]
 
   不带匹配子串 = 只列出分区与文件；带 = 只抽名字里含任一子串的文件（如 .cnmt.nca）。
+  --max-bytes N = 每个文件只抽前 N 字节（程序 NCA 的 ExeFS 在文件**开头**，只要头部就能解出
+  main/sdk/subsdk0 —— 用来避免为 14 GB 的 RomFS 陪跑；截断的文件不能当完整 NCA 用）。
 
 格式（公开资料，XCI-Explorer / libnx 同款）：
   游戏卡头 0x1000 字节：0x100 签名、0x100 magic "HEAD"、**0x160 根 HFS0 偏移（u64）**；
@@ -74,7 +76,15 @@ def main(argv):
     if len(argv) < 3:
         print(__doc__)
         return 2
-    xci, out_dir, filters = argv[1], argv[2], argv[3:]
+    xci, out_dir = argv[1], argv[2]
+    filters, max_bytes = [], None
+    k = 0
+    while k < len(argv[3:]):
+        a = argv[3 + k]
+        if a == '--max-bytes':
+            max_bytes = int(argv[4 + k]); k += 2
+        else:
+            filters.append(a); k += 1
     total = os.path.getsize(xci)
     # 扫全镜像里所有 HFS0（分块、带 0x10 重叠），挑**条目名以 .nca 结尾**的那个分区
     #（卡带根 HFS0 的条目格式有变体，但 secure 分区是普通 HFS0 —— hactool 已证实）。
@@ -114,7 +124,7 @@ def main(argv):
             dst = os.path.join(out_dir, name.replace(":/", "_").replace("/", "_").replace(":", "_"))
             os.makedirs(os.path.dirname(dst), exist_ok=True)
             f.seek(off)
-            remain = size
+            remain = size if max_bytes is None else min(size, max_bytes)
             with open(dst, "wb") as w:
                 while remain > 0:
                     chunk = f.read(min(remain, 1 << 20))
