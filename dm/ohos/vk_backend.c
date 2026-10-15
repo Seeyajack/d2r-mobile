@@ -3332,10 +3332,60 @@ int vk_backend_onscreen_replay(char *out, size_t cap) {
             OS_EMIT(em, "---- 判据③：present %d 帧 ----", ok_frames);
             OS_EMIT(em, "  ❌ **未通过**：真机上 XComponent 区域全黑，屏幕上看不到画面（截图确认过）");
             OS_EMIT(em, "     present 返回成功、离屏读回也对 ⇒ 问题在「交上去的东西没被合成器采纳」这一段。");
-            OS_EMIT(em, "     已排除：present 不带等待信号量／只 present 一帧／取图不给信号量／自建 view·通道·帧缓冲／");
-            OS_EMIT(em, "             对交换链图像做 PRESENT_SRC↔TRANSFER_SRC 往返（这几条都试过，仍是黑的）。");
-            OS_EMIT(em, "     对照：同一设备、同一 surface 上 3.3-A（探针自己的最小管线）**能显示** ⇒ 差异还没定位。");
             fails++;      // 判据没成立就不许说"全部通过"——这是本项目的铁律
+        }
+
+        // ---- 最小差异法诊断：**同一套取图/提交/present 流程**，只把"谁画的"换成探针自己的管线 ----
+        // 目的：把"我这套出图流程有问题"和"回放层画出来的东西有问题"这两件事分开。
+        // 若屏幕上能看到 3.3-A 那个三角形 ⇒ 流程没问题，嫌疑全在回放层；
+        // 若屏幕仍是黑的 ⇒ 问题在我这套写法上（因为 3.3-A 自己的路径是能显示的）。
+        if (!fails) {
+            int ok2 = 0;
+            for (int f = 0; f < 3; f++) {
+                uint32_t i2 = 0;
+                VkResult r = vkAcquireNextImageKHR(dev, o.sc, 2000000000ull, sem_avail, VK_NULL_HANDLE, &i2);
+                if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) { OS_EMIT(em, "❌ 诊断帧取图失败 VkResult=%d", (int)r); fails++; break; }
+                if (i2 > 7) { OS_EMIT(em, "❌ 诊断帧图像下标异常"); fails++; break; }
+                VkCommandBufferAllocateInfo ai = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+                ai.commandPool = dm_ohos_vk_pool(); ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY; ai.commandBufferCount = 1;
+                VkCommandBuffer cb = NULL;
+                if (vkAllocateCommandBuffers(dev, &ai, &cb) != VK_SUCCESS) { OS_EMIT(em, "❌ 诊断帧取命令缓冲失败"); fails++; break; }
+                VkCommandBufferBeginInfo cbi = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+                cbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+                vkBeginCommandBuffer(cb, &cbi);
+                { os_ctx tmp = o; tmp.fb[0] = o.fb[i2]; rec_os_draw(cb, &tmp); }   // 3.3-A 那套：清屏 + 画三角形
+                vkEndCommandBuffer(cb);
+                VkPipelineStageFlags st = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+                VkSubmitInfo si = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
+                si.waitSemaphoreCount = 1; si.pWaitSemaphores = &sem_avail; si.pWaitDstStageMask = &st;
+                si.commandBufferCount = 1; si.pCommandBuffers = &cb;
+                si.signalSemaphoreCount = 1; si.pSignalSemaphores = &sem_done;
+                if (vkQueueSubmit(dm_ohos_vk_queue(), 1, &si, NULL) != VK_SUCCESS) { OS_EMIT(em, "❌ 诊断帧提交失败"); fails++; break; }
+                VkPresentInfoKHR pi = { VK_STRUCTURE_TYPE_PRESENT_INFO_KHR };
+                pi.waitSemaphoreCount = 1; pi.pWaitSemaphores = &sem_done;
+                pi.swapchainCount = 1; pi.pSwapchains = &o.sc; pi.pImageIndices = &i2;
+                r = vkQueuePresentKHR(o.qpresent, &pi);
+                if (r == VK_SUCCESS || r == VK_SUBOPTIMAL_KHR) ok2++;
+                vkQueueWaitIdle(dm_ohos_vk_queue());
+                vkFreeCommandBuffers(dev, dm_ohos_vk_pool(), 1, &cb);
+            }
+            OS_EMIT(em, "---- 诊断：**同一套流程**换成探针自己的管线，present %d 帧 ----", ok2);
+            OS_EMIT(em, "  屏幕看得到 3.3-A 那个三角形 ⇒ 出图流程没问题，嫌疑在回放层画出来的东西");
+            OS_EMIT(em, "  屏幕仍是黑的 ⇒ 问题在我这套取图/提交/present 的写法上");
+        }
+
+        // ---- 诊断 D2：直接调 3.3-A 那条**已被验证**的每帧路径（os_frame_do，原封不动）----
+        // 它自带取图/提交/present 与信号量。若屏幕上能看到它的三角形 ⇒ 环境与 surface 都好，
+        // 差别只在"谁画的/我怎么交的"；若连它也不显示 ⇒ 说明这一轮的现场状态有问题（不是代码）。
+        if (!fails) {
+            os_slot slot; memset(&slot, 0, sizeof slot);
+            if (os_slot_init(&slot, 1, em) == 0) {
+                uint32_t ix = 0; uint64_t ts = 0; const char *why = "";
+                int rc = os_frame_do(&o, dm_ohos_vk_pool(), &slot, 1, &ix, &ts, &why);
+                OS_EMIT(em, "---- 诊断 D2：调 3.3-A 已验证的每帧路径：%s（帧号 #%u）----",
+                        rc ? why : "已 present 一帧", ix);
+                os_slot_free(&slot, 1, dm_ohos_vk_pool());
+            } else OS_EMIT(em, "---- 诊断 D2：槽位初始化失败 ----");
         }
         if (sem_avail) vkDestroySemaphore(dev, sem_avail, NULL);
         if (sem_done) vkDestroySemaphore(dev, sem_done, NULL);
