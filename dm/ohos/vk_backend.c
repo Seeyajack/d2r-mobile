@@ -1590,12 +1590,18 @@ typedef struct {
 // 抽出来是为了让上面那套骨架能在两个探针之间共用（原先它是 3.3-A 函数内的局部宏 EMIT9）。
 typedef struct { char *p, *end; } os_emit;
 
-#define OS_EMIT(em, ...) do { int _n = snprintf((em).p, (size_t)((em).end - (em).p) + 1, __VA_ARGS__); \
-                              if (_n > 0) { (em).p += _n; if ((em).p > (em).end) (em).p = (em).end; } \
+// **em 是指针**，不是结构体本身 —— 游标必须由所有调用者共享。
+// 踩过的坑：早先按值传结构体，于是"谁写谁改的是自己的副本"，各层的输出全落在同一个偏移上
+// 互相覆盖 —— 真机报告里只剩首尾两块，中间 5 组的明细整段消失（而且不会报任何错）。
+// em is a pointer: the cursor has to be shared by every writer. Passing the struct by value made each
+// layer advance its own copy, so all writers landed on the same offset and overwrote each other --
+// the on-device report kept only its first and last blocks, with no error anywhere.
+#define OS_EMIT(em, ...) do { int _n = snprintf((em)->p, (size_t)((em)->end - (em)->p) + 1, __VA_ARGS__); \
+                              if (_n > 0) { (em)->p += _n; if ((em)->p > (em)->end) (em)->p = (em)->end; } \
                               dm_log_printf(__VA_ARGS__); } while (0)
 
 // 槽位的创建与释放。**栅栏要建成已置位**：第一帧等它时不必先等一个从未置位的栅栏（否则要等超时）。
-static int os_slot_init(os_slot *s, int n, os_emit em) {
+static int os_slot_init(os_slot *s, int n, os_emit *em) {
     VkDevice dev = dm_ohos_vk_device();
     int fails = 0;
     for (int i = 0; i < n; i++) {
@@ -1670,7 +1676,7 @@ static void rec_os_draw(VkCommandBuffer cb, void *ud) {
 // 搭出图所需的全部东西：XComponent 窗口 → VkSurfaceKHR → 挑出 present 队列 → swapchain → 通道 →
 // 管线 → 顶点缓冲。报告行经 em 输出（和调用方自己的报告拼在一起）。返回失败项数。
 // 失败时可能已经建了一部分对象 —— 调用方照常 os_teardown（它对空句柄是安全的）。
-static int os_setup(os_emit em, os_ctx *o) {
+static int os_setup(os_emit *em, os_ctx *o) {
     int fails = 0;
     char err[256] = "";
     uint32_t win_w = 0, win_h = 0;
@@ -1735,7 +1741,7 @@ static int os_setup(os_emit em, os_ctx *o) {
     for (uint32_t i = 0; i < nf && i < 6; i++)
         OS_EMIT(em, "  格式 %u：VkFormat %d / 色彩空间 %d", i, (int)fmts[i].format, (int)fmts[i].colorSpace);
     for (uint32_t i = 0; i < npm && i < 6; i++)
-        OS_EMIT(em, "  呈现模式 %u：%d（0=立即 1=信箱 2=队列 3=三重缓冲）", i, (int)pms[i]);
+        OS_EMIT(em, "  呈现模式 %u：%d（0=立即 1=信箱 2=FIFO 3=FIFO 放宽）", i, (int)pms[i]);
 
     // 选：优先 RGBA8/BGRA8 非 sRGB，否则用第一个；呈现模式优先 FIFO（稳定 vsync）
     for (uint32_t i = 0; i < nf; i++)
@@ -1937,7 +1943,7 @@ static int os_frame_do(os_ctx *o, VkCommandPool pool, os_slot *s, int wait_idle,
 
 int vk_backend_onscreen(char *out, size_t cap) {
     if (!out || cap < 256) return -1;
-    os_emit em = { out, out + cap - 1 };
+    os_emit *em = &(os_emit){ out, out + cap - 1 };
     os_ctx o;
     int fails = 0;
     uint64_t t0 = ms_now();
@@ -1984,7 +1990,7 @@ int vk_backend_onscreen(char *out, size_t cap) {
     OS_EMIT(em, "===== 3.3-A %s：失败 %d 项（总耗时 %llums）=====",
             fails ? "未全通过" : "全部通过", fails, (unsigned long long)(ms_now() - t0));
     if (!fails) OS_EMIT(em, "结论：XComponent → VkSurfaceKHR → swapchain → present 这条链通了；屏幕上应能看到三角形");
-    *em.p = 0;
+    *em->p = 0;
     return fails;
 }
 
@@ -2099,7 +2105,7 @@ static void pace_res_of(const pace_arm *a, const pace_run *R, int got, pace_res 
 }
 
 // 把一组的过程与读数打进报告（给人在手机上读，所以每个数都写明是什么）
-static void pace_report(os_emit em, const pace_arm *a, const pace_run *R, int got) {
+static void pace_report(os_emit *em, const pace_arm *a, const pace_run *R, int got) {
     OS_EMIT(em, "---- %s ----", a->name);
     if (a->use_ds) {
         OS_EMIT(em, "  收到 %d 拍（目标 %d）%s", got, a->target, got < a->target ? " ← **没收到应有的拍数**" : "");
@@ -2129,7 +2135,7 @@ static void pace_report(os_emit em, const pace_arm *a, const pace_run *R, int go
 }
 
 // 跑一组。返回失败项数；读数写进 res。
-static int pace_one_arm(os_emit em, os_ctx *o, const pace_arm *arm, pace_run *R, pace_res *res) {
+static int pace_one_arm(os_emit *em, os_ctx *o, const pace_arm *arm, pace_run *R, pace_res *res) {
     VkCommandPool pool = dm_ohos_vk_pool();
     int fails = 0, got = 0;
 
@@ -2213,7 +2219,7 @@ static int pace_one_arm(os_emit em, os_ctx *o, const pace_arm *arm, pace_run *R,
 
 int vk_backend_pace(char *out, size_t cap) {
     if (!out || cap < 256) return -1;
-    os_emit em = { out, out + cap - 1 };
+    os_emit *em = &(os_emit){ out, out + cap - 1 };
     os_ctx o;
     int fails = 0;
     uint64_t t0 = ms_now();
@@ -2226,7 +2232,7 @@ int vk_backend_pace(char *out, size_t cap) {
         os_teardown(&o);
         OS_EMIT(em, "");
         OS_EMIT(em, "===== 3.3-B 未全通过：图都搭不出来（失败 %d 项）=====", fails);
-        *em.p = 0;
+        *em->p = 0;
         return fails;
     }
 
@@ -2247,7 +2253,7 @@ int vk_backend_pace(char *out, size_t cap) {
     if (NARM > (int)(sizeof res / sizeof *res)) {
         OS_EMIT(em, "❌ 组数 %d 超出读数表容量", NARM);
         os_teardown(&o);
-        *em.p = 0;
+        *em->p = 0;
         return 1;
     }
     for (int i = 0; i < NARM; i++) {
@@ -2261,27 +2267,32 @@ int vk_backend_pace(char *out, size_t cap) {
     OS_EMIT(em, "");
     OS_EMIT(em, "===== 判据 =====");
     {
-        const double MS60 = 1000.0 / 60.0;
+        const double MS60 = 1000.0 / 60.0, MS30 = 1000.0 / 30.0;
+        int ok1 = 0, ok2 = 0;
 
         // ① 系统报时成立：60 Hz 组的时间戳间隔应 ≈16.67 ms（±20% 宽容，vsync 抖动是常态）
         if (res[2].ts_avg_ms <= 0)
-            OS_EMIT(em, "① ❌ 一次回调都没收到（或压根没跑起来）—— 报时这条路不通，要看 hilog");
-        else if (res[2].ts_avg_ms > MS60 * 0.8 && res[2].ts_avg_ms < MS60 * 1.2)
+            OS_EMIT(em, "① ❌ 一次回调都没收到（或压根没跑起来）—— 报时这条路不通");
+        else if (res[2].ts_avg_ms > MS60 * 0.8 && res[2].ts_avg_ms < MS60 * 1.2) {
+            ok1 = 1;
             OS_EMIT(em, "① ✅ 系统报时成立：60Hz 组回调间隔平均 %.2f ms ≈ 16.67 ms", res[2].ts_avg_ms);
-        else
-            OS_EMIT(em, "① ⚠ 60Hz 组回调间隔平均 %.2f ms，与 16.67 ms 差得远 —— 如实记录，别当成通过",
-                    res[2].ts_avg_ms);
+        } else
+            OS_EMIT(em, "① ⚠ 60Hz 组回调间隔平均 %.2f ms，与 16.67 ms 差得远 —— **60fps 这个请求没被满足**，"
+                        "如实记录，别当成通过（下面的 ② 才是「帧率能不能设」的判据）", res[2].ts_avg_ms);
 
-        // ② 可变帧率生效：30 Hz 组的间隔应是 60 Hz 组的约两倍
-        if (res[2].ts_avg_ms > 0 && res[4].ts_avg_ms > 0) {
-            double k = res[4].ts_avg_ms / res[2].ts_avg_ms;
-            if (k > 1.7 && k < 2.3)
-                OS_EMIT(em, "② ✅ 可变帧率生效：设 30fps 后间隔从 %.2f ms 变成 %.2f ms（×%.2f，≈33.3 ms）",
-                        res[2].ts_avg_ms, res[4].ts_avg_ms, k);
-            else
-                OS_EMIT(em, "② ⚠ 设 30fps 后间隔是 %.2f ms（与 60Hz 的 %.2f ms 之比 ×%.2f，预期 ×2）—— 如实记录",
-                        res[4].ts_avg_ms, res[2].ts_avg_ms, k);
-        } else OS_EMIT(em, "② ⚠ 30Hz 组没收到拍，可变帧率这一条没验成");
+        // ② 帧率可设：看 30 Hz 组的**绝对**间隔是否 ≈33.3 ms。
+        // 这里刻意不用"30Hz ÷ 60Hz 的比值"当判据 —— 万一 60Hz 组本身被限到别的数（① 的 ⚠ 就是这种情况），
+        // 比值会被那个限流污染，得出"帧率没生效"的错误结论。绝对间隔不受它影响。
+        if (res[4].ts_avg_ms <= 0)
+            OS_EMIT(em, "② ⚠ 30Hz 组没收到拍，可变帧率这一条没验成");
+        else if (res[4].ts_avg_ms > MS30 * 0.8 && res[4].ts_avg_ms < MS30 * 1.2) {
+            ok2 = 1;
+            OS_EMIT(em, "② ✅ 帧率可设（生效）：设 30fps 后回调间隔平均 %.2f ms ≈ 33.33 ms", res[4].ts_avg_ms);
+        } else
+            OS_EMIT(em, "② ⚠ 设 30fps 后回调间隔平均 %.2f ms，与 33.33 ms 差得远 —— 如实记录", res[4].ts_avg_ms);
+        if (res[2].ts_avg_ms > 0 && res[4].ts_avg_ms > 0)
+            OS_EMIT(em, "（参考）30Hz ÷ 60Hz 间隔之比 = ×%.2f（若 60Hz 组本身被限流，这个比值不代表帧率设置）",
+                    res[4].ts_avg_ms / res[2].ts_avg_ms);
 
         // ③ 回调里能不能阻塞：④ 与 ③ 同一段代码，只差"present 后等不等 GPU"
         if (res[2].ts_avg_ms > 0 && res[3].ts_avg_ms > 0) {
@@ -2297,13 +2308,23 @@ int vk_backend_pace(char *out, size_t cap) {
         // 附带信息：两种节拍谁更整齐（最大间隔 / 平均间隔，越接近 1 越好）
         OS_EMIT(em, "（参考）抖动比 = 最大间隔/平均间隔：裸 present 不等 GPU %.2f ／ DisplaySoloist 60Hz %.2f",
                 res[1].jitter, res[2].jitter);
+
+        // 结论跟着判据走 —— 不写死（写死过一次：判据全是 ⚠ 却还打印"可用"）
+        if (!fails) {
+            if (ok1 && ok2)
+                OS_EMIT(em, "结论：系统报时 ≈16.67 ms 且帧率可设 ⇒ 回放层可以用它当节拍源");
+            else if (ok2)
+                OS_EMIT(em, "结论：**帧率可设**（30fps 生效），但 60fps 请求没被满足（实际 ≈%.2f ms）"
+                            "—— 先把这个查清楚，再定回放层怎么接它", res[2].ts_avg_ms);
+            else
+                OS_EMIT(em, "结论：跑通了，但判据没达预期 —— **别当成可用**，见上面每条的实测数");
+        }
     }
 
     OS_EMIT(em, "");
     OS_EMIT(em, "===== 3.3-B %s：失败 %d 项（总耗时 %llums）=====",
             fails ? "未全通过" : "全部通过", fails, (unsigned long long)(ms_now() - t0));
-    if (!fails) OS_EMIT(em, "结论：系统报时可用（回调另起线程、间隔 ≈16.7ms），且帧率可设 ⇒ 回放层可以用它当节拍源");
-    *em.p = 0;
+    *em->p = 0;
     return fails;
 }
 
