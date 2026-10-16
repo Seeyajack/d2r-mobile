@@ -885,11 +885,36 @@ typedef struct { uint64_t slot; const char *name; } plt_ent_t;
 static plt_ent_t g_plt[512];
 static int g_nplt;
 static volatile int g_plt_calls;
+// 宿主侧"真服务"表：启动链真的需要返回值的几个（不是一律返 0）。
+// 依据：崩点反汇编显示 AllocateMemoryBlock 的返回值被当对象指针使用。
+static char g_host_arg0[] = "main";
+static char *g_host_argv[2];
 static uint64_t plt_stub(void) {
-    uint64_t x16v; __asm__ volatile("mov %0, x16" : "=r"(x16v));
-    for (int i = 0; i < g_nplt; i++)
-        if (g_plt[i].slot == x16v) { klog("[PLT] %s\n", g_plt[i].name); break; }
+    uint64_t x16v, a0, a1, a2;
+    __asm__ volatile("mov %0, x16" : "=r"(x16v));
+    __asm__ volatile("mov %0, x0" : "=r"(a0));
+    __asm__ volatile("mov %0, x1" : "=r"(a1));
+    __asm__ volatile("mov %0, x2" : "=r"(a2));
+    const char *nm = NULL;
+    for (int i = 0; i < g_nplt; i++) if (g_plt[i].slot == x16v) { nm = g_plt[i].name; break; }
     g_plt_calls++;
+    if (nm) {
+        // nn::os::AllocateMemoryBlock(size_t* out_size, size_t size) —— 真给内存
+        if (!strcmp(nm, "_ZN2nn2os19AllocateMemoryBlockEPmm")) {
+            void *p = malloc((size_t)a1);
+            if (a0) *(uint64_t *)a0 = a1;
+            klog("[服务] AllocateMemoryBlock(大小 %llu) → %p\n", (unsigned long long)a1, p);
+            return (uint64_t)(uintptr_t)p;
+        }
+        // nn::os::GetHostArgc / GetHostArgv —— 给一对合理的启动参数
+        if (!strcmp(nm, "_ZN2nn2os11GetHostArgcEv")) { klog("[服务] GetHostArgc → 1\n"); return 1; }
+        if (!strcmp(nm, "_ZN2nn2os11GetHostArgvEv")) {
+            g_host_argv[0] = g_host_arg0; g_host_argv[1] = NULL;
+            klog("[服务] GetHostArgv → argv[0]=main\n");
+            return (uint64_t)(uintptr_t)g_host_argv;
+        }
+        klog("[PLT] %s\n", nm);
+    }
     return 0;
 }
 // 宿主分配器：按游戏的对象布局喂堆。分配器 0x9f34d8 的路径：
