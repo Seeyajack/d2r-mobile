@@ -913,6 +913,10 @@ static uint64_t plt_stub(void) {
             klog("[服务] GetHostArgv → argv[0]=main\n");
             return (uint64_t)(uintptr_t)g_host_argv;
         }
+        // ★ 关键：C++ 静态局部对象的初始化守卫。返回 1 = "由我来初始化"；
+        // 返回 0 会被当成"别人已初始化"而跳过 ⇒ 全部静态单例没建、虚表为空（本轮崩因）。
+        if (!strcmp(nm, "__cxa_guard_acquire")) { klog("[服务] __cxa_guard_acquire → 1（由我来初始化）\n"); return 1; }
+        if (!strcmp(nm, "__cxa_guard_release") || !strcmp(nm, "__cxa_guard_abort")) return 0;
         klog("[PLT] %s\n", nm);
     }
     return 0;
