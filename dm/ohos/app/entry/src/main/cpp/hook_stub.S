@@ -63,8 +63,12 @@ CSYM(hook_slot_site):
     .globl CSYM(hook_stub_end)
 CSYM(hook_stub_end):
 
-// ===== 替换式桩：宿主**替函数干活**（返回值经 x0 带回），桩跳过原实现直接回站点之后 =====
+// ===== 替换式桩：宿主**替函数干活**（返回值经 x0 带回），桩**直接返回调用者**，原实现一条都不执行 =====
 // 用途：分配器这类"必须真给内存"的函数——绕开"注入被改写/路径分支"等不确定性。
+// ⚠ 这里必须是 ret（回 x30 = 调用点的下一条），**不能**跳"站点+4"——被替换的是**函数入口**，
+//   站点+4 就是原实现的第二条指令，跳过去等于"宿主跑完、原实现接着跑"（双执行）：
+//   首条 stp x20,x19,[sp,#-0x20]! 被跳过 ⇒ 栈帧少 0x20、mov w19,w2 写坏 x19，
+//   最后返回的 x0 是原实现的结果，宿主的指针被丢掉。2026-10-16 真机实证（x0/x23 双 0）。
     .p2align 3
     .globl CSYM(hook_rep_begin)
 CSYM(hook_rep_begin):
@@ -101,7 +105,7 @@ CSYM(hook_rep_begin):
     add sp, sp, #0xE0                // 不恢复 x0：x0 就是宿主的返回值
     .globl CSYM(hook_rep_back)
 CSYM(hook_rep_back):
-    b 2b                             // 槽②：回站点之后（安装器改编码）
+    ret                              // 回调用者（x30 = 调用点下一条）；宿主已把结果放进 x0
     .p2align 3
     .globl CSYM(hook_rep_host)
 CSYM(hook_rep_host):

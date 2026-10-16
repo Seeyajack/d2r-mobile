@@ -552,15 +552,27 @@ void dm_thread_returned(void) {                           // 探针桩：门回�
 // 强制接管表的空段：hle.c 会遍历 dmswhle（正式装载由 HLE_FORCE 产出），探针没有条目
 __attribute__((used, section("dmswhle"))) static const char dm_swhle_probe[4] = {0};
 
-// 实验 H 的门错误兜底：SIGSEGV/SIGBUS 时记下出错 PC，跳回探针（进程活着，逐门继续报）
+// 实验 H/K 的错误兜底：SIGSEGV/SIGBUS 时记下**完整现场**，跳回探针（进程活着，继续报）。
+// 为什么连寄存器一起记：追崩链时"我们以为的调用路径"会和日志对不上（实测：分配器明明给了非 0
+// 指针，被调方却看到 x0=0）——**崩点现场是唯一不会骗人的证人**。
+// 异步信号安全：处理器里只做搬运，打印与帧链回溯留到 siglongjmp 之后（见 gate_dump_fault）。
+#define GATE_REG_N 31
 static sigjmp_buf g_gate_jmp;
 static volatile sig_atomic_t g_gate_armed;
 static volatile uint64_t g_gate_fault_pc;
 static volatile int g_gate_fault_sig;
-static void gate_fault_handler(int sig, siginfo_t *si, void *uc) {
+static uint64_t g_gate_regs[GATE_REG_N];
+static uint64_t g_gate_sp;
+static volatile int g_gate_have_regs;
+static void gate_fault_handler(int sig, siginfo_t *si, void *uc_) {
     (void)si;
+    // 字段写法与 dm/host/crash.c 的鸿蒙分支一致：mcontext_t = { regs[31], sp, pc, pstate }
+    ucontext_t *uc = (ucontext_t *)uc_;
     g_gate_fault_sig = sig;
-    g_gate_fault_pc = (uint64_t)((ucontext_t *)uc)->uc_mcontext.pc;   // aarch64 mcontext 的 pc
+    g_gate_fault_pc = (uint64_t)uc->uc_mcontext.pc;   // aarch64 mcontext 的 pc
+    for (int i = 0; i < GATE_REG_N; i++) g_gate_regs[i] = (uint64_t)uc->uc_mcontext.regs[i];
+    g_gate_sp = (uint64_t)uc->uc_mcontext.sp;
+    g_gate_have_regs = 1;
     if (!g_gate_armed) {
         // 未武装段（尾跳补丁循环等）出段错误：先打日志再退出——PC 落在 hilog 里供定位
         LOG("【红】门回路：未武装段 SIGSEGV/SIGBUS pc=%#llx sig=%llx（退出码 139）", (unsigned long long)g_gate_fault_pc, (unsigned long long)sig);
@@ -861,8 +873,12 @@ static void exp_j(char *out, size_t cap, size_t *used) {
 // 实验 K：真实流程首跑——从模块的启动链（映像里第一个函数 0x1c8）起跑，跑到哪里出事就记哪里。
 // KGATE 槽指向记录型服务（记命中与返回点），所有日志落盘（崩溃也保得住）。
 static FILE *g_k_log;
+// 阶段标签：实验 K 连跑三站（启动链 → 对象工厂 → nnMain），同一批插桩在三站都会响。
+// 每条日志带上"当前在哪一站"，读日志时才分得清"这次命中属于哪一站"。
+static const char *g_k_stage = "准备";
 static void klog(const char *fmt, ...) {
     if (!g_k_log) return;
+    fprintf(g_k_log, "[阶段 %s] ", g_k_stage);
     va_list ap; va_start(ap, fmt);
     vfprintf(g_k_log, fmt, ap);
     va_end(ap);
@@ -874,6 +890,37 @@ static volatile int g_k_faulted;
 static uint64_t g_k_rv;
 static module_t g_k_m;
 static pthread_key_t g_k_key[8];
+
+// 把崩点现场落进日志。**必须在 siglongjmp 之后调用**——不在信号处理器里碰 stdio。
+// 帧链回溯要解引用可疑地址，所以临时换上探针自己的兜底处理器（probe_segv_handler + safe_read64），
+// 走完再换回来；否则一次野指针会落到 gate_fault_handler 的"未武装"分支 _exit(139)，整份日志都丢。
+static void gate_dump_fault(const char *where) {
+    if (!g_gate_have_regs) return;
+    klog("=== 崩点现场（%s）：pc=%#llx sp=%#llx sig=%d ===\n", where,
+         (unsigned long long)g_gate_fault_pc, (unsigned long long)g_gate_sp, g_gate_fault_sig);
+    for (int i = 0; i < GATE_REG_N; i++)
+        klog("  x%-2d=%#llx%s", i, (unsigned long long)g_gate_regs[i], (i % 2) ? "\n" : "  ");
+    struct sigaction sa, o1, o2;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = probe_segv_handler;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGSEGV, &sa, &o1);
+    sigaction(SIGBUS, &sa, &o2);
+    // 帧链：AArch64 约定 [x29] = 上一帧 x29、[x29+8] = 本帧返回地址。
+    // 这一串返回地址就是**真实调用栈**，比任何"推断的链"都可信。
+    klog("  帧链（fp → 本帧返回地址 / 上一帧 fp）:\n");
+    uint64_t fp = g_gate_regs[29];
+    for (int d = 0; d < 16; d++) {
+        uint64_t lr = 0, next = 0;
+        if (!fp || !safe_read64(fp + 8, &lr) || !safe_read64(fp, &next)) break;
+        klog("    [%2d] fp=%#llx  返回地址=%#llx\n", d, (unsigned long long)fp, (unsigned long long)lr);
+        if (next <= fp) break;
+        fp = next;
+    }
+    sigaction(SIGSEGV, &o1, NULL);
+    sigaction(SIGBUS, &o2, NULL);
+    klog("=== 现场结束 ===\n");
+}
 static uint64_t k_gate_stub(void) {
     uint64_t lr; __asm__ volatile("mov %0, x30" : "=r"(lr));
     if (g_k_hits < 16) g_k_hit_lr[g_k_hits] = lr;
@@ -889,6 +936,18 @@ static volatile int g_plt_calls;
 // 依据：崩点反汇编显示 AllocateMemoryBlock 的返回值被当对象指针使用。
 static char g_host_arg0[] = "main";
 static char *g_host_argv[2];
+// nn::os::GetCurrentThread 要返回"当前线程"的 ThreadType*。我们还没有真实的 ThreadType，
+// 先给一个宿主侧的**影子对象**：清零、够大，让游戏"拿它当结构体读"这一步不撞墙。
+// 依据（真机实证）：新崩点 0xa1d94c 就是拿返回值去读 [+0x58]（返回值若为 0 ⇒ 读 0x58 崩）。
+// 字段语义待看清游戏怎么用之后再补；单线程深跑阶段一个影子对象够用（多线程时须按线程分开）。
+#define DM_THREAD_SHADOW_QWORDS 0x40            // 0x200 字节，覆盖到 [+0x58] 及其后
+static uint64_t g_thread_shadow[DM_THREAD_SHADOW_QWORDS];
+// nn::os::GetTlsValue 的影子对象：游戏把返回值当"线程局部存储"用，其中 **[+0xb0] 被 0xa0e2f8
+// 当作"当前分配器对象"取出**。真机实证（2026-10-17）：不实现它时 GetTlsValue 返回 0 ⇒
+// 0xa0e2f8 走兜底读 [obj+8]，而那个"自指"值此时已被清成 0 ⇒ 整条 sead 单例查找返回 0。
+// 这里让 [+0xb0] 指向注入的分配器对象（在 k_inject_heap 里接线），使这条分支拿到非 0。
+// 注：槽号目前只有 0（注入的上下文对象 [0x88] 为 0），故一个影子对象够用。
+static uint64_t g_tls_shadow[0x40];             // 0x200 字节，覆盖到 [+0xb0]
 static uint64_t plt_stub(void) {
     uint64_t x16v, a0, a1, a2;
     __asm__ volatile("mov %0, x16" : "=r"(x16v));
@@ -917,6 +976,17 @@ static uint64_t plt_stub(void) {
             klog("[服务] GetHostArgv → argv[0]=main\n");
             return (uint64_t)(uintptr_t)g_host_argv;
         }
+        // nn::os::GetCurrentThread —— 返回线程影子对象（见 g_thread_shadow 处的注释）。
+        // 真机实证：不实现它 ⇒ 调用者拿到 0 ⇒ 0xa1d8e0 在 0xa1d94c 读 [0+0x58] 崩。
+        if (!strcmp(nm, "_ZN2nn2os16GetCurrentThreadEv")) {
+            klog("[服务] GetCurrentThread → %p（宿主影子 ThreadType）\n", (void *)&g_thread_shadow[0]);
+            return (uint64_t)(uintptr_t)&g_thread_shadow[0];
+        }
+        // nn::os::GetTlsValue —— 返回线程局部存储的影子对象（见 g_tls_shadow 处注释）。
+        // 真机实证：不实现它 ⇒ 0xa0e2f8 走兜底读到 0 ⇒ sead::ThreadMgr 查找失败 ⇒ 崩在 0x9fe2ec。
+        if (!strcmp(nm, "_ZN2nn2os11GetTlsValueENS0_7TlsSlotE")) {
+            return (uint64_t)(uintptr_t)&g_tls_shadow[0];
+        }
         // ★ 关键：C++ 静态局部对象的初始化守卫。返回 1 = "由我来初始化"；
         // 返回 0 会被当成"别人已初始化"而跳过 ⇒ 全部静态单例没建、虚表为空（本轮崩因）。
         if (!strcmp(nm, "__cxa_guard_acquire")) { klog("[服务] __cxa_guard_acquire → 1（由我来初始化）\n"); return 1; }
@@ -944,11 +1014,35 @@ static uint64_t g_alloc_calls;
 static void *host_alloc(void *self, uint64_t size, uint64_t flags) {
     (void)self; (void)flags;
     g_alloc_calls++;
-    void *p = malloc((size_t)size);
+    // calloc 而非 malloc：游戏把这块当自己的对象/池用（与 AllocateMemoryBlock 同一理由——
+    // 喂未初始化内存会让游戏拿到垃圾指针/垃圾空闲链，2026-10-16 实证过一次）。
+    void *p = calloc(1, (size_t)size);
     klog("[堆] 分配 %llu 字节 → %p\n", (unsigned long long)size, p);
     return p;
 }
-static uint64_t g_alloc_vtbl[8];      // 虚表：槽 6（+0x30）= host_alloc
+// 虚表兜底：游戏会往这个"分配器替身"上翻到我们没印的页（真机实证：第 17 槽 +0x88 越界 ⇒ blr 0 崩）。
+// 兜底里记**调用者返回地址**——槽号自己不知道，但由返回地址可离线反查是哪一页。
+static uint64_t vtbl_fallback(void *self, void *arg) {
+    (void)self; (void)arg;
+    klog("[虚表兜底] 被调用：返回地址=%p（离线反查即知是哪个槽）\n", __builtin_return_address(0));
+    return 0;
+}
+// 第 17 槽（+0x88）：调用点 0xa0e120 后紧跟 `tbz w0, #0` ⇒ 返回值当 bool，bit0=1 表示成功。
+static uint64_t vtbl_slot17_ok(void *self, void *arg) {
+    (void)self; (void)arg;
+    klog("[虚表] 第17槽(+0x88) 被调用 → 返回 1（bool 成功）\n");
+    return 1;
+}
+// 第 16 槽（+0x80）：调用点 0xa091ac ⇒ 返回值被 `and #~7`（8 字节对齐）后要求 ≥0x131，
+// 随后作为尺寸交给第 6 槽去**分配**（真机实证：兜底返 0 ⇒ sead::ThreadMgr 查找失败 ⇒ 崩 0x9fe2ec）。
+// 语义是"报这块对象需要多大"（造 sead::ThreadMgr 用的）⇒ 给宽裕值：大了只浪费，小了被写越界。
+static uint64_t vtbl_slot16_size(void *self, void *arg) {
+    (void)self; (void)arg;
+    klog("[虚表] 第16槽(+0x80) 被调用 → 返回尺寸 0x1000\n");
+    return 0x1000;
+}
+#define DM_ALLOC_VTBL_QWORDS 0x40          // 0x200 字节：够覆盖游戏翻到的 +0xd0
+static uint64_t g_alloc_vtbl[DM_ALLOC_VTBL_QWORDS];   // 虚表：槽 6（+0x30）= host_alloc，槽 17（+0x88）见上
 static uint64_t g_alloc_obj[2];       // 对象 A：{ &虚表, &A }
 static uint64_t g_alloc_holder[1];    // 持有者：{ &A }
 static uint64_t g_ctx_holder[1];      // 上下文持有者：{ &ctx }
@@ -974,30 +1068,48 @@ static void k_inject_log(uint8_t *img) {
     g_log_obj[0x18 / 8] = (uint64_t)(uintptr_t)&g_log_pool[0][0];         // 链表头（非空）
     *(uint64_t *)(img + 0x2288548) = (uint64_t)(uintptr_t)&g_log_obj[0];
 }
-// 决定性一步：把游戏的两个分配器**入口**接到宿主（seal 前打 4 字节 b 跳转）。
-// 两个分配器入口签名一致：x0=大小, x1=上下文/池, w2=标志 → 返回 x0=指针。
-static uint64_t g_alloc2_calls;
-static void *host_alloc_entry(uint64_t size, uint64_t ctx, uint64_t flags) {
-    (void)flags;
-    g_alloc2_calls++;
-    void *p = calloc(1, (size_t)size);
-    klog("[分配器] 入口 大小=%llu 上下文=%p → %p\n", (unsigned long long)size, (void *)ctx, p);
-    return p;
-}
-static void k_patch_allocators(uint8_t *img) {
-    const uint32_t sites[2] = {0x9f34d8, 0x9f3464};
-    for (int i = 0; i < 2; i++) {
-        uint32_t *site = (uint32_t *)(img + sites[i]);
-        int64_t d = ((int64_t)(uintptr_t)&host_alloc_entry - (int64_t)(uintptr_t)site) / 4;
-        if (d < -(1 << 25) || d >= (1 << 25)) { klog("分配器 %#x 跳转超出 ±128MB，跳过\n", sites[i]); continue; }
-        *(uint32_t *)site = 0x14000000u | (uint32_t)(d & 0x03FFFFFFu);
-        klog("已把分配器 %#x 入口接到宿主 alloc\n", sites[i]);
-    }
-}
+// 注：早期"把分配器入口直接 b 到宿主函数"的做法（k_patch_allocators）已删除——
+// 它只能打 ±128MB 内的直接跳转，且随后就被下面的「替换式插桩」覆盖（同一批站点），
+// 日志里的"已接到宿主 alloc"与实际执行路径不符，留着只会误导。
+
 // ===== 洞内插桩：安装器 =====
 // 把 hook_stub.S 的桩整段复制进代码洞，填三个槽（原指令 / 回跳 / 宿主函数地址），
 // 再把目标函数首指令改成 4 字节 b 跳进桩。全部在 seal 之前做。
+//
+// ⚠ 桩保存帧的**下标约定**（与 hook_stub.S 的 stp 偏移一一对应；改桩必须同步改这里）：
+//     0x00..0x88 = x0..x17 → f[0..17]   0x90 = nzcv → f[18]   0x98 = 未写入（padding）
+//     0xA0 = x29 → f[20]   0xA8 = x30 → f[21]   0xB0 = 站点地址 → f[22]
+//   实测方式：clang -D__OHOS__ -c hook_stub.S + llvm-objdump -d（2026-10-16 实证；
+//   此前按 "f[20]=x30" 读是错的——f[20] 是 x29，f[19] 根本没写）。
+enum { FR_X0 = 0, FR_X1 = 1, FR_X2 = 2, FR_NZCV = 18, FR_X29 = 20, FR_X30 = 21, FR_SITE = 22 };
+#define HOOK_STRIDE 0x90u   // 桩长实测 0x90（记录式与替换式同长），洞内一步一格
+#define HOOK_MAX    (DM_IMG_MAIN_CAVE_SIZE / HOOK_STRIDE)   // 洞容量 **455 格**（0x10000/0x90，末尾余数浪费）
 extern const char hook_stub_begin[], hook_stub_end[], hook_slot_orig[], hook_slot_back[], hook_slot_host[], hook_slot_site[];
+
+// 站点指令搬进洞要重算 PC 相对位移：b / bl 是 imm26，b.cond / cbz / cbnz 是 imm19；
+// 其余指令原样搬。返回 0 = 超程或形态未知（调用方跳过该站点，宁可少挂不可挂错）。
+static int reloc_pc_rel(uint32_t w, uint8_t *from, uint8_t *to, uint32_t *out) {
+    uint32_t op26 = w & 0xFC000000u;
+    int32_t  imm; int64_t d;
+    if (op26 == 0x14000000u || op26 == 0x94000000u) {                            // b / bl
+        imm = (int32_t)(w & 0x03FFFFFFu);
+        if (imm & 0x02000000) imm -= 0x04000000;
+        d = ((int64_t)(intptr_t)from + (int64_t)imm * 4 - (int64_t)(intptr_t)to) / 4;
+        if (d < -(1 << 25) || d >= (1 << 25)) return 0;
+        *out = op26 | ((uint32_t)d & 0x03FFFFFFu);
+        return 1;
+    }
+    if ((w & 0x7E000000u) == 0x34000000u || (w & 0xFF000000u) == 0x54000000u) {  // cbz/cbnz / b.cond
+        imm = (int32_t)((w >> 5) & 0x7FFFFu);
+        if (imm & 0x40000) imm -= 0x80000;
+        d = ((int64_t)(intptr_t)from + (int64_t)imm * 4 - (int64_t)(intptr_t)to) / 4;
+        if (d < -(1 << 18) || d >= (1 << 18)) return 0;
+        *out = (w & ~(0x7FFFFu << 5)) | (((uint32_t)d & 0x7FFFFu) << 5);
+        return 1;
+    }
+    *out = w;
+    return 1;
+}
 static int g_hook_n;
 static uint32_t *slot_of(uint8_t *dst, const char *b0) {
     return (uint32_t *)(dst + (hook_slot_orig - b0));
@@ -1005,23 +1117,18 @@ static uint32_t *slot_of(uint8_t *dst, const char *b0) {
 static void k_install_hook(uint8_t *img, uint32_t site_off, void *host_fn, const char *what) {
     const char *b0 = hook_stub_begin;
     size_t n = (size_t)(hook_stub_end - hook_stub_begin);
-    if (n > 0xE0) { klog("[插桩] 桩太长(%zu)，跳过 %s\n", n, what); return; }
-    uint8_t *dst = img + DM_IMG_MAIN_CAVE_OFF + (size_t)g_hook_n * 0x90;   // 步长 0x90（桩 0x88 + 8 对齐）
+    if (n > HOOK_STRIDE) { klog("[插桩] 桩太长(%zu > %u)，跳过 %s\n", n, HOOK_STRIDE, what); return; }
+    if (g_hook_n >= (int)HOOK_MAX) { klog("[插桩] 洞已满(%d 格)，跳过 %s\n", g_hook_n, what); return; }
+    uint8_t *dst = img + DM_IMG_MAIN_CAVE_OFF + (size_t)g_hook_n * HOOK_STRIDE;
     memcpy(dst, b0, n);
-    // 槽①：原指令（4 字节）。若原指令是 bl（PC 相对），搬进洞后必须按新位置重算 imm26，
-    // 否则会跳错地方——这是我们想直接挂"调用点"时绕不过的一步。
+    // 槽①：原指令（4 字节）。PC 相对的分支（bl/b/b.cond/cbz）搬进洞后必须按新位置重算位移，
+    // 否则会跳错地方——这是挂"调用点 / 尾调用点"绕不过的一步。
     {
-        uint32_t w = *(uint32_t *)(img + site_off);
-        if ((w & 0xFC000000u) == 0x94000000u) {
-            int32_t imm = (int32_t)(w & 0x03FFFFFFu);
-            if (imm & 0x02000000) imm -= 0x04000000;
-            uint8_t *slot = dst + (hook_slot_orig - b0);
-            int64_t nd = ((int64_t)(uintptr_t)(img + site_off) + (int64_t)imm * 4
-                          - (int64_t)(uintptr_t)slot) / 4;
-            if (nd < -(1 << 25) || nd >= (1 << 25)) { klog("[插桩] %s bl 重定位超程，跳过\n", what); return; }
-            w = 0x94000000u | (uint32_t)(nd & 0x03FFFFFFu);
+        uint32_t w = *(uint32_t *)(img + site_off), nw = 0;
+        if (!reloc_pc_rel(w, img + site_off, dst + (hook_slot_orig - b0), &nw)) {
+            klog("[插桩] %s 站点指令 %08x 重定位超程，跳过\n", what, w); return;
         }
-        *(uint32_t *)slot_of(dst, b0) = w;
+        *(uint32_t *)slot_of(dst, b0) = nw;
     }
     // 槽②：b site+4（相对编码）
     {
@@ -1043,62 +1150,72 @@ static void k_install_hook(uint8_t *img, uint32_t site_off, void *host_fn, const
          (size_t)(dst - img), *slot_of(dst, b0));
     g_hook_n++;
 }
-// 宿主记录函数：读调用时的 x0/x1/x2（桩已保存现场，读到的即站点真值）
-static uint64_t g_hook_alloc_n;
-static uint64_t hook_alloc_log(uint64_t *f) {
-    g_hook_alloc_n++;
-    if (g_hook_alloc_n <= 8)
-        klog("[插桩] 分配器入口 #%llu：大小=%llu 上下文=%#llx 标志=%llu\n",
-             (unsigned long long)g_hook_alloc_n, (unsigned long long)f[0],
-             (unsigned long long)f[1], (unsigned long long)f[2]);
+// 统一的桩日志：打印站点地址、入参（x0 = this）、以及 x29/x30（**x30 = "谁调我"**）。
+// 帧下标见上面 FR_* 约定。每条目标各限 HOOK_LOG_CAP 行——崩点前的**最后一行**才是答案，
+// 所以宁可多记也别截断；上限只是防止在环里刷爆日志。
+#define HOOK_LOG_CAP 256
+static void frame_log(const char *what, uint64_t *f, int *cnt) {
+    if (++*cnt <= HOOK_LOG_CAP)
+        klog("[桩] %s  站点 %#llx  x0=%#llx x1=%#llx x2=%#llx x29=%#llx x30=%#llx\n",
+             what, (unsigned long long)f[FR_SITE], (unsigned long long)f[FR_X0],
+             (unsigned long long)f[FR_X1], (unsigned long long)f[FR_X2],
+             (unsigned long long)f[FR_X29], (unsigned long long)f[FR_X30]);
+}
+static int g_n_ctor1, g_n_ctor2, g_n_any, g_n_9fe24c, g_n_9fe2e8, g_n_1e484, g_n_1dd94, g_n_1d8e0, g_n_s1d8e0;
+static uint64_t hook_ctor_log (uint64_t *f) { frame_log("构造器 0xa08ef4", f, &g_n_ctor1); return 0; }
+static uint64_t hook_ctor2_log(uint64_t *f) { frame_log("构造器 0xa08e94", f, &g_n_ctor2); return 0; }
+static uint64_t hook_any_site (uint64_t *f) { frame_log("站点→0xa08e94", f, &g_n_any);   return 0; }
+// ★ 沿崩链逐点插桩。链（离线用 tools/dm_branch.py 追出，文档里此前没有这几层）：
+//   函数 0x9fe24c ──cbz w9 走 0x9fe294 分支──▶ 0x9fe2e8 `bl 0xa1e484`（x0 = **(0x22783d8)，
+//   正是我们注入的线程上下文对象）──▶ 0xa1e484 是 `b 0xa1dd94` 尾调用桩 ──▶
+//   0xa1dd94 ──`bl 0x9f33f0` 分配 0x100 字节──▶ ──`bl 0xa1d8e0`──▶ 0xa1d8e0 ──`bl 0xa08e94`
+//   （基类构造器，this 直接沿用 x0，中间一条指令都没改 x0）──▶ 崩在 0xa08eb0 的
+//   `stp x8, xzr, [x19]`（x19 = x0 = this ⇒ this=0 就是往地址 0 写）。
+//   逐点记 x0（上一层交下来的对象）与 x30（谁调我）⇒ **哪一层把 0 交下去，就是"该建而未建"的位置**。
+static uint64_t hook_p9fe24c (uint64_t *f) { frame_log("链点 0x9fe24c", f, &g_n_9fe24c); return 0; }
+static uint64_t hook_p9fe2e8 (uint64_t *f) { frame_log("站点→0xa1e484", f, &g_n_9fe2e8); return 0; }
+static uint64_t hook_p1e484 (uint64_t *f) { frame_log("链点 0xa1e484", f, &g_n_1e484); return 0; }
+static uint64_t hook_p1dd94 (uint64_t *f) { frame_log("链点 0xa1dd94", f, &g_n_1dd94); return 0; }
+static uint64_t hook_p1d8e0 (uint64_t *f) { frame_log("链点 0xa1d8e0", f, &g_n_1d8e0); return 0; }
+static uint64_t hook_s1d8e0 (uint64_t *f) { frame_log("站点→0xa1d8e0", f, &g_n_s1d8e0); return 0; }
+// ★ sead 单例查找 0xa0913c 为什么返回 0？把它的几条关键分支路径都挂上点，命中哪条就是走了哪条。
+//   （它是中心设施，103 个调用点；出口 0xa09418 返回 x20。这几条都是条件分支的**目标**，
+//     挂目标安全；直接挂条件分支指令本身会让"被命中时又跳回站点"成死循环，不做。）
+static int g_n_lkA, g_n_lkB, g_n_lkC, g_n_lkD, g_n_lkE;
+static uint64_t hook_lk_a(uint64_t *f) { frame_log("查找A(x24==0)", f, &g_n_lkA); return 0; }
+static uint64_t hook_lk_b(uint64_t *f) { frame_log("查找B(走分配)", f, &g_n_lkB); return 0; }
+static uint64_t hook_lk_c(uint64_t *f) { frame_log("查找C(非2幂→返0)", f, &g_n_lkC); return 0; }
+static uint64_t hook_lk_d(uint64_t *f) { frame_log("查找D(返0:x19==0)", f, &g_n_lkD); return 0; }
+static uint64_t hook_lk_e(uint64_t *f) { frame_log("查找E(返0:分配败)", f, &g_n_lkE); return 0; }
+// ★ 再细一层：0xa0e2f8 为什么返回 0？
+//   它内部 `0xa0e32c ldr x0,[x8]` → `0xa0e330`；在 0xa0e330 挂点可同时看到
+//   **读的地址(x8)** 与 **读出的值(x0=返回值)**。再在调用点 0xa09184 挂点看传进去的 obj 是谁。
+static int g_n_dbA, g_n_dbB;
+static uint64_t hook_dbA(uint64_t *f) {   // 站点 0xa09184（bl 0xa0e2f8）
+    if (++g_n_dbA <= 4)
+        klog("[诊断] 调 0xa0e2f8：obj=%#llx（期望 = 注入的 g_alloc_obj）\n",
+             (unsigned long long)f[FR_X0]);
     return 0;
 }
-// 崩点构造器 0xa08ef4 的入口记录：直接读入参 this（x0）与 x1/x2
-static uint64_t g_hook_ctor_n;
-static uint64_t hook_ctor_log(uint64_t *f) {   // f = 桩保存的寄存器帧（f[0]=x0 … f[20]=x30）
-    g_hook_ctor_n++;
-    if (g_hook_ctor_n <= 6)
-        klog("[插桩] 构造器 0xa08ef4 第%llu 次：this=%#llx x1=%#llx x2=%#llx 返回地址x30=%#llx\n",
-             (unsigned long long)g_hook_ctor_n, (unsigned long long)f[0],
-             (unsigned long long)f[1], (unsigned long long)f[2], (unsigned long long)f[20]);
+static uint64_t hook_dbB(uint64_t *f) {   // 指令 0xa0e330（0xa0e2f8 的取值点之后）
+    if (++g_n_dbB <= 4)
+        klog("[诊断] 0xa0e2f8 读 [x8]=%#llx → 值 x0=%#llx（=返回值）\n",
+             (unsigned long long)f[8], (unsigned long long)f[FR_X0]);
     return 0;
 }
-// 同族第二个构造器 0xa08e94（与 0xa08ef4 同为"写 [this]"模式）
-static uint64_t g_hook_ctor2_n;
-static uint64_t hook_ctor2_log(uint64_t *f) {
-    g_hook_ctor2_n++;
-    if (g_hook_ctor2_n <= 6)
-        klog("[插桩] 构造器 0xa08e94 第%llu 次：this=%#llx x1=%#llx x2=%#llx 返回地址x30=%#llx\n",
-             (unsigned long long)g_hook_ctor2_n, (unsigned long long)f[0],
-             (unsigned long long)f[1], (unsigned long long)f[2], (unsigned long long)f[20]);
-    return 0;
-}
-// 多点插桩：三个代表调用点（均为 bl 0xa08e94，模式 x0 = 外层对象+偏移）
-static uint64_t g_site_n[3];
-static void hook_site_log(uint64_t *f, int idx, const char *tag) {
-    if (++g_site_n[idx] <= 4)
-        klog("[插桩] 调用点 %s 第%llu 次：x0(对象)=%#llx x19=%#llx x20=%#llx x30=%#llx\n",
-             tag, (unsigned long long)g_site_n[idx], (unsigned long long)f[0],
-             (unsigned long long)f[19], (unsigned long long)f[20], (unsigned long long)f[20]);
-    (void)f;
-}
-static uint64_t hook_site0(uint64_t *f) { hook_site_log(f, 0, "0x165be8"); return 0; }
-static uint64_t hook_site1(uint64_t *f) { hook_site_log(f, 1, "0x3e7c9c"); return 0; }
-static uint64_t hook_site2(uint64_t *f) { hook_site_log(f, 2, "0x5fb97c"); return 0; }
-// ===== 替换式安装器：宿主替函数干活（返回值经 x0 带回），桩跳过原实现 =====
-extern const char hook_rep_begin[], hook_rep_end[], hook_rep_back[], hook_rep_host[], hook_rep_site[];
+// ===== 替换式安装器：宿主替函数干活（返回值经 x0 带回），**原实现一条都不执行** =====
+// ⚠ 早先这里把桩的"回跳槽"填成 `b 站点+4`——被替换的是**函数入口**，站点+4 就是原实现的
+//   第二条指令，于是变成"宿主跑完、原实现接着跑"（双执行）：首条 stp 被跳过 ⇒ 栈帧少 0x20、
+//   原实现里的 mov w19,w2 直接写坏 x19，最后返回的 x0 是原实现的结果（真机实证：x0 与 x23 双 0，
+//   宿主的指针被丢掉）。现在桩自己 `ret`（回 x30 = 调用点下一条），安装器不再改回跳槽。
+extern const char hook_rep_begin[], hook_rep_end[], hook_rep_host[], hook_rep_site[];
 static void k_install_replace_hook(uint8_t *img, uint32_t site_off, void *host_fn, const char *what) {
     const char *b0 = hook_rep_begin;
     size_t n = (size_t)(hook_rep_end - hook_rep_begin);
-    uint8_t *dst = img + DM_IMG_MAIN_CAVE_OFF + (size_t)g_hook_n * 0x90;
-    if (n > 0x90) { klog("[替换] %s 桩过长(%zu)，跳过\n", what, n); return; }
+    uint8_t *dst = img + DM_IMG_MAIN_CAVE_OFF + (size_t)g_hook_n * HOOK_STRIDE;
+    if (n > HOOK_STRIDE) { klog("[替换] %s 桩过长(%zu > %u)，跳过\n", what, n, HOOK_STRIDE); return; }
+    if (g_hook_n >= (int)HOOK_MAX) { klog("[替换] 洞已满(%d 格)，跳过 %s\n", g_hook_n, what); return; }
     memcpy(dst, b0, n);
-    {   // 槽②：b site+4
-        uint8_t *q = dst + (hook_rep_back - b0);
-        int64_t d = ((int64_t)(uintptr_t)(img + site_off + 4) - (int64_t)(uintptr_t)q) / 4;
-        if (d < -(1 << 25) || d >= (1 << 25)) { klog("[替换] %s 回跳超程，跳过\n", what); return; }
-        *(uint32_t *)q = 0x14000000u | (uint32_t)(d & 0x03FFFFFFu);
-    }
     *(uint64_t *)(dst + (hook_rep_host - b0)) = (uint64_t)(uintptr_t)host_fn;
     *(uint64_t *)(dst + (hook_rep_site - b0)) = (uint64_t)(uintptr_t)(img + site_off);
     {   // 站点：b dst
@@ -1112,55 +1229,58 @@ static void k_install_replace_hook(uint8_t *img, uint32_t site_off, void *host_f
 // 宿主替分配器干活：x0 = 请求大小，返回真实内存（calloc 清零）
 static uint64_t g_rep_n;
 static uint64_t host_alloc_replace(uint64_t *f) {
-    uint64_t size = f[0];
+    uint64_t size = f[FR_X0];
     void *p = calloc(1, (size_t)size);
     if (++g_rep_n <= 8)
         klog("[替换] 分配 %llu 字节 → %p（站点 %#llx 上下文 %#llx）\n",
-             (unsigned long long)size, p, (unsigned long long)f[22], (unsigned long long)f[1]);
+             (unsigned long long)size, p,
+             (unsigned long long)f[FR_SITE], (unsigned long long)f[FR_X1]);
     return (uint64_t)(uintptr_t)p;
 }
-// 批量挂点：扫全 text，找出所有 bl <target> 的调用点并全部挂上（"一次看全部"）。
-// 用途：崩点有 174 个候选调用点时，一轮就能定位是哪一处。
-static void k_hook_all_callers(uint8_t *img, uint32_t target_off, void *host_fn, const char *what, int cap) {
-    uint32_t n = 0;
-    for (uint32_t a = 0; a + 4 <= DM_IMG_MAIN_TEXT_END && n < (uint32_t)cap; a += 4) {
-        uint32_t w = *(uint32_t *)(img + a);
-        if ((w & 0xFC000000u) != 0x94000000u) continue;
-        int32_t imm = (int32_t)(w & 0x03FFFFFFu);
-        if (imm & 0x02000000) imm -= 0x04000000;
-        if ((int64_t)a + (int64_t)imm * 4 != (int64_t)target_off) continue;
-        k_install_hook(img, a, host_fn, what);
-        n++;
+// 批量挂点：扫全映像，找出所有指向 target 的 **bl（调用）与 b（尾调用）** 站点并全部挂上。
+// 为什么连 b 也要挂：崩链上的调用可能是尾调用（不更新 x30），只扫 bl 会把它们漏掉。
+// 为什么要扫两块：改写器把每个 svc 门点改成跳进**补丁区**的蹦床，所以补丁区是真代码——
+// 只扫 text 会漏站点（离线用 tools/dm_branch.py 核实过）。代码洞本身不扫：里面是我们自己的桩。
+static void k_hook_all_branchers(uint8_t *img, uint32_t target_off, void *host_fn, const char *what, int cap) {
+    const uint32_t lo[2] = {0, DM_IMG_MAIN_PATCH_OFF};
+    const uint32_t hi[2] = {DM_IMG_MAIN_TEXT_END, DM_IMG_MAIN_CAVE_OFF};
+    uint32_t n = 0, nbl = 0, nb = 0;
+    for (int r = 0; r < 2; r++) {
+        for (uint32_t a = lo[r]; a + 4 <= hi[r] && n < (uint32_t)cap; a += 4) {
+            uint32_t w = *(uint32_t *)(img + a);
+            uint32_t op = w & 0xFC000000u;
+            if (op != 0x94000000u && op != 0x14000000u) continue;      // bl / b
+            int32_t imm = (int32_t)(w & 0x03FFFFFFu);
+            if (imm & 0x02000000) imm -= 0x04000000;
+            if ((int64_t)a + (int64_t)imm * 4 != (int64_t)target_off) continue;
+            k_install_hook(img, a, host_fn, what);
+            n++;
+            if (op == 0x94000000u) nbl++; else nb++;
+        }
     }
-    klog("[插桩] %s：共挂 %u 个调用点（上限 %d）\n", what, n, cap);
-}
-static uint64_t g_site_hits;
-static uint64_t hook_any_site(uint64_t *f) {
-    if (++g_site_hits <= 12)
-        klog("[插桩] 命中站点 %#llx：x0(对象)=%#llx x1=%#llx\n",
-             (unsigned long long)f[22], (unsigned long long)f[0], (unsigned long long)f[1]);
-    return 0;
-}
-// 第三个分配器 0x9f33f0 入口（看参数：x0=大小 x1=上下文 x2=标志 ⇒ 判定走哪条分配路径）
-static uint64_t g_alloc3_n;
-static uint64_t hook_alloc3_log(uint64_t *f) {
-    if (++g_alloc3_n <= 6)
-        klog("[插桩] 分配器3(0x9f33f0) 第%llu 次：大小=%llu 上下文=%#llx 标志=%llu\n",
-             (unsigned long long)g_alloc3_n, (unsigned long long)f[0],
-             (unsigned long long)f[1], (unsigned long long)f[2]);
-    return 0;
+    klog("[插桩] %s：共挂 %u 个站点（bl %u / b 尾调用 %u，上限 %d）\n", what, n, nbl, nb, cap);
 }
 static void k_inject_heap(uint8_t *img) {
-    g_alloc_vtbl[6] = (uint64_t)(uintptr_t)&host_alloc;
+    for (int i = 0; i < DM_ALLOC_VTBL_QWORDS; i++)
+        g_alloc_vtbl[i] = (uint64_t)(uintptr_t)&vtbl_fallback;   // 先全铺兜底（记录调用点、返回 0）
+    g_alloc_vtbl[6]  = (uint64_t)(uintptr_t)&host_alloc;         // +0x30 分配内存
+    g_alloc_vtbl[16] = (uint64_t)(uintptr_t)&vtbl_slot16_size;   // +0x80 报尺寸 ⇒ 0x1000
+    g_alloc_vtbl[17] = (uint64_t)(uintptr_t)&vtbl_slot17_ok;     // +0x88 当 bool 用 ⇒ 返 1
     g_alloc_obj[0] = (uint64_t)(uintptr_t)&g_alloc_vtbl[0];
     g_alloc_obj[1] = (uint64_t)(uintptr_t)&g_alloc_obj[0];   // +8 自指：0xa0e2f8 的兜底路径取到同一对象
+    // ⚠ 真机实证（2026-10-17）：跑到 0xa0e2f8 时这个自指值**已被清成 0**（游戏会写它），
+    //   所以兜底路径不可靠——改由 GetTlsValue 的影子对象 [+0xb0] 顶上（见 g_tls_shadow）。
     g_alloc_holder[0] = (uint64_t)(uintptr_t)&g_alloc_obj[0];
     g_ctx_holder[0] = (uint64_t)(uintptr_t)&g_ctx_obj[0];
+    g_tls_shadow[0xb0 / 8] = (uint64_t)(uintptr_t)&g_alloc_obj[0];   // 影子对象 [+0xb0] = 分配器对象
     *(uint64_t *)(img + 0x226f0a0) = (uint64_t)(uintptr_t)&g_alloc_holder[0];   // 分配器持有者
     *(uint64_t *)(img + 0x22783d8) = (uint64_t)(uintptr_t)&g_ctx_holder[0];     // 线程上下文持有者
     // 工厂 0x1f8 的入参：读 [x1+0x18] → 对象 → [+0x18] → 虚方法（见崩点 0x103b8a8）
     g_mgr_sub[0x18 / 8] = (uint64_t)(uintptr_t)&mgr_method;
     g_mgr_obj[0x18 / 8] = (uint64_t)(uintptr_t)&g_mgr_sub[0];
+    klog("[注入自检] g_alloc_obj=%p [0]=%#llx [1]=%#llx；g_tls_shadow=%p [+0xb0]=%#llx\n",
+         (void *)&g_alloc_obj[0], (unsigned long long)g_alloc_obj[0], (unsigned long long)g_alloc_obj[1],
+         (void *)&g_tls_shadow[0], (unsigned long long)g_tls_shadow[0xb0 / 8]);
 }
 
 static void *k_thread(void *arg) {
@@ -1187,7 +1307,8 @@ static void *k_thread(void *arg) {
             fclose(mp);
         }
     }
-    klog("=== 起跑：目录 0x1c8（启动链）base %#llx ===\n", (unsigned long long)b);
+    g_k_stage = "启动链 0x1c8";
+    klog("=== 起跑：入口 0x1c8（启动链）base %#llx ===\n", (unsigned long long)b);
     g_gate_armed = 1; g_gate_fault_pc = 0;
     if (sigsetjmp(g_gate_jmp, 1) == 0) {
         g_k_rv = ((uint64_t (*)(void))(b + 0x1c8))();
@@ -1196,10 +1317,12 @@ static void *k_thread(void *arg) {
     } else {
         g_gate_armed = 0; g_k_faulted = 1;
         klog("=== 启动链崩：pc %#llx sig %d ===\n", (unsigned long long)g_gate_fault_pc, g_gate_fault_sig);
+        gate_dump_fault("启动链 0x1c8");
         return NULL;
     }
     // 更深一站：模块的第一个真实功能函数 0x1f8（C++ 对象工厂：读数据槽 → 分配 0xaa0 → 构造）
-    klog("=== 深跑：0x1f8（对象工厂，x0=0）===\n");
+    g_k_stage = "工厂 0x1f8";
+    klog("=== 深跑：0x1f8（对象工厂，x0 = 注入的管理器对象）===\n");
     g_gate_armed = 1; g_gate_fault_pc = 0;
     if (sigsetjmp(g_gate_jmp, 1) == 0) {
         uint64_t r2 = ((uint64_t (*)(uint64_t))(b + 0x1f8))((uint64_t)(uintptr_t)&g_mgr_obj[0]);
@@ -1208,9 +1331,11 @@ static void *k_thread(void *arg) {
     } else {
         g_gate_armed = 0; g_k_faulted = 1;
         klog("=== 0x1f8 崩：pc %#llx sig %d ===\n", (unsigned long long)g_gate_fault_pc, g_gate_fault_sig);
+        gate_dump_fault("工厂 0x1f8");
     }
     // 终站：游戏的真正入口 nnMain（模块符号表 #506：st_value 0x735330，size 1008，GLOBAL FUNC）
     // 依据：rtld 的符号表里列出它要为主模块解析的入口名 nnMain（启动约定，非猜测）。
+    g_k_stage = "nnMain";
     klog("=== 终站：nnMain（0x735330）===\n");
     g_gate_armed = 1; g_gate_fault_pc = 0;
     if (sigsetjmp(g_gate_jmp, 1) == 0) {
@@ -1229,6 +1354,7 @@ static void *k_thread(void *arg) {
     } else {
         g_gate_armed = 0; g_k_faulted = 1;
         klog("=== nnMain 崩：pc %#llx sig %d ===\n", (unsigned long long)g_gate_fault_pc, g_gate_fault_sig);
+        gate_dump_fault("nnMain");
     }
     return NULL;
 }
@@ -1282,17 +1408,34 @@ static void exp_k(const char *files_dir, char *out, size_t cap, size_t *used) {
             if ((uint32_t)r_info == 1027) { *(uint64_t *)(img + r_off) = (uint64_t)img + (uint64_t)r_add; n_rel++; }
             else n_other++;
         }
+        g_hook_n = 0;   // ★ 每轮从零开始：洞是映像内的固定空间，上一轮装的桩还占着格
         k_inject_heap(img);   // ★ 喂堆：把游戏分配器要的两个全局指向宿主对象（见 k_inject_heap）
-    k_inject_log(img);    // ★ 喂日志对象 + 节点池（见 k_inject_log）
-    k_patch_allocators(img);   // 分配器入口 → 宿主（射程不够时会自检跳过）
-    // ★ 三个分配器改用「替换式」：宿主直接给内存，跳过游戏自己的实现（绕开注入被改写/分支不确定）
-    k_install_replace_hook(img, 0x9f34d8, (void *)host_alloc_replace, "分配器 0x9f34d8");
-    k_install_replace_hook(img, 0x9f3464, (void *)host_alloc_replace, "分配器 0x9f3464");
-    k_install_replace_hook(img, 0x9f33f0, (void *)host_alloc_replace, "分配器 0x9f33f0");
-    k_install_hook(img, 0xa08ef4, (void *)hook_ctor_log, "构造器 0xa08ef4 入口");     // 崩点链上的构造器
-    k_install_hook(img, 0xa08e94, (void *)hook_ctor2_log, "构造器 0xa08e94 入口");    // 同族第二个构造器
-    // ★★ 全量挂点：一次挂上"所有调用 0xa08e94 的站点"（174 个），一轮定位到底是哪一处
-    k_hook_all_callers(img, 0xa08e94, (void *)hook_any_site, "调用构造器 0xa08e94 的各站点", 600);
+        k_inject_log(img);    // ★ 喂日志对象 + 节点池（见 k_inject_log）
+        // ★ 三个分配器用「替换式」：宿主直接给内存，跳过游戏自己的实现（绕开注入被改写/分支不确定）
+        k_install_replace_hook(img, 0x9f34d8, (void *)host_alloc_replace, "分配器 0x9f34d8");
+        k_install_replace_hook(img, 0x9f3464, (void *)host_alloc_replace, "分配器 0x9f3464");
+        k_install_replace_hook(img, 0x9f33f0, (void *)host_alloc_replace, "分配器 0x9f33f0");
+        // 崩链上的两个构造器入口（记录 this）
+        k_install_hook(img, 0xa08ef4, (void *)hook_ctor_log, "构造器 0xa08ef4 入口");
+        k_install_hook(img, 0xa08e94, (void *)hook_ctor2_log, "构造器 0xa08e94 入口");
+        // ★★ 沿崩链逐点插桩（链见上面 hook_p* 的注释）。先挂"信息量最大"的链点，
+        //    再挂批量站点——洞只有 728 格，要紧的放前面，满了也丢不了它们。
+        k_install_hook(img, 0x9fe24c, (void *)hook_p9fe24c, "链点 0x9fe24c（链顶函数入口）");
+        k_install_hook(img, 0x9fe2e8, (void *)hook_p9fe2e8, "站点→0xa1e484（交出注入对象处）");
+        k_install_hook(img, 0xa1e484, (void *)hook_p1e484, "链点 0xa1e484（b 尾调用桩）");
+        k_install_hook(img, 0xa1dd94, (void *)hook_p1dd94, "链点 0xa1dd94（分配 0x100 + 调构造器）");
+        k_install_hook(img, 0xa1d8e0, (void *)hook_p1d8e0, "链点 0xa1d8e0（派生构造器入口）");
+        k_hook_all_branchers(img, 0xa1d8e0, (void *)hook_s1d8e0, "站点→0xa1d8e0", 64);
+        k_hook_all_branchers(img, 0xa08e94, (void *)hook_any_site, "站点→构造器 0xa08e94", 400);
+        // 诊断 sead 单例查找 0xa0913c 的分支路径（见 hook_lk_* 处注释）
+        k_install_hook(img, 0xa0919c, (void *)hook_lk_a, "查找路径 0xa0919c");
+        k_install_hook(img, 0xa091e4, (void *)hook_lk_b, "查找路径 0xa091e4");
+        k_install_hook(img, 0xa091dc, (void *)hook_lk_c, "查找路径 0xa091dc");
+        k_install_hook(img, 0xa092a0, (void *)hook_lk_d, "查找路径 0xa092a0");
+        k_install_hook(img, 0xa092a8, (void *)hook_lk_e, "查找路径 0xa092a8");
+        // 更细一层：0xa0e2f8 的入参与返回值（见 hook_dbA/hook_dbB 处注释）
+        k_install_hook(img, 0xa09184, (void *)hook_dbA, "诊断 0xa09184（调 0xa0e2f8）");
+        k_install_hook(img, 0xa0e330, (void *)hook_dbB, "诊断 0xa0e330（取值点之后）");
         g_nplt = 0; g_plt_calls = 0;
         for (uint64_t off = 0; off + 24 <= DT_PLTRELSZ; off += 24) {
             uint64_t r_off  = *(uint64_t *)(img + DT_JMPREL + off);
@@ -1347,6 +1490,9 @@ static void exp_k(const char *files_dir, char *out, size_t cap, size_t *used) {
     appf(out, cap, used, "  SDK 槽被真实调用 %d 次%s\n", g_plt_calls, g_plt_calls ? "（名见 dm_run_test.log）" : "");
     appf(out, cap, used, "  宿主堆被分配 %llu 次%s\n", (unsigned long long)g_alloc_calls,
          g_alloc_calls ? "（游戏分配器已通）" : "（未走到分配器）");
+    appf(out, cap, used, "  崩链插桩命中：链点 0x9fe24c %d / 站点→0xa1e484 %d / 0xa1e484 %d / 0xa1dd94 %d / "
+                         "0xa1d8e0 %d；构造器 0xa08e94 入口 %d 次、站点 %d 次（明细见 dm_run_test.log）\n",
+         g_n_9fe24c, g_n_9fe2e8, g_n_1e484, g_n_1dd94, g_n_1d8e0, g_n_ctor2, g_n_any);
     appf(out, cap, used, "  %s 启动链跑完并返回（rv=%#llx）；门被命中 %d 次%s\n",
          g_k_faulted ? "✗" : "✓", (unsigned long long)g_k_rv, g_k_hits,
          g_k_faulted ? "（中途崩，崩点见 dm_run_test.log）" : "");
