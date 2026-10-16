@@ -49,6 +49,8 @@ add_library(dmprobe SHARED
     # 真实模块：旷野之息 main 的改写产物（同款工具，默认 .incbin 引 F:/switch-work 的
     # main.patched.bin；实验 G 装载验证用。换游戏/换代后重新生成）
     ${DM_DIR}/ohos/dm_images.S
+    # 洞内插桩桩：由探针整段复制进映像的代码洞（见 hook_stub.S 抬头注释）
+    hook_stub.S
 )
 
 target_include_directories(dmprobe PRIVATE

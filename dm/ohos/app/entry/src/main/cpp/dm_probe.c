@@ -979,6 +979,51 @@ static void k_patch_allocators(uint8_t *img) {
         klog("已把分配器 %#x 入口接到宿主 alloc\n", sites[i]);
     }
 }
+// ===== 洞内插桩：安装器 =====
+// 把 hook_stub.S 的桩整段复制进代码洞，填三个槽（原指令 / 回跳 / 宿主函数地址），
+// 再把目标函数首指令改成 4 字节 b 跳进桩。全部在 seal 之前做。
+extern const char hook_stub_begin[], hook_stub_end[], hook_slot_orig[], hook_slot_back[], hook_slot_host[];
+static int g_hook_n;
+static void k_install_hook(uint8_t *img, uint32_t site_off, void *host_fn, const char *what) {
+    const char *b0 = hook_stub_begin;
+    size_t n = (size_t)(hook_stub_end - hook_stub_begin);
+    if (n > 0xE0) { klog("[插桩] 桩太长(%zu)，跳过 %s\n", n, what); return; }
+    uint8_t *dst = img + DM_IMG_MAIN_CAVE_OFF + (size_t)g_hook_n * 0x100;
+    memcpy(dst, b0, n);
+    // 槽①：原指令（4 字节）
+    *(uint32_t *)(dst + (hook_slot_orig - b0)) = *(uint32_t *)(img + site_off);
+    // 槽②：b site+4（相对编码）
+    {
+        uint8_t *p = dst + (hook_slot_back - b0);
+        int64_t d = ((int64_t)(uintptr_t)(img + site_off + 4) - (int64_t)(uintptr_t)p) / 4;
+        if (d < -(1 << 25) || d >= (1 << 25)) { klog("[插桩] %s 回跳超程，跳过\n", what); return; }
+        *(uint32_t *)p = 0x14000000u | (uint32_t)(d & 0x03FFFFFFu);
+    }
+    // 槽③：宿主函数地址
+    *(uint64_t *)(dst + (hook_slot_host - b0)) = (uint64_t)(uintptr_t)host_fn;
+    // 站点：b dst
+    {
+        int64_t d = ((int64_t)(uintptr_t)dst - (int64_t)(uintptr_t)(img + site_off)) / 4;
+        if (d < -(1 << 25) || d >= (1 << 25)) { klog("[插桩] %s 站点跳超程，跳过\n", what); return; }
+        *(uint32_t *)(img + site_off) = 0x14000000u | (uint32_t)(d & 0x03FFFFFFu);
+    }
+    klog("[插桩] %s：site %#x → 洞 %#zx（原指令 %08x）\n", what, site_off,
+         (size_t)(dst - img), *(uint32_t *)(dst + (hook_slot_orig - b0)));
+    g_hook_n++;
+}
+// 宿主记录函数：读调用时的 x0/x1/x2（桩已保存现场，读到的即站点真值）
+static uint64_t g_hook_alloc_n;
+static uint64_t hook_alloc_log(void) {
+    uint64_t a0, a1, a2;
+    __asm__ volatile("mov %0, x0" : "=r"(a0));
+    __asm__ volatile("mov %0, x1" : "=r"(a1));
+    __asm__ volatile("mov %0, x2" : "=r"(a2));
+    g_hook_alloc_n++;
+    if (g_hook_alloc_n <= 8)
+        klog("[插桩] 分配器入口 #%llu：大小=%llu 上下文=%#llx 标志=%llu\n",
+             (unsigned long long)g_hook_alloc_n, (unsigned long long)a0, (unsigned long long)a1, (unsigned long long)a2);
+    return 0;
+}
 static void k_inject_heap(uint8_t *img) {
     g_alloc_vtbl[6] = (uint64_t)(uintptr_t)&host_alloc;
     g_alloc_obj[0] = (uint64_t)(uintptr_t)&g_alloc_vtbl[0];
@@ -1110,7 +1155,8 @@ static void exp_k(const char *files_dir, char *out, size_t cap, size_t *used) {
         }
         k_inject_heap(img);   // ★ 喂堆：把游戏分配器要的两个全局指向宿主对象（见 k_inject_heap）
     k_inject_log(img);    // ★ 喂日志对象 + 节点池（见 k_inject_log）
-    k_patch_allocators(img);   // ★ 两个分配器入口 → 宿主 calloc（见 k_patch_allocators）
+    k_patch_allocators(img);   // 分配器入口 → 宿主（射程不够时会自检跳过）
+    k_install_hook(img, 0x9f3464, (void *)hook_alloc_log, "分配器 0x9f3464 入口");   // ★ 洞内插桩试点
         g_nplt = 0; g_plt_calls = 0;
         for (uint64_t off = 0; off + 24 <= DT_PLTRELSZ; off += 24) {
             uint64_t r_off  = *(uint64_t *)(img + DT_JMPREL + off);
