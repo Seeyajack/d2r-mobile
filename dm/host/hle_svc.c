@@ -275,8 +275,8 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         LOG("Break#%d reason=%#llx Result=%#x svc 位于 %s+%#llx", ++nb, regs[0], res, mm ? mm->name : "?", orig_addr);
         LOG("Break：dm_backtrace 前");                       // 诊断：门回路返回路径夹点
         dm_backtrace(regs[29]);
-        LOG("Break：通知检查前");                            // 诊断：门回路返回路径夹点
-        if (regs[0] & 0x80000000ull) { LOG("Break：仅通知位命中 → 返回 0"); return 0; }   // 仅通知，可继续 | notification only, can continue
+        LOG("Break：通知检查前 regs=%p x0=%#llx x1=%#llx x2=%#llx", (void *)regs, (unsigned long long)regs[0], (unsigned long long)regs[1], (unsigned long long)regs[2]);   // 诊断：门回路返回路径夹点
+        if (regs[0] & 0x80000000ull) return 0;   // 仅通知，可继续 | notification only, can continue（诊断 LOG 已撤：它本身疑似死点）
         _exit(42);
     }
     case 0x1E: regs[0] = 0; regs[1] = guest_ns() * 12 / 625; return 0;   // GetSystemTick
