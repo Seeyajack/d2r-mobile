@@ -909,6 +909,12 @@ static uint64_t g_alloc_obj[2];       // 对象 A：{ &虚表, &A }
 static uint64_t g_alloc_holder[1];    // 持有者：{ &A }
 static uint64_t g_ctx_holder[1];      // 上下文持有者：{ &ctx }
 static uint64_t g_ctx_obj[0x20];      // 上下文对象（[0x88] 处为 0 = 让 thunk 返回 0，走本线程路径）
+static uint64_t g_mgr_obj[8];       // 管理器对象：+0x18 处放"子对象"指针
+static uint64_t g_mgr_sub[8];       // 子对象：+0x18 处放虚方法指针
+static uint64_t mgr_method(void *self) {
+    klog("[管理器] 虚方法被调用（self=%p）—— 宿主存根应答\n", self);
+    return 0;
+}
 static void k_inject_heap(uint8_t *img) {
     g_alloc_vtbl[6] = (uint64_t)(uintptr_t)&host_alloc;
     g_alloc_obj[0] = (uint64_t)(uintptr_t)&g_alloc_vtbl[0];
@@ -917,6 +923,9 @@ static void k_inject_heap(uint8_t *img) {
     g_ctx_holder[0] = (uint64_t)(uintptr_t)&g_ctx_obj[0];
     *(uint64_t *)(img + 0x226f0a0) = (uint64_t)(uintptr_t)&g_alloc_holder[0];   // 分配器持有者
     *(uint64_t *)(img + 0x22783d8) = (uint64_t)(uintptr_t)&g_ctx_holder[0];     // 线程上下文持有者
+    // 工厂 0x1f8 的入参：读 [x1+0x18] → 对象 → [+0x18] → 虚方法（见崩点 0x103b8a8）
+    g_mgr_sub[0x18 / 8] = (uint64_t)(uintptr_t)&mgr_method;
+    g_mgr_obj[0x18 / 8] = (uint64_t)(uintptr_t)&g_mgr_sub[0];
 }
 
 static void *k_thread(void *arg) {
@@ -946,7 +955,7 @@ static void *k_thread(void *arg) {
     klog("=== 深跑：0x1f8（对象工厂，x0=0）===\n");
     g_gate_armed = 1; g_gate_fault_pc = 0;
     if (sigsetjmp(g_gate_jmp, 1) == 0) {
-        uint64_t r2 = ((uint64_t (*)(uint64_t))(b + 0x1f8))(0);
+        uint64_t r2 = ((uint64_t (*)(uint64_t))(b + 0x1f8))((uint64_t)(uintptr_t)&g_mgr_obj[0]);
         g_gate_armed = 0;
         klog("=== 0x1f8 返回：rv=%#llx ===\n", (unsigned long long)r2);
     } else {
