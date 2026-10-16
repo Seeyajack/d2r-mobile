@@ -955,6 +955,26 @@ static void k_inject_log(uint8_t *img) {
     g_log_obj[0x18 / 8] = (uint64_t)(uintptr_t)&g_log_pool[0][0];         // 链表头（非空）
     *(uint64_t *)(img + 0x2288548) = (uint64_t)(uintptr_t)&g_log_obj[0];
 }
+// 决定性一步：把游戏的两个分配器**入口**接到宿主（seal 前打 4 字节 b 跳转）。
+// 两个分配器入口签名一致：x0=大小, x1=上下文/池, w2=标志 → 返回 x0=指针。
+static uint64_t g_alloc2_calls;
+static void *host_alloc_entry(uint64_t size, uint64_t ctx, uint64_t flags) {
+    (void)flags;
+    g_alloc2_calls++;
+    void *p = calloc(1, (size_t)size);
+    klog("[分配器] 入口 大小=%llu 上下文=%p → %p\n", (unsigned long long)size, (void *)ctx, p);
+    return p;
+}
+static void k_patch_allocators(uint8_t *img) {
+    const uint32_t sites[2] = {0x9f34d8, 0x9f3464};
+    for (int i = 0; i < 2; i++) {
+        uint32_t *site = (uint32_t *)(img + sites[i]);
+        int64_t d = ((int64_t)(uintptr_t)&host_alloc_entry - (int64_t)(uintptr_t)site) / 4;
+        if (d < -(1 << 25) || d >= (1 << 25)) { klog("分配器 %#x 跳转超出 ±128MB，跳过\n", sites[i]); continue; }
+        *(uint32_t *)site = 0x14000000u | (uint32_t)(d & 0x03FFFFFFu);
+        klog("已把分配器 %#x 入口接到宿主 alloc\n", sites[i]);
+    }
+}
 static void k_inject_heap(uint8_t *img) {
     g_alloc_vtbl[6] = (uint64_t)(uintptr_t)&host_alloc;
     g_alloc_obj[0] = (uint64_t)(uintptr_t)&g_alloc_vtbl[0];
@@ -1086,6 +1106,7 @@ static void exp_k(const char *files_dir, char *out, size_t cap, size_t *used) {
         }
         k_inject_heap(img);   // ★ 喂堆：把游戏分配器要的两个全局指向宿主对象（见 k_inject_heap）
     k_inject_log(img);    // ★ 喂日志对象 + 节点池（见 k_inject_log）
+    k_patch_allocators(img);   // ★ 两个分配器入口 → 宿主 calloc（见 k_patch_allocators）
         g_nplt = 0; g_plt_calls = 0;
         for (uint64_t off = 0; off + 24 <= DT_PLTRELSZ; off += 24) {
             uint64_t r_off  = *(uint64_t *)(img + DT_JMPREL + off);
