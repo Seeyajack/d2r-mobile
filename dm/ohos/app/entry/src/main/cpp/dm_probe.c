@@ -858,6 +858,114 @@ static void exp_j(char *out, size_t cap, size_t *used) {
     app(out, cap, used, "  意义：门与执行串成一条链——真实代码可以借我们的服务跑通一条完整路径。\n\n");
 }
 
+// 实验 K：真实流程首跑——从模块的启动链（映像里第一个函数 0x1c8）起跑，跑到哪里出事就记哪里。
+// KGATE 槽指向记录型服务（记命中与返回点），所有日志落盘（崩溃也保得住）。
+static FILE *g_k_log;
+static void klog(const char *fmt, ...) {
+    if (!g_k_log) return;
+    va_list ap; va_start(ap, fmt);
+    vfprintf(g_k_log, fmt, ap);
+    va_end(ap);
+    fflush(g_k_log);
+}
+static volatile int g_k_hits;
+static uint64_t g_k_hit_lr[16];
+static volatile int g_k_faulted;
+static uint64_t g_k_rv;
+static module_t g_k_m;
+static pthread_key_t g_k_key[8];
+static uint64_t k_gate_stub(void) {
+    uint64_t lr; __asm__ volatile("mov %0, x30" : "=r"(lr));
+    if (g_k_hits < 16) g_k_hit_lr[g_k_hits] = lr;
+    g_k_hits++;
+    return 0;   // 首跑：先一律"无事发生"（0），看流程能走多远
+}
+static void *k_thread(void *arg) {
+    (void)arg;
+    uint64_t b = (uint64_t)g_k_m.base;
+    uint64_t tp = 0; __asm__ volatile("mrs %0, tpidr_el0" : "=r"(tp));
+    uint64_t tsd = *(uint64_t *)(tp - 272);
+    const void *sv[8] = {
+        (void *)(uintptr_t)0x1111111111111111ull, (void *)(uintptr_t)0x2222222222222222ull,
+        (void *)(uintptr_t)0x3333333333333333ull, (void *)k_gate_stub,
+        (void *)(uintptr_t)0x4400000000000004ull, (void *)(uintptr_t)0x4400000000000005ull,
+        (void *)(uintptr_t)0x4400000000000006ull, (void *)(uintptr_t)0x4400000000000007ull,
+    };
+    for (int i = 0; i < 8; i++) *(uint64_t *)(tsd + (uint64_t)g_k_key[i] * 8) = (uint64_t)sv[i];
+    klog("=== 起跑：目录 0x1c8（启动链）base %#llx ===\n", (unsigned long long)b);
+    g_gate_armed = 1; g_gate_fault_pc = 0;
+    if (sigsetjmp(g_gate_jmp, 1) == 0) {
+        g_k_rv = ((uint64_t (*)(void))(b + 0x1c8))();
+        g_gate_armed = 0;
+        klog("=== 返回：rv=%#llx ===\n", (unsigned long long)g_k_rv);
+    } else {
+        g_gate_armed = 0; g_k_faulted = 1;
+        klog("=== 崩：pc %#llx sig %d ===\n", (unsigned long long)g_gate_fault_pc, g_gate_fault_sig);
+    }
+    return NULL;
+}
+static void exp_k(const char *files_dir, char *out, size_t cap, size_t *used) {
+    app(out, cap, used, "【实验 K】真实流程首跑：从模块启动链（0x1c8）起跑\n");
+    if (files_dir && *files_dir) {
+        char pth[512]; snprintf(pth, sizeof pth, "%s/dm_run_test.log", files_dir);
+        g_k_log = fopen(pth, "w");
+        dm_log_set_mirror(g_k_log);
+    }
+    memset(&g_k_m, 0, sizeof g_k_m);
+    strncpy(g_k_m.name, "main", sizeof g_k_m.name - 1);
+    g_k_m.text_end      = DM_IMG_MAIN_TEXT_END;
+    g_k_m.patch_off     = DM_IMG_MAIN_PATCH_OFF;
+    g_k_m.ro_off        = DM_IMG_MAIN_RO_OFF;
+    g_k_m.data_off      = DM_IMG_MAIN_DATA_OFF;
+    g_k_m.key_page_off  = DM_IMG_MAIN_KEY_PAGE_OFF;
+    g_k_m.key_page_size = DM_IMG_MAIN_KEY_PAGE_SIZE;
+    g_k_m.x0_end        = DM_IMG_MAIN_X0_END;
+    g_k_m.img_end       = DM_IMG_MAIN_END;
+    if (dm_ohos_map_image_alloc(&g_k_m)) { app(out, cap, used, "  ✗ alloc 失败\n\n"); return; }
+    if (dm_ohos_map_image_seal(&g_k_m)) { app(out, cap, used, "  ✗ seal 失败\n\n"); return; }
+    appf(out, cap, used, "  ✓ 装载并封 R+X：base %p\n", (void *)g_k_m.base);
+
+    for (int i = 0; i < 8; i++)
+        if (pthread_key_create(&g_k_key[i], NULL)) { app(out, cap, used, "  ✗ 建键失败\n\n"); return; }
+    uint64_t *page = (uint64_t *)(g_k_m.base + DM_IMG_MAIN_KEY_PAGE_OFF);
+    memset(page, 0, DM_IMG_MAIN_KEY_PAGE_SIZE);
+    page[DM_IMG_MAIN_KEY_K18_IDX]       = (uint64_t)g_k_key[0] * 8;
+    page[DM_IMG_MAIN_KEY_KTLS_IDX]      = (uint64_t)g_k_key[1] * 8;
+    page[DM_IMG_MAIN_KEY_KTLR_IDX]      = (uint64_t)g_k_key[2] * 8;
+    page[DM_IMG_MAIN_KEY_KGATE_IDX]     = (uint64_t)g_k_key[3] * 8;
+    page[DM_IMG_MAIN_KEY_KRES0_IDX]     = (uint64_t)g_k_key[4] * 8;
+    page[DM_IMG_MAIN_KEY_KRES1_IDX]     = (uint64_t)g_k_key[5] * 8;
+    page[DM_IMG_MAIN_KEY_KASPECT_IDX]   = (uint64_t)g_k_key[6] * 8;
+    page[DM_IMG_MAIN_KEY_KASPECTUI_IDX] = (uint64_t)g_k_key[7] * 8;
+
+    struct sigaction sa, o1, o2, o3, o4;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_sigaction = gate_fault_handler;
+    sa.sa_flags = SA_SIGINFO;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGSEGV, &sa, &o1); sigaction(SIGBUS, &sa, &o2);
+    sigaction(SIGILL, &sa, &o3);  sigaction(SIGTRAP, &sa, &o4);
+
+    g_k_hits = 0; g_k_faulted = 0; g_k_rv = 0;
+    pthread_t th;
+    if (pthread_create(&th, NULL, k_thread, NULL) == 0) pthread_join(th, NULL);
+    else app(out, cap, used, "  ✗ pthread_create 失败\n");
+
+    sigaction(SIGSEGV, &o1, NULL); sigaction(SIGBUS, &o2, NULL);
+    sigaction(SIGILL, &o3, NULL);  sigaction(SIGTRAP, &o4, NULL);
+
+    appf(out, cap, used, "  %s 启动链跑完并返回（rv=%#llx）；门被命中 %d 次%s\n",
+         g_k_faulted ? "✗" : "✓", (unsigned long long)g_k_rv, g_k_hits,
+         g_k_faulted ? "（中途崩，崩点见 dm_run_test.log）" : "");
+    if (g_k_faulted)
+        appf(out, cap, used, "  崩点：pc %#llx sig %d（离线对符号可定位到函数）\n",
+             (unsigned long long)g_gate_fault_pc, g_gate_fault_sig);
+    appf(out, cap, used, "  （明细落盘 %s/dm_run_test.log）\n", files_dir ? files_dir : "?");
+    if (g_k_log) { fclose(g_k_log); g_k_log = NULL; }
+    dm_log_set_mirror(NULL);
+    app(out, cap, used, "\n");
+}
+
 static void exp_h(const char *files_dir, char *out, size_t cap, size_t *used) {
     app(out, cap, used, "【实验 H】门回路：93 个真实门块 → dm_gate → gate_dispatch → svc 38 → 返回\n");
     if (files_dir && *files_dir) {
@@ -1103,6 +1211,7 @@ int dm_probe_run(const char *files_dir, char *out, size_t cap) {
     logline(">>> 实验 H 开始"); exp_h(files_dir, out, cap, &used); logline(">>> 实验 H 返回");
     logline(">>> 实验 I 开始"); exp_i(out, cap, &used); logline(">>> 实验 I 返回");
     logline(">>> 实验 J 开始"); exp_j(out, cap, &used); logline(">>> 实验 J 返回");
+    logline(">>> 实验 K 开始"); exp_k(files_dir, out, cap, &used); logline(">>> 实验 K 返回");
     logline(">>> 实验 C 开始"); exp_c(out, cap, &used); logline(">>> 实验 C 返回");
     logline(">>> 实验 B 开始"); exp_b(files_dir, out, cap, &used); logline(">>> 实验 B 返回");
     logline(">>> 实验 A 开始"); exp_a(out, cap, &used); logline(">>> 实验 A 返回");
