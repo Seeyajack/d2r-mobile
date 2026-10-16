@@ -273,8 +273,10 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         module_t *mm = module_of((void *)regs[30]);
         static int nb;
         LOG("Break#%d reason=%#llx Result=%#x svc 位于 %s+%#llx", ++nb, regs[0], res, mm ? mm->name : "?", orig_addr);
+        LOG("Break：dm_backtrace 前");                       // 诊断：门回路返回路径夹点
         dm_backtrace(regs[29]);
-        if (regs[0] & 0x80000000ull) return 0;   // 仅通知，可继续 | notification only, can continue
+        LOG("Break：通知检查前");                            // 诊断：门回路返回路径夹点
+        if (regs[0] & 0x80000000ull) { LOG("Break：仅通知位命中 → 返回 0"); return 0; }   // 仅通知，可继续 | notification only, can continue
         _exit(42);
     }
     case 0x1E: regs[0] = 0; regs[1] = guest_ns() * 12 / 625; return 0;   // GetSystemTick
