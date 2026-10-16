@@ -774,6 +774,7 @@ static void exp_h(const char *files_dir, char *out, size_t cap, size_t *used) {
         uint64_t regs2[64]; memset(regs2, 0, sizeof regs2);
         regs2[0] = 0x8000000000000000ull;   // Break 的「仅通知」位
         g_gate_armed = 1; g_gate_fault_pc = 0;
+        glog("二分 B 开始：将直调 gate_dispatch(ret=%#llx)\n", (unsigned long long)(m.base + DM_GATES_MAIN[0].ret));
         if (sigsetjmp(g_gate_jmp, 1) == 0) {
             uint64_t rv2 = gate_dispatch((uint64_t)(m.base + DM_GATES_MAIN[0].ret), regs2);
             g_gate_armed = 0;
