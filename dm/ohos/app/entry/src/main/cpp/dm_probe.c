@@ -915,6 +915,21 @@ static uint64_t mgr_method(void *self) {
     klog("[管理器] 虚方法被调用（self=%p）—— 宿主存根应答\n", self);
     return 0;
 }
+// 日志对象 + 节点池：nnMain 开头调用的日志辅助 0xf35374 从 *(0x2288548) 取对象，
+// 字段：[+0x10]=计数（0）、[+0x28]=上限（64）、[+0x18]=节点链表头。
+// 节点：>=0x20 字节，[+0]=下一节点。链表**必须非空**（空表会让它往地址 0 写）。
+#define LOG_POOL_N 64
+static uint64_t g_log_pool[LOG_POOL_N][4];      // 每节点 0x20 字节
+static uint64_t g_log_obj[8];
+static void k_inject_log(uint8_t *img) {
+    for (int i = 0; i < LOG_POOL_N; i++)
+        g_log_pool[i][0] = (i + 1 < LOG_POOL_N) ? (uint64_t)(uintptr_t)&g_log_pool[i + 1][0] : 0;
+    memset(g_log_obj, 0, sizeof g_log_obj);
+    g_log_obj[0x10 / 8] = 0;                                              // 计数
+    g_log_obj[0x28 / 8] = LOG_POOL_N;                                     // 上限
+    g_log_obj[0x18 / 8] = (uint64_t)(uintptr_t)&g_log_pool[0][0];         // 链表头（非空）
+    *(uint64_t *)(img + 0x2288548) = (uint64_t)(uintptr_t)&g_log_obj[0];
+}
 static void k_inject_heap(uint8_t *img) {
     g_alloc_vtbl[6] = (uint64_t)(uintptr_t)&host_alloc;
     g_alloc_obj[0] = (uint64_t)(uintptr_t)&g_alloc_vtbl[0];
@@ -976,6 +991,15 @@ static void *k_thread(void *arg) {
     klog("=== 终站：nnMain（0x735330）===\n");
     g_gate_armed = 1; g_gate_fault_pc = 0;
     if (sigsetjmp(g_gate_jmp, 1) == 0) {
+        // 按"干净调用"准备寄存器：x21 = 模块基址（Switch SDK 约定），x0..x7 清零。
+        register uint64_t r21 __asm__("x21") = b;
+        register uint64_t r_x2 __asm__("x2") = 0; (void)r_x2;
+        register uint64_t r_x3 __asm__("x3") = 0; (void)r_x3;
+        register uint64_t r_x4 __asm__("x4") = 0; (void)r_x4;
+        register uint64_t r_x5 __asm__("x5") = 0; (void)r_x5;
+        register uint64_t r_x6 __asm__("x6") = 0; (void)r_x6;
+        register uint64_t r_x7 __asm__("x7") = 0; (void)r_x7;
+        __asm__ volatile("" : "+r"(r21), "+r"(r_x2), "+r"(r_x3), "+r"(r_x4), "+r"(r_x5), "+r"(r_x6), "+r"(r_x7));
         uint64_t r3 = ((uint64_t (*)(uint64_t, uint64_t))(b + 0x735330))(0, 0);
         g_gate_armed = 0;
         klog("=== nnMain 返回：rv=%#llx ===\n", (unsigned long long)r3);
@@ -1036,6 +1060,7 @@ static void exp_k(const char *files_dir, char *out, size_t cap, size_t *used) {
             else n_other++;
         }
         k_inject_heap(img);   // ★ 喂堆：把游戏分配器要的两个全局指向宿主对象（见 k_inject_heap）
+    k_inject_log(img);    // ★ 喂日志对象 + 节点池（见 k_inject_log）
         g_nplt = 0; g_plt_calls = 0;
         for (uint64_t off = 0; off + 24 <= DT_PLTRELSZ; off += 24) {
             uint64_t r_off  = *(uint64_t *)(img + DT_JMPREL + off);
