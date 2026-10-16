@@ -901,9 +901,11 @@ static uint64_t plt_stub(void) {
     if (nm) {
         // nn::os::AllocateMemoryBlock(size_t* out_size, size_t size) —— 真给内存
         if (!strcmp(nm, "_ZN2nn2os19AllocateMemoryBlockEPmm")) {
-            void *p = malloc((size_t)a1);
+            // 必须清零（calloc）：游戏会把这块内存当自己的内存池，池管理器的空闲链头若读到
+            // 未初始化垃圾，第一次"切对象"就会得到垃圾指针（本轮插桩实证：this=0xC0600000=请求大小）。
+            void *p = calloc(1, (size_t)a1);
             if (a0) *(uint64_t *)a0 = a1;
-            klog("[服务] AllocateMemoryBlock(大小 %llu) → %p\n", (unsigned long long)a1, p);
+            klog("[服务] AllocateMemoryBlock(大小 %llu) → %p（已清零）\n", (unsigned long long)a1, p);
             return (uint64_t)(uintptr_t)p;
         }
         // nn::os::GetHostArgc / GetHostArgv —— 给一对合理的启动参数
@@ -1022,6 +1024,21 @@ static uint64_t hook_alloc_log(void) {
     if (g_hook_alloc_n <= 8)
         klog("[插桩] 分配器入口 #%llu：大小=%llu 上下文=%#llx 标志=%llu\n",
              (unsigned long long)g_hook_alloc_n, (unsigned long long)a0, (unsigned long long)a1, (unsigned long long)a2);
+    return 0;
+}
+// 崩点构造器 0xa08ef4 的入口记录：直接读入参 this（x0）与 x1/x2
+static uint64_t g_hook_ctor_n;
+static uint64_t hook_ctor_log(void) {
+    uint64_t a0, a1, a2, lr;
+    __asm__ volatile("mov %0, x0" : "=r"(a0));
+    __asm__ volatile("mov %0, x1" : "=r"(a1));
+    __asm__ volatile("mov %0, x2" : "=r"(a2));
+    __asm__ volatile("mov %0, x8" : "=r"(lr));
+    g_hook_ctor_n++;
+    if (g_hook_ctor_n <= 6)
+        klog("[插桩] 构造器 0xa08ef4 第%llu 次：this=%#llx x1=%#llx x2=%#llx 调用者=%#llx\n",
+             (unsigned long long)g_hook_ctor_n, (unsigned long long)a0,
+             (unsigned long long)a1, (unsigned long long)a2, (unsigned long long)lr);
     return 0;
 }
 static void k_inject_heap(uint8_t *img) {
@@ -1156,7 +1173,8 @@ static void exp_k(const char *files_dir, char *out, size_t cap, size_t *used) {
         k_inject_heap(img);   // ★ 喂堆：把游戏分配器要的两个全局指向宿主对象（见 k_inject_heap）
     k_inject_log(img);    // ★ 喂日志对象 + 节点池（见 k_inject_log）
     k_patch_allocators(img);   // 分配器入口 → 宿主（射程不够时会自检跳过）
-    k_install_hook(img, 0x9f3464, (void *)hook_alloc_log, "分配器 0x9f3464 入口");   // ★ 洞内插桩试点
+    k_install_hook(img, 0x9f3464, (void *)hook_alloc_log, "分配器 0x9f3464 入口");   // 洞内插桩试点
+    k_install_hook(img, 0xa08ef4, (void *)hook_ctor_log, "构造器 0xa08ef4 入口");     // ★ 崩点链上的构造器
         g_nplt = 0; g_plt_calls = 0;
         for (uint64_t off = 0; off + 24 <= DT_PLTRELSZ; off += 24) {
             uint64_t r_off  = *(uint64_t *)(img + DT_JMPREL + off);
