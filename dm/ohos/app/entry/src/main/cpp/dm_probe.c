@@ -1107,6 +1107,15 @@ static uint64_t hook_any_site(uint64_t *f) {
              (unsigned long long)f[22], (unsigned long long)f[0], (unsigned long long)f[1]);
     return 0;
 }
+// 第三个分配器 0x9f33f0 入口（看参数：x0=大小 x1=上下文 x2=标志 ⇒ 判定走哪条分配路径）
+static uint64_t g_alloc3_n;
+static uint64_t hook_alloc3_log(uint64_t *f) {
+    if (++g_alloc3_n <= 6)
+        klog("[插桩] 分配器3(0x9f33f0) 第%llu 次：大小=%llu 上下文=%#llx 标志=%llu\n",
+             (unsigned long long)g_alloc3_n, (unsigned long long)f[0],
+             (unsigned long long)f[1], (unsigned long long)f[2]);
+    return 0;
+}
 static void k_inject_heap(uint8_t *img) {
     g_alloc_vtbl[6] = (uint64_t)(uintptr_t)&host_alloc;
     g_alloc_obj[0] = (uint64_t)(uintptr_t)&g_alloc_vtbl[0];
@@ -1243,6 +1252,7 @@ static void exp_k(const char *files_dir, char *out, size_t cap, size_t *used) {
     k_inject_log(img);    // ★ 喂日志对象 + 节点池（见 k_inject_log）
     k_patch_allocators(img);   // 分配器入口 → 宿主（射程不够时会自检跳过）
     k_install_hook(img, 0x9f3464, (void *)hook_alloc_log, "分配器 0x9f3464 入口");   // 洞内插桩试点
+    k_install_hook(img, 0x9f33f0, (void *)hook_alloc3_log, "分配器 0x9f33f0 入口");   // ★ 第三个分配器
     k_install_hook(img, 0xa08ef4, (void *)hook_ctor_log, "构造器 0xa08ef4 入口");     // 崩点链上的构造器
     k_install_hook(img, 0xa08e94, (void *)hook_ctor2_log, "构造器 0xa08e94 入口");    // 同族第二个构造器
     // ★★ 全量挂点：一次挂上"所有调用 0xa08e94 的站点"（174 个），一轮定位到底是哪一处
