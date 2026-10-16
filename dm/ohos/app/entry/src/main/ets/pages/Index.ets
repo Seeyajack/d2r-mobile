@@ -64,7 +64,7 @@ struct Index {
       .fontColor('#5F5E5A')
       .width('100%')
 
-    Button('装载机制实验（实验 G：真实模块装载）')
+    Button('执行链探针（G 装载 / H 门回路 / I 真实执行 / J 门+执行 / K 启动链）')
       .width('100%')
       .onClick(() => {
         try {
@@ -74,6 +74,16 @@ struct Index {
           this.result = '调用原生模块失败：' + JSON.stringify(err);
         }
       })
+
+  }
+
+  // ---- 历史探针：做回归时才展开 ----
+  @Builder
+  HistoryButtons() {
+    Text('图形链探针（3.3/3.4，已收官；做回归时才点）')
+      .fontSize(12)
+      .fontColor('#5F5E5A')
+      .width('100%')
 
     Button('可变帧率节拍（3.3-B：DisplaySoloist 5 组对照）')
       .width('100%')
@@ -179,11 +189,6 @@ struct Index {
       .textAlign(TextAlign.Start)
       .width('100%')
       .padding(4)
-  }
-
-  // ---- 历史探针：做回归时才展开 ----
-  @Builder
-  HistoryButtons() {
     Button('探测图形层能力（Vulkan）')
       .width('100%')
       .onClick(() => {
@@ -339,7 +344,7 @@ struct Index {
         Column({ space: 8 }) {
           this.CurrentButtons()
 
-          Button(this.showHistory ? '收起历史探针 ▲' : '展开历史探针（13 项，做回归用）▼')
+          Button(this.showHistory ? '收起历史探针 ▲' : '展开历史探针（20 项，做回归用）▼')
             .width('100%')
             .backgroundColor('#E6F1FB')
             .fontColor('#0C447C')

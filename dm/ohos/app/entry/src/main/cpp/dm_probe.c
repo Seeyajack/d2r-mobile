@@ -909,10 +909,22 @@ static void *k_thread(void *arg) {
     if (sigsetjmp(g_gate_jmp, 1) == 0) {
         g_k_rv = ((uint64_t (*)(void))(b + 0x1c8))();
         g_gate_armed = 0;
-        klog("=== 返回：rv=%#llx ===\n", (unsigned long long)g_k_rv);
+        klog("=== 启动链返回：rv=%#llx ===\n", (unsigned long long)g_k_rv);
     } else {
         g_gate_armed = 0; g_k_faulted = 1;
-        klog("=== 崩：pc %#llx sig %d ===\n", (unsigned long long)g_gate_fault_pc, g_gate_fault_sig);
+        klog("=== 启动链崩：pc %#llx sig %d ===\n", (unsigned long long)g_gate_fault_pc, g_gate_fault_sig);
+        return NULL;
+    }
+    // 更深一站：模块的第一个真实功能函数 0x1f8（C++ 对象工厂：读数据槽 → 分配 0xaa0 → 构造）
+    klog("=== 深跑：0x1f8（对象工厂，x0=0）===\n");
+    g_gate_armed = 1; g_gate_fault_pc = 0;
+    if (sigsetjmp(g_gate_jmp, 1) == 0) {
+        uint64_t r2 = ((uint64_t (*)(uint64_t))(b + 0x1f8))(0);
+        g_gate_armed = 0;
+        klog("=== 0x1f8 返回：rv=%#llx ===\n", (unsigned long long)r2);
+    } else {
+        g_gate_armed = 0; g_k_faulted = 1;
+        klog("=== 0x1f8 崩：pc %#llx sig %d ===\n", (unsigned long long)g_gate_fault_pc, g_gate_fault_sig);
     }
     return NULL;
 }
@@ -1267,21 +1279,17 @@ int dm_probe_run(const char *files_dir, char *out, size_t cap) {
     // 从日志里就能看出死在哪一步（有"进入"没"返回"）。
     // 顺序有讲究：A 的最后一步要真执行一段可能不可执行的内存，
     // 万一信号兜底没兜住、进程挂了，B/C 也已经跑完并写进日志了。
-    logline(">>> 实验 D 开始"); exp_d(out, cap, &used); logline(">>> 实验 D 返回");
-    logline(">>> 实验 E 开始"); exp_e(out, cap, &used); logline(">>> 实验 E 返回");
-    logline(">>> 实验 E2 开始"); exp_e2(out, cap, &used); logline(">>> 实验 E2 返回");
-    logline(">>> 实验 F 开始"); exp_f(out, cap, &used); logline(">>> 实验 F 返回");
+    // 2026-10-16 收窄：只跑「执行链探针」这一组（G 装载 / H 门回路 / I 真实执行 / J 门+执行 / K 启动链）。
+    // D/E/E2/F 与 A/B/C 是早期探路实验（装载机制/图形链），已收官——函数留在代码里备查，但不再每轮跑，
+    // 每轮省掉 mmap 试探与大量报告，迭代更快。
     logline(">>> 实验 G 开始"); exp_g(out, cap, &used); logline(">>> 实验 G 返回");
     logline(">>> 实验 H 开始"); exp_h(files_dir, out, cap, &used); logline(">>> 实验 H 返回");
     logline(">>> 实验 I 开始"); exp_i(out, cap, &used); logline(">>> 实验 I 返回");
     logline(">>> 实验 J 开始"); exp_j(out, cap, &used); logline(">>> 实验 J 返回");
     logline(">>> 实验 K 开始"); exp_k(files_dir, out, cap, &used); logline(">>> 实验 K 返回");
-    logline(">>> 实验 C 开始"); exp_c(out, cap, &used); logline(">>> 实验 C 返回");
-    logline(">>> 实验 B 开始"); exp_b(files_dir, out, cap, &used); logline(">>> 实验 B 返回");
-    logline(">>> 实验 A 开始"); exp_a(out, cap, &used); logline(">>> 实验 A 返回");
 
     app(out, cap, &used, "==================================================\n");
     app(out, cap, &used, "把这份报告发回来，就能定下装载方案。\n");
-    logline(">>> 三个实验全部跑完");
+    logline(">>> 执行链探针全部跑完（G/H/I/J/K）");
     return 0;
 }
