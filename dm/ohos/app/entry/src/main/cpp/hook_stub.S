@@ -62,3 +62,52 @@ CSYM(hook_slot_site):
 4:  .quad 0                         // 槽④：站点地址（安装器填入）
     .globl CSYM(hook_stub_end)
 CSYM(hook_stub_end):
+
+// ===== 替换式桩：宿主**替函数干活**（返回值经 x0 带回），桩跳过原实现直接回站点之后 =====
+// 用途：分配器这类"必须真给内存"的函数——绕开"注入被改写/路径分支"等不确定性。
+    .p2align 3
+    .globl CSYM(hook_rep_begin)
+CSYM(hook_rep_begin):
+    stp x0, x1, [sp, #-0xE0]!
+    stp x2, x3, [sp, #0x10]
+    stp x4, x5, [sp, #0x20]
+    stp x6, x7, [sp, #0x30]
+    stp x8, x9, [sp, #0x40]
+    stp x10, x11, [sp, #0x50]
+    stp x12, x13, [sp, #0x60]
+    stp x14, x15, [sp, #0x70]
+    stp x16, x17, [sp, #0x80]
+    stp x29, x30, [sp, #0xA0]
+    mrs x9, nzcv
+    str x9, [sp, #0x90]
+    ldr x9, 5f                       // 槽⑤：站点地址（日志识别用）
+    str x9, [sp, #0xB0]
+    mov x0, sp                       // 宿主入参 = 帧指针（宿主读参数、把结果写回 x0）
+    adr x30, 1f
+    ldr x16, 6f                      // 槽⑥：宿主函数地址
+    br x16
+1:
+    ldr x9, [sp, #0x90]
+    msr nzcv, x9
+    ldp x29, x30, [sp, #0xA0]
+    ldp x16, x17, [sp, #0x80]
+    ldp x14, x15, [sp, #0x70]
+    ldp x12, x13, [sp, #0x60]
+    ldp x10, x11, [sp, #0x50]
+    ldp x8, x9, [sp, #0x40]
+    ldp x6, x7, [sp, #0x30]
+    ldp x4, x5, [sp, #0x20]
+    ldp x2, x3, [sp, #0x10]
+    add sp, sp, #0xE0                // 不恢复 x0：x0 就是宿主的返回值
+    .globl CSYM(hook_rep_back)
+CSYM(hook_rep_back):
+    b 2b                             // 槽②：回站点之后（安装器改编码）
+    .p2align 3
+    .globl CSYM(hook_rep_host)
+CSYM(hook_rep_host):
+6:  .quad 0                          // 槽⑥：宿主函数地址
+    .globl CSYM(hook_rep_site)
+CSYM(hook_rep_site):
+5:  .quad 0                          // 槽⑤：站点地址
+    .globl CSYM(hook_rep_end)
+CSYM(hook_rep_end):

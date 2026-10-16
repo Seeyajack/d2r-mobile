@@ -1085,6 +1085,40 @@ static void hook_site_log(uint64_t *f, int idx, const char *tag) {
 static uint64_t hook_site0(uint64_t *f) { hook_site_log(f, 0, "0x165be8"); return 0; }
 static uint64_t hook_site1(uint64_t *f) { hook_site_log(f, 1, "0x3e7c9c"); return 0; }
 static uint64_t hook_site2(uint64_t *f) { hook_site_log(f, 2, "0x5fb97c"); return 0; }
+// ===== 替换式安装器：宿主替函数干活（返回值经 x0 带回），桩跳过原实现 =====
+extern const char hook_rep_begin[], hook_rep_end[], hook_rep_back[], hook_rep_host[], hook_rep_site[];
+static void k_install_replace_hook(uint8_t *img, uint32_t site_off, void *host_fn, const char *what) {
+    const char *b0 = hook_rep_begin;
+    size_t n = (size_t)(hook_rep_end - hook_rep_begin);
+    uint8_t *dst = img + DM_IMG_MAIN_CAVE_OFF + (size_t)g_hook_n * 0x90;
+    if (n > 0x90) { klog("[替换] %s 桩过长(%zu)，跳过\n", what, n); return; }
+    memcpy(dst, b0, n);
+    {   // 槽②：b site+4
+        uint8_t *q = dst + (hook_rep_back - b0);
+        int64_t d = ((int64_t)(uintptr_t)(img + site_off + 4) - (int64_t)(uintptr_t)q) / 4;
+        if (d < -(1 << 25) || d >= (1 << 25)) { klog("[替换] %s 回跳超程，跳过\n", what); return; }
+        *(uint32_t *)q = 0x14000000u | (uint32_t)(d & 0x03FFFFFFu);
+    }
+    *(uint64_t *)(dst + (hook_rep_host - b0)) = (uint64_t)(uintptr_t)host_fn;
+    *(uint64_t *)(dst + (hook_rep_site - b0)) = (uint64_t)(uintptr_t)(img + site_off);
+    {   // 站点：b dst
+        int64_t d = ((int64_t)(uintptr_t)dst - (int64_t)(uintptr_t)(img + site_off)) / 4;
+        if (d < -(1 << 25) || d >= (1 << 25)) { klog("[替换] %s 站点超程，跳过\n", what); return; }
+        *(uint32_t *)(img + site_off) = 0x14000000u | (uint32_t)(d & 0x03FFFFFFu);
+    }
+    klog("[替换] %s：site %#x → 洞 %#zx\n", what, site_off, (size_t)(dst - img));
+    g_hook_n++;
+}
+// 宿主替分配器干活：x0 = 请求大小，返回真实内存（calloc 清零）
+static uint64_t g_rep_n;
+static uint64_t host_alloc_replace(uint64_t *f) {
+    uint64_t size = f[0];
+    void *p = calloc(1, (size_t)size);
+    if (++g_rep_n <= 8)
+        klog("[替换] 分配 %llu 字节 → %p（站点 %#llx 上下文 %#llx）\n",
+             (unsigned long long)size, p, (unsigned long long)f[22], (unsigned long long)f[1]);
+    return (uint64_t)(uintptr_t)p;
+}
 // 批量挂点：扫全 text，找出所有 bl <target> 的调用点并全部挂上（"一次看全部"）。
 // 用途：崩点有 174 个候选调用点时，一轮就能定位是哪一处。
 static void k_hook_all_callers(uint8_t *img, uint32_t target_off, void *host_fn, const char *what, int cap) {
@@ -1251,8 +1285,10 @@ static void exp_k(const char *files_dir, char *out, size_t cap, size_t *used) {
         k_inject_heap(img);   // ★ 喂堆：把游戏分配器要的两个全局指向宿主对象（见 k_inject_heap）
     k_inject_log(img);    // ★ 喂日志对象 + 节点池（见 k_inject_log）
     k_patch_allocators(img);   // 分配器入口 → 宿主（射程不够时会自检跳过）
-    k_install_hook(img, 0x9f3464, (void *)hook_alloc_log, "分配器 0x9f3464 入口");   // 洞内插桩试点
-    k_install_hook(img, 0x9f33f0, (void *)hook_alloc3_log, "分配器 0x9f33f0 入口");   // ★ 第三个分配器
+    // ★ 三个分配器改用「替换式」：宿主直接给内存，跳过游戏自己的实现（绕开注入被改写/分支不确定）
+    k_install_replace_hook(img, 0x9f34d8, (void *)host_alloc_replace, "分配器 0x9f34d8");
+    k_install_replace_hook(img, 0x9f3464, (void *)host_alloc_replace, "分配器 0x9f3464");
+    k_install_replace_hook(img, 0x9f33f0, (void *)host_alloc_replace, "分配器 0x9f33f0");
     k_install_hook(img, 0xa08ef4, (void *)hook_ctor_log, "构造器 0xa08ef4 入口");     // 崩点链上的构造器
     k_install_hook(img, 0xa08e94, (void *)hook_ctor2_log, "构造器 0xa08e94 入口");    // 同族第二个构造器
     // ★★ 全量挂点：一次挂上"所有调用 0xa08e94 的站点"（174 个），一轮定位到底是哪一处
