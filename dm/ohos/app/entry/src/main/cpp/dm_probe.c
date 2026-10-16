@@ -921,6 +921,17 @@ static uint64_t plt_stub(void) {
         // 返回 0 会被当成"别人已初始化"而跳过 ⇒ 全部静态单例没建、虚表为空（本轮崩因）。
         if (!strcmp(nm, "__cxa_guard_acquire")) { klog("[服务] __cxa_guard_acquire → 1（由我来初始化）\n"); return 1; }
         if (!strcmp(nm, "__cxa_guard_release") || !strcmp(nm, "__cxa_guard_abort")) return 0;
+        // ===== 语义已知的服务：成批实现（"步子适度放大"：这些不必一个个试）=====
+        // 真时基：返回 ns 级单调时间（返回 0 会让游戏的计时/节拍逻辑失真）
+        if (!strcmp(nm, "_ZN2nn2os13GetSystemTickEv")) {
+            struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+            static uint64_t base_ns;
+            uint64_t now = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+            if (!base_ns) base_ns = now;
+            return (now - base_ns) * 19200ull / 1000000000ull;   // Switch 时基 ≈ 19.2MHz
+        }
+        // C++ 纯虚调用兜底：落到这里就是"调了纯虚函数"，记名后返回（不无限循环，便于定位）
+        if (!strcmp(nm, "__cxa_pure_virtual")) { klog("[服务] ⚠ __cxa_pure_virtual 被调用（游戏有纯虚误调）\n"); return 0; }
         klog("[PLT] %s\n", nm);
     }
     return 0;
@@ -1489,10 +1500,10 @@ int dm_probe_run(const char *files_dir, char *out, size_t cap) {
     // 2026-10-16 收窄：只跑「执行链探针」这一组（G 装载 / H 门回路 / I 真实执行 / J 门+执行 / K 启动链）。
     // D/E/E2/F 与 A/B/C 是早期探路实验（装载机制/图形链），已收官——函数留在代码里备查，但不再每轮跑，
     // 每轮省掉 mmap 试探与大量报告，迭代更快。
-    logline(">>> 实验 G 开始"); exp_g(out, cap, &used); logline(">>> 实验 G 返回");
-    logline(">>> 实验 H 开始"); exp_h(files_dir, out, cap, &used); logline(">>> 实验 H 返回");
-    logline(">>> 实验 I 开始"); exp_i(out, cap, &used); logline(">>> 实验 I 返回");
-    logline(">>> 实验 J 开始"); exp_j(out, cap, &used); logline(">>> 实验 J 返回");
+    // 2026-10-16 再收窄：G/H/I/J 均已验收（93/93、3/3、串链全绿），每轮不再重复跑，
+    // 只跑当前焦点实验 K（启动链→nnMain→崩点）——每轮省约 40 秒；要回归时把它们放开即可。
+    logline(">>> 实验 G/H/I/J 已验收，本轮跳过（要回归时放开）");
+    (void)exp_g; (void)exp_h; (void)exp_i; (void)exp_j;
     logline(">>> 实验 K 开始"); exp_k(files_dir, out, cap, &used); logline(">>> 实验 K 返回");
 
     app(out, cap, &used, "==================================================\n");
