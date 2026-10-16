@@ -558,9 +558,13 @@ static volatile uint64_t g_gate_fault_pc;
 static volatile int g_gate_fault_sig;
 static void gate_fault_handler(int sig, siginfo_t *si, void *uc) {
     (void)si;
-    if (!g_gate_armed) _exit(128 + sig);
     g_gate_fault_sig = sig;
     g_gate_fault_pc = (uint64_t)((ucontext_t *)uc)->uc_mcontext.pc;   // aarch64 mcontext 的 pc
+    if (!g_gate_armed) {
+        // 未武装段（尾跳补丁循环等）出段错误：先打日志再退出——PC 落在 hilog 里供定位
+        LOG("【红】门回路：未武装段 SIGSEGV/SIGBUS pc=%#llx sig=%llx（退出码 139）", (unsigned long long)g_gate_fault_pc, (unsigned long long)sig);
+        _exit(139);
+    }
     g_gate_armed = 0;
     siglongjmp(g_gate_jmp, 1);
 }
@@ -748,6 +752,9 @@ static void exp_h(char *out, size_t cap, size_t *used) {
             if (p[-b] == 0xA9BF7BFD) { blk = (uint8_t *)p - 4 * b; break; }
         if (!blk) { noblock++; continue; }
         g_gate_armed = 1; g_gate_fault_pc = 0;
+        char gb[96];
+        snprintf(gb, sizeof gb, ">>> 门 %d（ret %#llx）开始", i, (unsigned long long)DM_GATES_MAIN[i].ret);
+        logline(gb);
         if (sigsetjmp(g_gate_jmp, 1) == 0) {
             // 过门参数：svc 38 = Break(reason, ptr, size)。reason 的最高位 = 「仅通知，可继续」——
             // 处理器看到它就返回 0 而不 _exit(42)；ptr/size 置 0 免得处理器解引用垃圾指针。
