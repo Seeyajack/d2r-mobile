@@ -15,7 +15,7 @@
     .p2align 3
     .globl CSYM(hook_stub_begin)
 CSYM(hook_stub_begin):
-    stp x0, x1, [sp, #-0xC0]!
+    stp x0, x1, [sp, #-0xE0]!
     stp x2, x3, [sp, #0x10]
     stp x4, x5, [sp, #0x20]
     stp x6, x7, [sp, #0x30]
@@ -26,12 +26,15 @@ CSYM(hook_stub_begin):
     stp x16, x17, [sp, #0x80]
     mrs x9, nzcv
     str x9, [sp, #0x90]
+    stp x29, x30, [sp, #0xA0]
+    mov x0, sp                      // 宿主入参 = 保存帧指针（宿主从内存读各项，不靠寄存器传值）
     adr x30, 1f                     // 返回点：宿主以 ret 回到这里
     ldr x16, 3f                     // 槽③：宿主记录函数地址（复制时填入）
     br x16
 1:
     ldr x9, [sp, #0x90]
     msr nzcv, x9
+    ldp x29, x30, [sp, #0xA0]
     ldp x16, x17, [sp, #0x80]
     ldp x14, x15, [sp, #0x70]
     ldp x12, x13, [sp, #0x60]
@@ -40,7 +43,7 @@ CSYM(hook_stub_begin):
     ldp x6, x7, [sp, #0x30]
     ldp x4, x5, [sp, #0x20]
     ldp x2, x3, [sp, #0x10]
-    ldp x0, x1, [sp], #0xC0
+    ldp x0, x1, [sp], #0xE0
     .p2align 3
     .globl CSYM(hook_slot_orig)
 CSYM(hook_slot_orig):
