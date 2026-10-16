@@ -27,6 +27,8 @@ CSYM(hook_stub_begin):
     mrs x9, nzcv
     str x9, [sp, #0x90]
     stp x29, x30, [sp, #0xA0]
+    ldr x9, 4f                      // 槽④：本站点地址（安装器填入，供日志识别）
+    str x9, [sp, #0xB0]
     mov x0, sp                      // 宿主入参 = 保存帧指针（宿主从内存读各项，不靠寄存器传值）
     adr x30, 1f                     // 返回点：宿主以 ret 回到这里
     ldr x16, 3f                     // 槽③：宿主记录函数地址（复制时填入）
@@ -55,5 +57,8 @@ CSYM(hook_slot_back):
     .globl CSYM(hook_slot_host)
 CSYM(hook_slot_host):
 3:  .quad 0                         // 槽③：宿主函数地址（复制时填入）
+    .globl CSYM(hook_slot_site)
+CSYM(hook_slot_site):
+4:  .quad 0                         // 槽④：站点地址（安装器填入）
     .globl CSYM(hook_stub_end)
 CSYM(hook_stub_end):

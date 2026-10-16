@@ -997,16 +997,32 @@ static void k_patch_allocators(uint8_t *img) {
 // ===== 洞内插桩：安装器 =====
 // 把 hook_stub.S 的桩整段复制进代码洞，填三个槽（原指令 / 回跳 / 宿主函数地址），
 // 再把目标函数首指令改成 4 字节 b 跳进桩。全部在 seal 之前做。
-extern const char hook_stub_begin[], hook_stub_end[], hook_slot_orig[], hook_slot_back[], hook_slot_host[];
+extern const char hook_stub_begin[], hook_stub_end[], hook_slot_orig[], hook_slot_back[], hook_slot_host[], hook_slot_site[];
 static int g_hook_n;
+static uint32_t *slot_of(uint8_t *dst, const char *b0) {
+    return (uint32_t *)(dst + (hook_slot_orig - b0));
+}
 static void k_install_hook(uint8_t *img, uint32_t site_off, void *host_fn, const char *what) {
     const char *b0 = hook_stub_begin;
     size_t n = (size_t)(hook_stub_end - hook_stub_begin);
     if (n > 0xE0) { klog("[插桩] 桩太长(%zu)，跳过 %s\n", n, what); return; }
-    uint8_t *dst = img + DM_IMG_MAIN_CAVE_OFF + (size_t)g_hook_n * 0x100;
+    uint8_t *dst = img + DM_IMG_MAIN_CAVE_OFF + (size_t)g_hook_n * 0x90;   // 步长 0x90（桩 0x88 + 8 对齐）
     memcpy(dst, b0, n);
-    // 槽①：原指令（4 字节）
-    *(uint32_t *)(dst + (hook_slot_orig - b0)) = *(uint32_t *)(img + site_off);
+    // 槽①：原指令（4 字节）。若原指令是 bl（PC 相对），搬进洞后必须按新位置重算 imm26，
+    // 否则会跳错地方——这是我们想直接挂"调用点"时绕不过的一步。
+    {
+        uint32_t w = *(uint32_t *)(img + site_off);
+        if ((w & 0xFC000000u) == 0x94000000u) {
+            int32_t imm = (int32_t)(w & 0x03FFFFFFu);
+            if (imm & 0x02000000) imm -= 0x04000000;
+            uint8_t *slot = dst + (hook_slot_orig - b0);
+            int64_t nd = ((int64_t)(uintptr_t)(img + site_off) + (int64_t)imm * 4
+                          - (int64_t)(uintptr_t)slot) / 4;
+            if (nd < -(1 << 25) || nd >= (1 << 25)) { klog("[插桩] %s bl 重定位超程，跳过\n", what); return; }
+            w = 0x94000000u | (uint32_t)(nd & 0x03FFFFFFu);
+        }
+        *(uint32_t *)slot_of(dst, b0) = w;
+    }
     // 槽②：b site+4（相对编码）
     {
         uint8_t *p = dst + (hook_slot_back - b0);
@@ -1014,16 +1030,17 @@ static void k_install_hook(uint8_t *img, uint32_t site_off, void *host_fn, const
         if (d < -(1 << 25) || d >= (1 << 25)) { klog("[插桩] %s 回跳超程，跳过\n", what); return; }
         *(uint32_t *)p = 0x14000000u | (uint32_t)(d & 0x03FFFFFFu);
     }
-    // 槽③：宿主函数地址
+    // 槽③：宿主函数地址；槽④：站点地址（日志据此识别调用点）
     *(uint64_t *)(dst + (hook_slot_host - b0)) = (uint64_t)(uintptr_t)host_fn;
+    *(uint64_t *)(dst + (hook_slot_site - b0)) = (uint64_t)(uintptr_t)(img + site_off);
     // 站点：b dst
     {
         int64_t d = ((int64_t)(uintptr_t)dst - (int64_t)(uintptr_t)(img + site_off)) / 4;
         if (d < -(1 << 25) || d >= (1 << 25)) { klog("[插桩] %s 站点跳超程，跳过\n", what); return; }
         *(uint32_t *)(img + site_off) = 0x14000000u | (uint32_t)(d & 0x03FFFFFFu);
     }
-    klog("[插桩] %s：site %#x → 洞 %#zx（原指令 %08x）\n", what, site_off,
-         (size_t)(dst - img), *(uint32_t *)(dst + (hook_slot_orig - b0)));
+    klog("[插桩] %s：site %#x → 洞 %#zx（洞内首指令 %08x）\n", what, site_off,
+         (size_t)(dst - img), *slot_of(dst, b0));
     g_hook_n++;
 }
 // 宿主记录函数：读调用时的 x0/x1/x2（桩已保存现场，读到的即站点真值）
@@ -1054,6 +1071,40 @@ static uint64_t hook_ctor2_log(uint64_t *f) {
         klog("[插桩] 构造器 0xa08e94 第%llu 次：this=%#llx x1=%#llx x2=%#llx 返回地址x30=%#llx\n",
              (unsigned long long)g_hook_ctor2_n, (unsigned long long)f[0],
              (unsigned long long)f[1], (unsigned long long)f[2], (unsigned long long)f[20]);
+    return 0;
+}
+// 多点插桩：三个代表调用点（均为 bl 0xa08e94，模式 x0 = 外层对象+偏移）
+static uint64_t g_site_n[3];
+static void hook_site_log(uint64_t *f, int idx, const char *tag) {
+    if (++g_site_n[idx] <= 4)
+        klog("[插桩] 调用点 %s 第%llu 次：x0(对象)=%#llx x19=%#llx x20=%#llx x30=%#llx\n",
+             tag, (unsigned long long)g_site_n[idx], (unsigned long long)f[0],
+             (unsigned long long)f[19], (unsigned long long)f[20], (unsigned long long)f[20]);
+    (void)f;
+}
+static uint64_t hook_site0(uint64_t *f) { hook_site_log(f, 0, "0x165be8"); return 0; }
+static uint64_t hook_site1(uint64_t *f) { hook_site_log(f, 1, "0x3e7c9c"); return 0; }
+static uint64_t hook_site2(uint64_t *f) { hook_site_log(f, 2, "0x5fb97c"); return 0; }
+// 批量挂点：扫全 text，找出所有 bl <target> 的调用点并全部挂上（"一次看全部"）。
+// 用途：崩点有 174 个候选调用点时，一轮就能定位是哪一处。
+static void k_hook_all_callers(uint8_t *img, uint32_t target_off, void *host_fn, const char *what, int cap) {
+    uint32_t n = 0;
+    for (uint32_t a = 0; a + 4 <= DM_IMG_MAIN_TEXT_END && n < (uint32_t)cap; a += 4) {
+        uint32_t w = *(uint32_t *)(img + a);
+        if ((w & 0xFC000000u) != 0x94000000u) continue;
+        int32_t imm = (int32_t)(w & 0x03FFFFFFu);
+        if (imm & 0x02000000) imm -= 0x04000000;
+        if ((int64_t)a + (int64_t)imm * 4 != (int64_t)target_off) continue;
+        k_install_hook(img, a, host_fn, what);
+        n++;
+    }
+    klog("[插桩] %s：共挂 %u 个调用点（上限 %d）\n", what, n, cap);
+}
+static uint64_t g_site_hits;
+static uint64_t hook_any_site(uint64_t *f) {
+    if (++g_site_hits <= 12)
+        klog("[插桩] 命中站点 %#llx：x0(对象)=%#llx x1=%#llx\n",
+             (unsigned long long)f[22], (unsigned long long)f[0], (unsigned long long)f[1]);
     return 0;
 }
 static void k_inject_heap(uint8_t *img) {
@@ -1193,7 +1244,9 @@ static void exp_k(const char *files_dir, char *out, size_t cap, size_t *used) {
     k_patch_allocators(img);   // 分配器入口 → 宿主（射程不够时会自检跳过）
     k_install_hook(img, 0x9f3464, (void *)hook_alloc_log, "分配器 0x9f3464 入口");   // 洞内插桩试点
     k_install_hook(img, 0xa08ef4, (void *)hook_ctor_log, "构造器 0xa08ef4 入口");     // 崩点链上的构造器
-    k_install_hook(img, 0xa08e94, (void *)hook_ctor2_log, "构造器 0xa08e94 入口");    // ★ 同族第二个构造器
+    k_install_hook(img, 0xa08e94, (void *)hook_ctor2_log, "构造器 0xa08e94 入口");    // 同族第二个构造器
+    // ★★ 全量挂点：一次挂上"所有调用 0xa08e94 的站点"（174 个），一轮定位到底是哪一处
+    k_hook_all_callers(img, 0xa08e94, (void *)hook_any_site, "调用构造器 0xa08e94 的各站点", 600);
         g_nplt = 0; g_plt_calls = 0;
         for (uint64_t off = 0; off + 24 <= DT_PLTRELSZ; off += 24) {
             uint64_t r_off  = *(uint64_t *)(img + DT_JMPREL + off);
