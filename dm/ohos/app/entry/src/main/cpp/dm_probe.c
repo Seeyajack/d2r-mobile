@@ -769,6 +769,44 @@ static void exp_h(const char *files_dir, char *out, size_t cap, size_t *used) {
     }
     app(out, cap, used, "  ✓ 代码区与补丁区已封 R+X\n");
 
+    // ⑤ 二分 B：纯 C 路径直调 gate_dispatch（构造 regs 帧，绕过汇编）——分离「宿主 C 侧」与「汇编路径」
+    {
+        uint64_t regs2[64]; memset(regs2, 0, sizeof regs2);
+        regs2[0] = 0x8000000000000000ull;   // Break 的「仅通知」位
+        g_gate_armed = 1; g_gate_fault_pc = 0;
+        if (sigsetjmp(g_gate_jmp, 1) == 0) {
+            uint64_t rv2 = gate_dispatch((uint64_t)(m.base + DM_GATES_MAIN[0].ret), regs2);
+            g_gate_armed = 0;
+            glog("二分 B：gate_dispatch 直调返回 %#llx（期望 0）\n", (unsigned long long)rv2);
+            appf(out, cap, used, "  %s 二分 B：gate_dispatch 直调（纯 C）返回 %#llx\n",
+                 rv2 == 0 ? "✓" : "✗", (unsigned long long)rv2);
+        } else {
+            g_gate_armed = 0;
+            glog("二分 B：崩 pc %#llx sig %d\n", (unsigned long long)g_gate_fault_pc, g_gate_fault_sig);
+            appf(out, cap, used, "  ✗ 二分 B：gate_dispatch 直调崩（pc %#llx，sig %d）\n",
+                 (unsigned long long)g_gate_fault_pc, g_gate_fault_sig);
+        }
+    }
+
+    // ⑤ 二分 C：直调 svc_dispatch(38, regs2, orig)（跳过哈希查找）——分离「查找」与「处理器」
+    {
+        uint64_t regs3[64]; memset(regs3, 0, sizeof regs3);
+        regs3[0] = 0x8000000000000000ull;
+        g_gate_armed = 1; g_gate_fault_pc = 0;
+        if (sigsetjmp(g_gate_jmp, 1) == 0) {
+            uint64_t rv3 = svc_dispatch(38, regs3, (uint64_t)(m.base + DM_GATES_MAIN[0].orig));
+            g_gate_armed = 0;
+            glog("二分 C：svc_dispatch(38) 返回 %#llx\n", (unsigned long long)rv3);
+            appf(out, cap, used, "  %s 二分 C：svc_dispatch(38) 直调返回 %#llx\n",
+                 rv3 == 0 ? "✓" : "✗", (unsigned long long)rv3);
+        } else {
+            g_gate_armed = 0;
+            glog("二分 C：崩 pc %#llx sig %d\n", (unsigned long long)g_gate_fault_pc, g_gate_fault_sig);
+            appf(out, cap, used, "  ✗ 二分 C：svc_dispatch 直调崩（pc %#llx，sig %d）\n",
+                 (unsigned long long)g_gate_fault_pc, g_gate_fault_sig);
+        }
+    }
+
     // ⑤′ 二分定位（必须在 seal 之后：门块要可执行）：门 0 的块先以「KGATE = 探针函数」过一次
     //    —— 验证「门块执行 + 槽读取」；通了再把 KGATE 指回 dm_gate，崩了就锁定在宿主侧入口。
     {
@@ -777,7 +815,7 @@ static void exp_h(const char *files_dir, char *out, size_t cap, size_t *used) {
         for (int b = 1; b <= 16; b++)
             if (p0[-b] == 0xA9BF7BFD) { blk0 = (uint8_t *)p0 - 4 * b; break; }
         if (blk0) {
-            *(uint32_t *)(m.base + DM_GATES_MAIN[0].ret + 4) = 0xD65F03C0;   // 尾跳改 RET
+            // 尾跳已在步骤④（seal 前）改为 RET——此处**不可再写**（seal 后补丁区只读，写了必 SIGSEGV）
             *(uint64_t *)(tsd_base + (uint64_t)key[3] * 8) = (uint64_t)gate_probe_entry;
             g_gate_armed = 1; g_gate_fault_pc = 0;
             glog("二分 A：门 0 开始（KGATE=探针函数，块起点 %p）\n", blk0);
