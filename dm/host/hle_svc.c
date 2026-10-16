@@ -277,6 +277,7 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         dm_backtrace(regs[29]);
         LOG("Break：通知检查前 regs=%p x0=%#llx x1=%#llx x2=%#llx", (void *)regs, (unsigned long long)regs[0], (unsigned long long)regs[1], (unsigned long long)regs[2]);   // 诊断：门回路返回路径夹点
         if (regs[0] & 0x80000000ull) return 0;   // 仅通知，可继续 | notification only, can continue（诊断 LOG 已撤：它本身疑似死点）
+        LOG("Break：⚠ 通知位未命中，走到 _exit(42) regs[0]=%#llx", (unsigned long long)regs[0]);   // 判别实验：出现=if 没被判中
         _exit(42);
     }
     case 0x1E: regs[0] = 0; regs[1] = guest_ns() * 12 / 625; return 0;   // GetSystemTick
