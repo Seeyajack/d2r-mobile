@@ -1060,6 +1060,9 @@ static void *k_thread(void *arg) {
         (void *)(uintptr_t)0x4400000000000006ull, (void *)(uintptr_t)0x4400000000000007ull,
     };
     for (int i = 0; i < 8; i++) *(uint64_t *)(tsd + (uint64_t)g_k_key[i] * 8) = (uint64_t)sv[i];
+    // 装机他判：把本次编译时间打进日志——跑完先看这一行与本地编译时间是否一致，
+    // 不一致就说明设备上跑的是旧包（今天已被这个问题浪费三轮）。
+    klog("=== 探针构建：%s %s ===\n", __DATE__, __TIME__);
     {   // 崩点归属用：把本进程映射抄进日志（模块区 / 探针 .so / 宿主堆 各自范围）
         FILE *mp = fopen("/proc/self/maps", "r");
         if (mp) {
