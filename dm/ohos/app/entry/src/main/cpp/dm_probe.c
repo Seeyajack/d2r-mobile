@@ -940,6 +940,15 @@ static void *k_thread(void *arg) {
         (void *)(uintptr_t)0x4400000000000006ull, (void *)(uintptr_t)0x4400000000000007ull,
     };
     for (int i = 0; i < 8; i++) *(uint64_t *)(tsd + (uint64_t)g_k_key[i] * 8) = (uint64_t)sv[i];
+    {   // 崩点归属用：把本进程映射抄进日志（模块区 / 探针 .so / 宿主堆 各自范围）
+        FILE *mp = fopen("/proc/self/maps", "r");
+        if (mp) {
+            char line[256]; int n = 0;
+            klog("=== 进程映射（前 24 行）===\n");
+            while (n++ < 24 && fgets(line, sizeof line, mp)) klog("  %s", line);
+            fclose(mp);
+        }
+    }
     klog("=== 起跑：目录 0x1c8（启动链）base %#llx ===\n", (unsigned long long)b);
     g_gate_armed = 1; g_gate_fault_pc = 0;
     if (sigsetjmp(g_gate_jmp, 1) == 0) {
@@ -961,6 +970,18 @@ static void *k_thread(void *arg) {
     } else {
         g_gate_armed = 0; g_k_faulted = 1;
         klog("=== 0x1f8 崩：pc %#llx sig %d ===\n", (unsigned long long)g_gate_fault_pc, g_gate_fault_sig);
+    }
+    // 终站：游戏的真正入口 nnMain（模块符号表 #506：st_value 0x735330，size 1008，GLOBAL FUNC）
+    // 依据：rtld 的符号表里列出它要为主模块解析的入口名 nnMain（启动约定，非猜测）。
+    klog("=== 终站：nnMain（0x735330）===\n");
+    g_gate_armed = 1; g_gate_fault_pc = 0;
+    if (sigsetjmp(g_gate_jmp, 1) == 0) {
+        uint64_t r3 = ((uint64_t (*)(uint64_t, uint64_t))(b + 0x735330))(0, 0);
+        g_gate_armed = 0;
+        klog("=== nnMain 返回：rv=%#llx ===\n", (unsigned long long)r3);
+    } else {
+        g_gate_armed = 0; g_k_faulted = 1;
+        klog("=== nnMain 崩：pc %#llx sig %d ===\n", (unsigned long long)g_gate_fault_pc, g_gate_fault_sig);
     }
     return NULL;
 }
