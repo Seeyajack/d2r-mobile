@@ -543,6 +543,7 @@ void *hlecount_wrap(const char *a, const char *b, void *fn) { (void)a; (void)b; 
 uint64_t svc_host_call(int num, uint64_t *regs) { (void)num; (void)regs; return 0; }
 int svc_thread(int num, uint64_t *regs) { (void)num; (void)regs; return 0; }   // 0 = 未处理 → 落到占位返回
 void gate_register(uint64_t ret_abs, const char *kind, int arg, uint64_t orig);   // hle.c
+static void gate_probe_entry(void) { logline("✓ 到达 KGATE 入口（门块执行 + 槽读取路径成立）"); }
 extern void dm_gate(void);                                // entry.S：门公共入口
 void dm_thread_returned(void);                            // entry.S：客人线程要求退出时落到这里（noreturn）
 void dm_thread_returned(void) {                           // 探针桩：门回路不触发线程退出；真触发就走 _exit 让它可见
@@ -686,11 +687,19 @@ static void exp_h(char *out, size_t cap, size_t *used) {
     for (int i = 0; i < 8; i++)
         if (pthread_key_create(&key[i], NULL)) { appf(out, cap, used, "  ✗ 建键 %s 失败\n", kn[i]); k_ok = 0; break; }
     if (!k_ok) { app(out, cap, used, "\n"); return; }
-    pthread_setspecific(key[0], (void *)(uintptr_t)0x1111111111111111ull);   // K18
-    pthread_setspecific(key[1], (void *)(uintptr_t)0x2222222222222222ull);   // KTLS
-    pthread_setspecific(key[2], (void *)(uintptr_t)0x3333333333333333ull);   // KTLR
-    pthread_setspecific(key[3], (void *)dm_gate);                            // KGATE = 门公共入口
-    for (int i = 4; i < 8; i++) pthread_setspecific(key[i], (void *)(uintptr_t)(0x4400000000000000ull + i));
+    // 槽写入用【直写】：与门块的读取公式（tsd 基址 + 键号×8）同一条路，构造上保证一致。
+    // （pthread_setspecific 写的位置与门块按公式读的位置不一致——二分定位已证实，2026-10-16 真机。）
+    uint64_t tp_el0 = 0;
+    __asm__ volatile("mrs %0, tpidr_el0" : "=r"(tp_el0));
+    uint64_t tsd_base = *(uint64_t *)(tp_el0 - 272);        // musl：TSD 数组基址（-272 真机实测）
+    const void *slot_val[8] = {
+        (void *)(uintptr_t)0x1111111111111111ull, (void *)(uintptr_t)0x2222222222222222ull,
+        (void *)(uintptr_t)0x3333333333333333ull, (void *)dm_gate,
+        (void *)(uintptr_t)0x4400000000000004ull, (void *)(uintptr_t)0x4400000000000005ull,
+        (void *)(uintptr_t)0x4400000000000006ull, (void *)(uintptr_t)0x4400000000000007ull,
+    };
+    for (int i = 0; i < 8; i++)
+        *(uint64_t *)(tsd_base + (uint64_t)key[i] * 8) = (uint64_t)slot_val[i];
 
     // ② 键页：写实际键号×8（与 loader.c install_key_page 同款；槽位下标来自 fixups 的 KEY_*_IDX）
     uint64_t *page = (uint64_t *)(m.base + DM_IMG_MAIN_KEY_PAGE_OFF);
@@ -703,7 +712,11 @@ static void exp_h(char *out, size_t cap, size_t *used) {
     page[DM_IMG_MAIN_KEY_KRES1_IDX]     = (uint64_t)key[5] * 8;
     page[DM_IMG_MAIN_KEY_KASPECT_IDX]   = (uint64_t)key[6] * 8;
     page[DM_IMG_MAIN_KEY_KASPECTUI_IDX] = (uint64_t)key[7] * 8;
-    app(out, cap, used, "  ✓ 线程槽 8 键就绪，KGATE = dm_gate；键页已按实际键号写入\n");
+    uint64_t kgate_off = page[DM_IMG_MAIN_KEY_KGATE_IDX];
+    uint64_t slot_now  = *(uint64_t *)(tsd_base + kgate_off);
+    appf(out, cap, used, "  诊断：tsd 基址 %p，键页 KGATE 项 = %llu（×8），KGATE 槽现值 = %p（期望 dm_gate = %p）\n",
+         (void *)tsd_base, (unsigned long long)(kgate_off / 8), (void *)slot_now, (void *)dm_gate);
+    app(out, cap, used, "  ✓ 线程槽 8 键直写就绪，KGATE = dm_gate；键页已按实际键号写入\n");
 
     // 信号兜底：登记与过门都套（崩了进程活着，出错 PC 进报告）
     struct sigaction sa, old_segv, old_bus;
@@ -742,6 +755,30 @@ static void exp_h(char *out, size_t cap, size_t *used) {
         return;
     }
     app(out, cap, used, "  ✓ 代码区与补丁区已封 R+X\n");
+
+    // ⑤′ 二分定位（必须在 seal 之后：门块要可执行）：门 0 的块先以「KGATE = 探针函数」过一次
+    //    —— 验证「门块执行 + 槽读取」；通了再把 KGATE 指回 dm_gate，崩了就锁定在宿主侧入口。
+    {
+        uint32_t *p0 = (uint32_t *)(m.base + DM_GATES_MAIN[0].ret);
+        void *blk0 = NULL;
+        for (int b = 1; b <= 16; b++)
+            if (p0[-b] == 0xA9BF7BFD) { blk0 = (uint8_t *)p0 - 4 * b; break; }
+        if (blk0) {
+            *(uint32_t *)(m.base + DM_GATES_MAIN[0].ret + 4) = 0xD65F03C0;   // 尾跳改 RET
+            *(uint64_t *)(tsd_base + (uint64_t)key[3] * 8) = (uint64_t)gate_probe_entry;
+            g_gate_armed = 1; g_gate_fault_pc = 0;
+            if (sigsetjmp(g_gate_jmp, 1) == 0) {
+                ((void (*)(void))blk0)();
+                g_gate_armed = 0;
+                app(out, cap, used, "  ✓ 二分 A：门 0 以探针入口过门成功（门块执行 + KGATE 槽读取成立）\n");
+            } else {
+                g_gate_armed = 0;
+                appf(out, cap, used, "  ✗ 二分 A：门 0 以探针入口仍崩（pc %#llx）⇒ 问题在门块/槽读取本身\n",
+                     (unsigned long long)g_gate_fault_pc);
+            }
+            *(uint64_t *)(tsd_base + (uint64_t)key[3] * 8) = (uint64_t)dm_gate;   // 恢复
+        }
+    }
 
     // ⑥ 逐门过回路：门块地址 = 从返回点向后扫 stp x29,x30,[sp,#-16]!（0xA9BF7BFD）
     int ok = 0, noblock = 0, faulted = 0;
