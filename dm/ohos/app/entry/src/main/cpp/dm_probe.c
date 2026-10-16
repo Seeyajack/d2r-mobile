@@ -675,6 +675,7 @@ static void exp_h(const char *files_dir, char *out, size_t cap, size_t *used) {
         char pth[512]; snprintf(pth, sizeof pth, "%s/dm_gate_test.log", files_dir);
         g_gate_log = fopen(pth, "w");
     }
+    setenv("DM_GUEST_AS_MB", "512", 1);   // 探针进程 VA 有限：门回路不碰堆/别名/栈，512MB 预留够用
 
     module_t m;
     memset(&m, 0, sizeof m);

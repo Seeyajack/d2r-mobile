@@ -50,7 +50,12 @@ static uint8_t *g_stack; static size_t g_stack_cap;
 
 static void mem_init(void) {
     if (g_as) return;
-    g_as = mmap(NULL, RESERVE, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    // 鸿蒙分叉：预留大小可用 DM_GUEST_AS_MB（MB）调小——门回路/探针等小场景用不上 5GB 预留，
+    // 应用进程的 VA 限制下大预留可能失败。未设置时保持 RESERVE 原值，苹果/正式装载零变化。
+    uint64_t reserve = RESERVE;
+    const char *e_as = getenv("DM_GUEST_AS_MB");
+    if (e_as) { reserve = (uint64_t)atol(e_as) << 20; LOG("guest AS 预留按 DM_GUEST_AS_MB 调整为 %#llx", (unsigned long long)reserve); }
+    g_as = mmap(NULL, reserve, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
     if (g_as == MAP_FAILED) die("reserve guest AS");
     // 固定划分（都在预留块内）：alias 512MB、stack 256MB、heap 其余从 2GB 处起
     // Fixed partition (all inside the reserved block): alias 512MB, stack 256MB, heap the rest starting at 2GB
