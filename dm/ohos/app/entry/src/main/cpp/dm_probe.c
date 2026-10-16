@@ -694,6 +694,81 @@ static void *gb_thread(void *arg) {
     return NULL;
 }
 
+// 实验 I：真实执行——调用模块里的 3 个真实小函数（离线反汇编选出的纯叶子函数，
+// 行为完全可预测），在专用线程上调用并核对返回值。这是执行链从"门回路验证"走向
+// "客体代码真正跑起来"的第一站。
+static uint64_t g_i_rv[3];
+static module_t g_i_m;
+static volatile int g_i_faulted;
+static void *i_thread(void *arg) {
+    (void)arg;
+    uint64_t b = (uint64_t)g_i_m.base;
+    g_gate_armed = 1; g_gate_fault_pc = 0;
+    if (sigsetjmp(g_gate_jmp, 1) == 0) {
+        g_i_rv[0] = ((uint64_t (*)(uint64_t))(b + 0x2eb80))(0x1000);   // add x0,x0,#0x14; ret
+        g_i_rv[1] = ((uint64_t (*)(uint64_t))(b + 0x2f3ad4))(0x5000);  // add x0,x0,#0x80; ret
+        g_i_rv[2] = ((uint64_t (*)(void))(b + 0x157a10))();            // mov w0,#-1; ret
+        g_gate_armed = 0;
+    } else {
+        g_gate_armed = 0; g_i_faulted = 1;
+        g_i_rv[0] = g_i_rv[1] = g_i_rv[2] = ~0ull;
+    }
+    return NULL;
+}
+static void exp_i(char *out, size_t cap, size_t *used) {
+    app(out, cap, used, "【实验 I】真实执行：调用模块里 3 个真实函数并核对返回值\n");
+    memset(&g_i_m, 0, sizeof g_i_m);
+    strncpy(g_i_m.name, "main", sizeof g_i_m.name - 1);
+    g_i_m.text_end      = DM_IMG_MAIN_TEXT_END;
+    g_i_m.patch_off     = DM_IMG_MAIN_PATCH_OFF;
+    g_i_m.ro_off        = DM_IMG_MAIN_RO_OFF;
+    g_i_m.data_off      = DM_IMG_MAIN_DATA_OFF;
+    g_i_m.key_page_off  = DM_IMG_MAIN_KEY_PAGE_OFF;
+    g_i_m.key_page_size = DM_IMG_MAIN_KEY_PAGE_SIZE;
+    g_i_m.x0_end        = DM_IMG_MAIN_X0_END;
+    g_i_m.img_end       = DM_IMG_MAIN_END;
+    if (dm_ohos_map_image_alloc(&g_i_m)) { app(out, cap, used, "  ✗ alloc 失败\n\n"); return; }
+    if (dm_ohos_map_image_seal(&g_i_m)) { app(out, cap, used, "  ✗ seal 失败\n\n"); return; }
+    appf(out, cap, used, "  ✓ 装载并封 R+X：base %p\n", (void *)g_i_m.base);
+
+    struct sigaction sa, o1, o2, o3, o4;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_sigaction = gate_fault_handler;
+    sa.sa_flags = SA_SIGINFO;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGSEGV, &sa, &o1); sigaction(SIGBUS, &sa, &o2);
+    sigaction(SIGILL, &sa, &o3);  sigaction(SIGTRAP, &sa, &o4);
+
+    g_i_faulted = 0;
+    pthread_t th;
+    if (pthread_create(&th, NULL, i_thread, NULL) == 0) pthread_join(th, NULL);
+    else app(out, cap, used, "  ✗ pthread_create 失败\n");
+
+    sigaction(SIGSEGV, &o1, NULL); sigaction(SIGBUS, &o2, NULL);
+    sigaction(SIGILL, &o3, NULL);  sigaction(SIGTRAP, &o4, NULL);
+
+    if (g_i_faulted) {
+        appf(out, cap, used, "  ✗ 执行崩（pc %#llx sig %d）\n", (unsigned long long)g_gate_fault_pc, g_gate_fault_sig);
+        app(out, cap, used, "\n");
+        return;
+    }
+    int ok = 0;
+    appf(out, cap, used, "  %s f₁(0x1000)=%#llx（期望 0x1014）  f₁: add x0,x0,#0x14; ret\n",
+         g_i_rv[0] == 0x1014 ? "✓" : "✗", (unsigned long long)g_i_rv[0]);
+    if (g_i_rv[0] == 0x1014) ok++;
+    appf(out, cap, used, "  %s f₂(0x5000)=%#llx（期望 0x5080）  f₂: add x0,x0,#0x80; ret\n",
+         g_i_rv[1] == 0x5080 ? "✓" : "✗", (unsigned long long)g_i_rv[1]);
+    if (g_i_rv[1] == 0x5080) ok++;
+    uint64_t r2 = g_i_rv[2] & 0xffffffffull;
+    appf(out, cap, used, "  %s f₃()=%#llx（期望 w0=0xffffffff）  f₃: mov w0,#-1; ret\n",
+         r2 == 0xffffffffull ? "✓" : "✗", (unsigned long long)g_i_rv[2]);
+    if (r2 == 0xffffffffull) ok++;
+    appf(out, cap, used, "  %s 判据：%d / 3 个真实函数在宿主执行且返回值精确正确\n",
+         ok == 3 ? "✅" : "❌", ok);
+    app(out, cap, used, "  意义：客体代码可以在鸿蒙宿主上真正执行并正确返回——执行链地基成立。\n");
+    app(out, cap, used, "\n");
+}
+
 static void exp_h(const char *files_dir, char *out, size_t cap, size_t *used) {
     app(out, cap, used, "【实验 H】门回路：93 个真实门块 → dm_gate → gate_dispatch → svc 38 → 返回\n");
     if (files_dir && *files_dir) {
@@ -937,6 +1012,7 @@ int dm_probe_run(const char *files_dir, char *out, size_t cap) {
     logline(">>> 实验 F 开始"); exp_f(out, cap, &used); logline(">>> 实验 F 返回");
     logline(">>> 实验 G 开始"); exp_g(out, cap, &used); logline(">>> 实验 G 返回");
     logline(">>> 实验 H 开始"); exp_h(files_dir, out, cap, &used); logline(">>> 实验 H 返回");
+    logline(">>> 实验 I 开始"); exp_i(out, cap, &used); logline(">>> 实验 I 返回");
     logline(">>> 实验 C 开始"); exp_c(out, cap, &used); logline(">>> 实验 C 返回");
     logline(">>> 实验 B 开始"); exp_b(files_dir, out, cap, &used); logline(">>> 实验 B 返回");
     logline(">>> 实验 A 开始"); exp_a(out, cap, &used); logline(">>> 实验 A 返回");
