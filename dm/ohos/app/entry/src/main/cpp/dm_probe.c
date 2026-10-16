@@ -769,6 +769,95 @@ static void exp_i(char *out, size_t cap, size_t *used) {
     app(out, cap, used, "\n");
 }
 
+// 实验 J：真实函数 + 真实门 串成一条链——调用含门的真实函数，命中门后由**我们的服务**应答，
+// 并验证服务的返回值从真实函数的出口流回来。这是执行链从"能跑"走向"跑真实流程"的一站。
+// 目标函数 0x140c9d8（28B，零调用零全局寻址，含门@0x140c9ec）：
+//   cmp w2,#1 ; b.lt → 门 ; cmp w1,w2 ; b.gt → 门 ; b 0x1632d40（正常尾调）
+//   门分支：命中门 → 返回值落在 x0 → 0x140c9f0: ret  ⇒ 函数返回门的返回值
+static volatile int g_j_hits;
+static uint64_t g_j_rv;
+static volatile int g_j_faulted;
+static module_t g_j_m;
+static pthread_key_t g_j_key[8];
+static uint64_t j_gate_stub(void) { g_j_hits++; return 0xABCD; }   // 我们的"服务"：记命中、返回已知值
+static void *j_thread(void *arg) {
+    (void)arg;
+    uint64_t b = (uint64_t)g_j_m.base;
+    uint64_t tp = 0; __asm__ volatile("mrs %0, tpidr_el0" : "=r"(tp));
+    uint64_t tsd = *(uint64_t *)(tp - 272);
+    const void *sv[8] = {
+        (void *)(uintptr_t)0x1111111111111111ull, (void *)(uintptr_t)0x2222222222222222ull,
+        (void *)(uintptr_t)0x3333333333333333ull, (void *)j_gate_stub,   // KGATE = 我们的服务
+        (void *)(uintptr_t)0x4400000000000004ull, (void *)(uintptr_t)0x4400000000000005ull,
+        (void *)(uintptr_t)0x4400000000000006ull, (void *)(uintptr_t)0x4400000000000007ull,
+    };
+    for (int i = 0; i < 8; i++) *(uint64_t *)(tsd + (uint64_t)g_j_key[i] * 8) = (uint64_t)sv[i];
+    g_gate_armed = 1; g_gate_fault_pc = 0;
+    if (sigsetjmp(g_gate_jmp, 1) == 0) {
+        // w2=0 ⇒ 走门分支（cmp w2,#1 → b.lt）
+        g_j_rv = ((uint64_t (*)(uint64_t, uint64_t, uint64_t))(b + 0x140c9d8))(0, 0, 0);
+        g_gate_armed = 0;
+    } else { g_gate_armed = 0; g_j_faulted = 1; }
+    return NULL;
+}
+static void exp_j(char *out, size_t cap, size_t *used) {
+    app(out, cap, used, "【实验 J】真实函数 + 真实门 串链：服务返回值从函数出口流出\n");
+    memset(&g_j_m, 0, sizeof g_j_m);
+    strncpy(g_j_m.name, "main", sizeof g_j_m.name - 1);
+    g_j_m.text_end      = DM_IMG_MAIN_TEXT_END;
+    g_j_m.patch_off     = DM_IMG_MAIN_PATCH_OFF;
+    g_j_m.ro_off        = DM_IMG_MAIN_RO_OFF;
+    g_j_m.data_off      = DM_IMG_MAIN_DATA_OFF;
+    g_j_m.key_page_off  = DM_IMG_MAIN_KEY_PAGE_OFF;
+    g_j_m.key_page_size = DM_IMG_MAIN_KEY_PAGE_SIZE;
+    g_j_m.x0_end        = DM_IMG_MAIN_X0_END;
+    g_j_m.img_end       = DM_IMG_MAIN_END;
+    if (dm_ohos_map_image_alloc(&g_j_m)) { app(out, cap, used, "  ✗ alloc 失败\n\n"); return; }
+    if (dm_ohos_map_image_seal(&g_j_m)) { app(out, cap, used, "  ✗ seal 失败\n\n"); return; }
+    appf(out, cap, used, "  ✓ 装载并封 R+X：base %p\n", (void *)g_j_m.base);
+
+    for (int i = 0; i < 8; i++)
+        if (pthread_key_create(&g_j_key[i], NULL)) { app(out, cap, used, "  ✗ 建键失败\n\n"); return; }
+    // 键页按实际键号写入（门块照此寻址）
+    uint64_t *page = (uint64_t *)(g_j_m.base + DM_IMG_MAIN_KEY_PAGE_OFF);
+    memset(page, 0, DM_IMG_MAIN_KEY_PAGE_SIZE);
+    page[DM_IMG_MAIN_KEY_K18_IDX]       = (uint64_t)g_j_key[0] * 8;
+    page[DM_IMG_MAIN_KEY_KTLS_IDX]      = (uint64_t)g_j_key[1] * 8;
+    page[DM_IMG_MAIN_KEY_KTLR_IDX]      = (uint64_t)g_j_key[2] * 8;
+    page[DM_IMG_MAIN_KEY_KGATE_IDX]     = (uint64_t)g_j_key[3] * 8;
+    page[DM_IMG_MAIN_KEY_KRES0_IDX]     = (uint64_t)g_j_key[4] * 8;
+    page[DM_IMG_MAIN_KEY_KRES1_IDX]     = (uint64_t)g_j_key[5] * 8;
+    page[DM_IMG_MAIN_KEY_KASPECT_IDX]   = (uint64_t)g_j_key[6] * 8;
+    page[DM_IMG_MAIN_KEY_KASPECTUI_IDX] = (uint64_t)g_j_key[7] * 8;
+
+    struct sigaction sa, o1, o2, o3, o4;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_sigaction = gate_fault_handler;
+    sa.sa_flags = SA_SIGINFO;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGSEGV, &sa, &o1); sigaction(SIGBUS, &sa, &o2);
+    sigaction(SIGILL, &sa, &o3);  sigaction(SIGTRAP, &sa, &o4);
+
+    g_j_hits = 0; g_j_rv = 0; g_j_faulted = 0;
+    pthread_t th;
+    if (pthread_create(&th, NULL, j_thread, NULL) == 0) pthread_join(th, NULL);
+    else app(out, cap, used, "  ✗ pthread_create 失败\n");
+
+    sigaction(SIGSEGV, &o1, NULL); sigaction(SIGBUS, &o2, NULL);
+    sigaction(SIGILL, &o3, NULL);  sigaction(SIGTRAP, &o4, NULL);
+
+    if (g_j_faulted) {
+        appf(out, cap, used, "  ✗ 执行崩（pc %#llx sig %d）\n\n", (unsigned long long)g_gate_fault_pc, g_gate_fault_sig);
+        return;
+    }
+    appf(out, cap, used, "  %s 门被真实函数命中：%d 次（期望 1）\n", g_j_hits == 1 ? "✓" : "✗", g_j_hits);
+    appf(out, cap, used, "  %s 服务返回值从函数出口流出：%#llx（期望 0xabcd）\n",
+         g_j_rv == 0xABCD ? "✓" : "✗", (unsigned long long)g_j_rv);
+    appf(out, cap, used, "  %s 判据：真实函数 → 命中门 → 我们的服务应答 → 值流回函数出口\n",
+         (g_j_hits == 1 && g_j_rv == 0xABCD) ? "✅" : "❌");
+    app(out, cap, used, "  意义：门与执行串成一条链——真实代码可以借我们的服务跑通一条完整路径。\n\n");
+}
+
 static void exp_h(const char *files_dir, char *out, size_t cap, size_t *used) {
     app(out, cap, used, "【实验 H】门回路：93 个真实门块 → dm_gate → gate_dispatch → svc 38 → 返回\n");
     if (files_dir && *files_dir) {
@@ -1013,6 +1102,7 @@ int dm_probe_run(const char *files_dir, char *out, size_t cap) {
     logline(">>> 实验 G 开始"); exp_g(out, cap, &used); logline(">>> 实验 G 返回");
     logline(">>> 实验 H 开始"); exp_h(files_dir, out, cap, &used); logline(">>> 实验 H 返回");
     logline(">>> 实验 I 开始"); exp_i(out, cap, &used); logline(">>> 实验 I 返回");
+    logline(">>> 实验 J 开始"); exp_j(out, cap, &used); logline(">>> 实验 J 返回");
     logline(">>> 实验 C 开始"); exp_c(out, cap, &used); logline(">>> 实验 C 返回");
     logline(">>> 实验 B 开始"); exp_b(files_dir, out, cap, &used); logline(">>> 实验 B 返回");
     logline(">>> 实验 A 开始"); exp_a(out, cap, &used); logline(">>> 实验 A 返回");
