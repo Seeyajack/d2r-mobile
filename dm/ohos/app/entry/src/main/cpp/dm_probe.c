@@ -660,8 +660,21 @@ static void exp_g(char *out, size_t cap, size_t *used) {
 // 做法：装载 → 建 8 个线程槽（KGATE = dm_gate）→ 装键页（实际键号×8）→ 登记 93 门 →
 //       每个门块的尾跳（B 原指令+4）暂改为 RET（隔离：不执行门后的游戏代码）→ 逐块调用。
 // 判据：93 块全部走完整回路且返回 0（dm_gate 回写 x0 = svc 占位返回值）；未识别的门会 die（可见）。
-static void exp_h(char *out, size_t cap, size_t *used) {
+// 门回路专用的增量文件日志：逐门结果边跑边落盘，崩溃也保得住（filesDir/dm_gate_test.log）
+static FILE *g_gate_log;
+static void glog(const char *fmt, ...) {
+    if (!g_gate_log) return;
+    va_list ap; va_start(ap, fmt);
+    vfprintf(g_gate_log, fmt, ap);
+    va_end(ap);
+    fflush(g_gate_log);
+}
+static void exp_h(const char *files_dir, char *out, size_t cap, size_t *used) {
     app(out, cap, used, "【实验 H】门回路：93 个真实门块 → dm_gate → gate_dispatch → svc 38 → 返回\n");
+    if (files_dir && *files_dir) {
+        char pth[512]; snprintf(pth, sizeof pth, "%s/dm_gate_test.log", files_dir);
+        g_gate_log = fopen(pth, "w");
+    }
 
     module_t m;
     memset(&m, 0, sizeof m);
@@ -767,12 +780,15 @@ static void exp_h(char *out, size_t cap, size_t *used) {
             *(uint32_t *)(m.base + DM_GATES_MAIN[0].ret + 4) = 0xD65F03C0;   // 尾跳改 RET
             *(uint64_t *)(tsd_base + (uint64_t)key[3] * 8) = (uint64_t)gate_probe_entry;
             g_gate_armed = 1; g_gate_fault_pc = 0;
+            glog("二分 A：门 0 开始（KGATE=探针函数，块起点 %p）\n", blk0);
             if (sigsetjmp(g_gate_jmp, 1) == 0) {
                 ((void (*)(void))blk0)();
                 g_gate_armed = 0;
+                glog("二分 A：过门成功\n");
                 app(out, cap, used, "  ✓ 二分 A：门 0 以探针入口过门成功（门块执行 + KGATE 槽读取成立）\n");
             } else {
                 g_gate_armed = 0;
+                glog("二分 A：崩 pc %#llx sig %d\n", (unsigned long long)g_gate_fault_pc, g_gate_fault_sig);
                 appf(out, cap, used, "  ✗ 二分 A：门 0 以探针入口仍崩（pc %#llx）⇒ 问题在门块/槽读取本身\n",
                      (unsigned long long)g_gate_fault_pc);
             }
@@ -789,9 +805,7 @@ static void exp_h(char *out, size_t cap, size_t *used) {
             if (p[-b] == 0xA9BF7BFD) { blk = (uint8_t *)p - 4 * b; break; }
         if (!blk) { noblock++; continue; }
         g_gate_armed = 1; g_gate_fault_pc = 0;
-        char gb[96];
-        snprintf(gb, sizeof gb, ">>> 门 %d（ret %#llx）开始", i, (unsigned long long)DM_GATES_MAIN[i].ret);
-        logline(gb);
+        glog(">>> 门 %d（ret %#llx）开始\n", i, (unsigned long long)DM_GATES_MAIN[i].ret);
         if (sigsetjmp(g_gate_jmp, 1) == 0) {
             // 过门参数：svc 38 = Break(reason, ptr, size)。reason 的最高位 = 「仅通知，可继续」——
             // 处理器看到它就返回 0 而不 _exit(42)；ptr/size 置 0 免得处理器解引用垃圾指针。
@@ -805,17 +819,22 @@ static void exp_h(char *out, size_t cap, size_t *used) {
                                "x13","x14","x15","x16","x17","x30","memory");
             uint64_t rv = g_x0;   // dm_gate 回写 x0 = 处理器返回值
             g_gate_armed = 0;
+            glog("门 %d 返回 %#llx\n", i, (unsigned long long)rv);
             if (rv == 0) ok++;
             else appf(out, cap, used, "  ✗ 门 %d（ret %#llx）返回 %#llx（期望 0）\n",
                       i, (unsigned long long)DM_GATES_MAIN[i].ret, (unsigned long long)rv);
         } else {
             g_gate_armed = 0; faulted++;
+            glog("门 %d 崩：pc %#llx sig %d\n", i, (unsigned long long)g_gate_fault_pc, g_gate_fault_sig);
             appf(out, cap, used, "  ✗ 门 %d（ret %#llx）崩：pc %#llx，sig %d\n",
                  i, (unsigned long long)DM_GATES_MAIN[i].ret,
                  (unsigned long long)g_gate_fault_pc, g_gate_fault_sig);
         }
     }
     sigaction(SIGSEGV, &old_segv, NULL); sigaction(SIGBUS, &old_bus, NULL);
+    glog("=== 结束：ok=%d faulted=%d noblock=%d ===\n", ok, faulted, noblock);
+    if (g_gate_log) { fclose(g_gate_log); g_gate_log = NULL; }
+    appf(out, cap, used, "  （逐门明细已落盘 %s/dm_gate_test.log）\n", files_dir ? files_dir : "?");
     appf(out, cap, used, "  %s 判据：%d / %d 个门块走完整回路且返回 0（Break 以仅通知位过门）；崩 %d（PC 见上）；块起点未找到 %d\n",
          (ok == DM_GATES_MAIN_N - noblock - faulted && faulted == 0) ? "✅" : "❌",
          ok, DM_GATES_MAIN_N, faulted, noblock);
@@ -843,7 +862,7 @@ int dm_probe_run(const char *files_dir, char *out, size_t cap) {
     logline(">>> 实验 E2 开始"); exp_e2(out, cap, &used); logline(">>> 实验 E2 返回");
     logline(">>> 实验 F 开始"); exp_f(out, cap, &used); logline(">>> 实验 F 返回");
     logline(">>> 实验 G 开始"); exp_g(out, cap, &used); logline(">>> 实验 G 返回");
-    logline(">>> 实验 H 开始"); exp_h(out, cap, &used); logline(">>> 实验 H 返回");
+    logline(">>> 实验 H 开始"); exp_h(files_dir, out, cap, &used); logline(">>> 实验 H 返回");
     logline(">>> 实验 C 开始"); exp_c(out, cap, &used); logline(">>> 实验 C 返回");
     logline(">>> 实验 B 开始"); exp_b(files_dir, out, cap, &used); logline(">>> 实验 B 返回");
     logline(">>> 实验 A 开始"); exp_a(out, cap, &used); logline(">>> 实验 A 返回");
