@@ -1035,6 +1035,16 @@ static uint64_t hook_ctor_log(uint64_t *f) {   // f = 桩保存的寄存器帧�
              (unsigned long long)f[1], (unsigned long long)f[2], (unsigned long long)f[20]);
     return 0;
 }
+// 同族第二个构造器 0xa08e94（与 0xa08ef4 同为"写 [this]"模式）
+static uint64_t g_hook_ctor2_n;
+static uint64_t hook_ctor2_log(uint64_t *f) {
+    g_hook_ctor2_n++;
+    if (g_hook_ctor2_n <= 6)
+        klog("[插桩] 构造器 0xa08e94 第%llu 次：this=%#llx x1=%#llx x2=%#llx 返回地址x30=%#llx\n",
+             (unsigned long long)g_hook_ctor2_n, (unsigned long long)f[0],
+             (unsigned long long)f[1], (unsigned long long)f[2], (unsigned long long)f[20]);
+    return 0;
+}
 static void k_inject_heap(uint8_t *img) {
     g_alloc_vtbl[6] = (uint64_t)(uintptr_t)&host_alloc;
     g_alloc_obj[0] = (uint64_t)(uintptr_t)&g_alloc_vtbl[0];
@@ -1171,7 +1181,8 @@ static void exp_k(const char *files_dir, char *out, size_t cap, size_t *used) {
     k_inject_log(img);    // ★ 喂日志对象 + 节点池（见 k_inject_log）
     k_patch_allocators(img);   // 分配器入口 → 宿主（射程不够时会自检跳过）
     k_install_hook(img, 0x9f3464, (void *)hook_alloc_log, "分配器 0x9f3464 入口");   // 洞内插桩试点
-    k_install_hook(img, 0xa08ef4, (void *)hook_ctor_log, "构造器 0xa08ef4 入口");     // ★ 崩点链上的构造器
+    k_install_hook(img, 0xa08ef4, (void *)hook_ctor_log, "构造器 0xa08ef4 入口");     // 崩点链上的构造器
+    k_install_hook(img, 0xa08e94, (void *)hook_ctor2_log, "构造器 0xa08e94 入口");    // ★ 同族第二个构造器
         g_nplt = 0; g_plt_calls = 0;
         for (uint64_t off = 0; off + 24 <= DT_PLTRELSZ; off += 24) {
             uint64_t r_off  = *(uint64_t *)(img + DT_JMPREL + off);
