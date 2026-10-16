@@ -17,6 +17,11 @@
 // Upstream's longest lines approach 1 KiB (the state-dump rows); 2 KiB with a truncation marker.
 #define DM_LOG_LINE_MAX 2048
 
+// 诊断镜像（探针的门回路落盘）：非 NULL 时每条 LOG 追加写一份。信号处理器里也写
+// （fputs/fflush 在处理器里可接受，探针专用）。
+static FILE *g_mirror;
+void dm_log_set_mirror(void *f) { g_mirror = (FILE *)f; }
+
 void dm_log_printf(const char *fmt, ...) {
     char line[DM_LOG_LINE_MAX];
     int n = snprintf(line, sizeof line, "[dm] ");
@@ -41,4 +46,9 @@ void dm_log_printf(const char *fmt, ...) {
     // Mirror to stderr so both the DevEco log window and hdc can see it.
     fputs(line, stderr);
     fputc('\n', stderr);
+    if (g_mirror) {
+        fputs(line, g_mirror);
+        fputc('\n', g_mirror);
+        fflush(g_mirror);
+    }
 }

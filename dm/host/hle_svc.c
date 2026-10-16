@@ -160,8 +160,11 @@ static void map_del(int i) { pthread_mutex_lock(&g_map_lock); g_map[i] = g_map[-
 int svc_thread(int num, uint64_t *regs);   // hle_thread.c：线程与同步类 | hle_thread.c: thread and synchronization kind
 
 uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
+    LOG("svc_dispatch：进入 num=%#x", num);            // 诊断：门回路死点定位（与 hle.c 的命中日志配对）
     { void hlecount_svc(int); hlecount_svc(num); }   // DM_HLECOUNT：svc 按号计数 | DM_HLECOUNT: svc counts by number
     mem_init();
+    LOG("svc_dispatch：mem_init 完成 num=%#x", num);   // 诊断：门回路死点定位
+    if (svc_thread(num, regs)) return regs[0];
     if (svc_thread(num, regs)) return regs[0];
     { uint64_t svc_host_call(int, uint64_t *); if (num >= 0x80 && svc_host_call(num, regs)) return regs[0]; }   // 0x80 起：剪口约定的宿主调用（hle_tact.c） | from 0x80: host calls by cut convention (hle_tact.c)
     switch (num) {

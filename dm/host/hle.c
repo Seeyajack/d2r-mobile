@@ -105,7 +105,7 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr);   // hle_svc
 uint64_t gate_dispatch(uint64_t ret_addr, uint64_t *regs) {
     for (unsigned i = gate_h(ret_addr);; i = (i + 1) & ((1u << GATE_BITS) - 1)) {
         const gate_t *g = &g_gate[i];
-        if (g->ret == ret_addr) switch (g->kind) {
+        if (g->ret == ret_addr) { LOG("gate_dispatch：命中 kind=%d arg=%d ret=%#llx", g->kind, g->arg, (unsigned long long)ret_addr); } switch (g->kind) {
             case G_CNTPCT: case G_CNTVCT: {
                 uint64_t t = guest_ns() * 12 / 625;    // 19.2 MHz 系统计数器；原指令 mrs xN, cntpct_el0，arg = N | 19.2 MHz system counter; original instruction mrs xN, cntpct_el0, arg = N
                 regs[g->arg] = t;

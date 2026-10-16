@@ -674,8 +674,15 @@ static void exp_h(const char *files_dir, char *out, size_t cap, size_t *used) {
     if (files_dir && *files_dir) {
         char pth[512]; snprintf(pth, sizeof pth, "%s/dm_gate_test.log", files_dir);
         g_gate_log = fopen(pth, "w");
+        dm_log_set_mirror(g_gate_log);   // 宿主侧全部 LOG 镜像进同一文件（mem_init/FATAL/Break# 都看得见）
     }
     setenv("DM_GUEST_AS_MB", "512", 1);   // 探针进程 VA 有限：门回路不碰堆/别名/栈，512MB 预留够用
+    // stderr 重定向到文件：crash.c 的崩溃处理器把完整现场（pc + 29 寄存器）打到 stderr，
+    // 而 OHOS 应用把 stderr 丢弃——重定向后现场落盘（filesDir/dm_crash.log），门回路崩一次即得全部线索。
+    if (files_dir && *files_dir) {
+        char cpth[512]; snprintf(cpth, sizeof cpth, "%s/dm_crash.log", files_dir);
+        if (!freopen(cpth, "w", stderr)) appf(out, cap, used, "  ⚠ stderr 重定向失败\n");
+    }
 
     module_t m;
     memset(&m, 0, sizeof m);
@@ -874,6 +881,7 @@ static void exp_h(const char *files_dir, char *out, size_t cap, size_t *used) {
     sigaction(SIGSEGV, &old_segv, NULL); sigaction(SIGBUS, &old_bus, NULL);
     glog("=== 结束：ok=%d faulted=%d noblock=%d ===\n", ok, faulted, noblock);
     if (g_gate_log) { fclose(g_gate_log); g_gate_log = NULL; }
+    dm_log_set_mirror(NULL);
     appf(out, cap, used, "  （逐门明细已落盘 %s/dm_gate_test.log）\n", files_dir ? files_dir : "?");
     appf(out, cap, used, "  %s 判据：%d / %d 个门块走完整回路且返回 0（Break 以仅通知位过门）；崩 %d（PC 见上）；块起点未找到 %d\n",
          (ok == DM_GATES_MAIN_N - noblock - faulted && faulted == 0) ? "✅" : "❌",

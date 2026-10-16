@@ -21,6 +21,10 @@ extern "C" {
 
 void dm_log_printf(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 
+// 诊断镜像钩子：把每条 LOG 追加写到调用方给的 FILE*（探针的门回路落盘用；
+// 传 NULL 关闭）。用 void* 避免 FILE* 进头文件。
+void dm_log_set_mirror(void *f);
+
 #ifdef __cplusplus
 }
 #endif
