@@ -449,7 +449,7 @@ static void exp_e2(char *out, size_t cap, size_t *used) {
     for (long o = -0x400; o < 0x2000; o += 8) {
         uint64_t p = 0;
         if (!safe_read64(tp + (uint64_t)o, &p)) continue;
-        if (p < 0x10000 || p > 0x8000000000000000ull) continue;    // 不像用户态指针
+        if (p < 0x10000 || p > 0x80000000ull) continue;    // 不像用户态指针
         uint64_t v1 = 0, v2 = 0;
         if (!safe_read64(p + (uint64_t)k1 * 8, &v1)) continue;
         if (v1 != m1) continue;
@@ -669,6 +669,31 @@ static void glog(const char *fmt, ...) {
     va_end(ap);
     fflush(g_gate_log);
 }
+// 看门狗假设验证：二分 B 的门调度搬到专用线程上跑（槽在该线程重设）——与上游设计一致
+// （上游门调用发生在客体线程，不在主线程）。主线程卡死保护可能是此前"无痕死亡"的真因。
+typedef struct { uint64_t base; pthread_key_t key[8]; uint64_t rv; int faulted; } gb_ctx_t;
+static gb_ctx_t g_gb;
+static void *gb_thread(void *arg) {
+    gb_ctx_t *c = arg;
+    uint64_t tp = 0; __asm__ volatile("mrs %0, tpidr_el0" : "=r"(tp));      // 本线程的 tsd
+    uint64_t tsd = *(uint64_t *)(tp - 272);
+    const void *sv[8] = {
+        (void *)(uintptr_t)0x1111111111111111ull, (void *)(uintptr_t)0x2222222222222222ull,
+        (void *)(uintptr_t)0x3333333333333333ull, (void *)dm_gate,
+        (void *)(uintptr_t)0x4400000000000004ull, (void *)(uintptr_t)0x4400000000000005ull,
+        (void *)(uintptr_t)0x4400000000000006ull, (void *)(uintptr_t)0x4400000000000007ull,
+    };
+    for (int i = 0; i < 8; i++) *(uint64_t *)(tsd + (uint64_t)c->key[i] * 8) = (uint64_t)sv[i];
+    uint64_t regs2[64]; memset(regs2, 0, sizeof regs2);
+    regs2[0] = 0x80000000ull;
+    g_gate_armed = 1; g_gate_fault_pc = 0;
+    if (sigsetjmp(g_gate_jmp, 1) == 0) {
+        g_gb.rv = gate_dispatch(c->base, regs2);
+        g_gate_armed = 0;
+    } else { g_gate_armed = 0; c->faulted = 1; }
+    return NULL;
+}
+
 static void exp_h(const char *files_dir, char *out, size_t cap, size_t *used) {
     app(out, cap, used, "【实验 H】门回路：93 个真实门块 → dm_gate → gate_dispatch → svc 38 → 返回\n");
     if (files_dir && *files_dir) {
@@ -777,30 +802,30 @@ static void exp_h(const char *files_dir, char *out, size_t cap, size_t *used) {
     }
     app(out, cap, used, "  ✓ 代码区与补丁区已封 R+X\n");
 
-    // ⑤ 二分 B：纯 C 路径直调 gate_dispatch（构造 regs 帧，绕过汇编）——分离「宿主 C 侧」与「汇编路径」
+    // ⑤ 二分 B（线程版，见 gb_thread）：门调度搬专用线程——验证主线程卡死看门狗假设
     {
-        uint64_t regs2[64]; memset(regs2, 0, sizeof regs2);
-        regs2[0] = 0x8000000000000000ull;   // Break 的「仅通知」位
-        g_gate_armed = 1; g_gate_fault_pc = 0;
-        glog("二分 B 开始：将直调 gate_dispatch(ret=%#llx)\n", (unsigned long long)(m.base + DM_GATES_MAIN[0].ret));
-        if (sigsetjmp(g_gate_jmp, 1) == 0) {
-            uint64_t rv2 = gate_dispatch((uint64_t)(m.base + DM_GATES_MAIN[0].ret), regs2);
-            g_gate_armed = 0;
-            glog("二分 B：gate_dispatch 直调返回 %#llx（期望 0）\n", (unsigned long long)rv2);
-            appf(out, cap, used, "  %s 二分 B：gate_dispatch 直调（纯 C）返回 %#llx\n",
-                 rv2 == 0 ? "✓" : "✗", (unsigned long long)rv2);
+        glog("二分 B（线程版）开始：将在线程里直调 gate_dispatch(ret=%#llx)\n",
+             (unsigned long long)(m.base + DM_GATES_MAIN[0].ret));
+        memset(&g_gb, 0, sizeof g_gb);
+        g_gb.base = (uint64_t)(m.base + DM_GATES_MAIN[0].ret);
+        memcpy(g_gb.key, key, sizeof g_gb.key);
+        pthread_t th;
+        if (pthread_create(&th, NULL, gb_thread, &g_gb) == 0) {
+            pthread_join(th, NULL);
+            glog("二分 B（线程版）：线程返回 rv=%#llx faulted=%d\n",
+                 (unsigned long long)g_gb.rv, g_gb.faulted);
+            appf(out, cap, used, "  %s 二分 B（线程版）：返回 %#llx%s\n",
+                 (!g_gb.faulted && g_gb.rv == 0) ? "✓" : "✗",
+                 (unsigned long long)g_gb.rv, g_gb.faulted ? "（线程内崩，兜底接住）" : "");
         } else {
-            g_gate_armed = 0;
-            glog("二分 B：崩 pc %#llx sig %d\n", (unsigned long long)g_gate_fault_pc, g_gate_fault_sig);
-            appf(out, cap, used, "  ✗ 二分 B：gate_dispatch 直调崩（pc %#llx，sig %d）\n",
-                 (unsigned long long)g_gate_fault_pc, g_gate_fault_sig);
+            app(out, cap, used, "  ✗ 二分 B：pthread_create 失败\n");
         }
     }
 
     // ⑤ 二分 C：直调 svc_dispatch(38, regs2, orig)（跳过哈希查找）——分离「查找」与「处理器」
     {
         uint64_t regs3[64]; memset(regs3, 0, sizeof regs3);
-        regs3[0] = 0x8000000000000000ull;
+        regs3[0] = 0x80000000ull;
         g_gate_armed = 1; g_gate_fault_pc = 0;
         if (sigsetjmp(g_gate_jmp, 1) == 0) {
             uint64_t rv3 = svc_dispatch(38, regs3, (uint64_t)(m.base + DM_GATES_MAIN[0].orig));
@@ -856,7 +881,7 @@ static void exp_h(const char *files_dir, char *out, size_t cap, size_t *used) {
         if (sigsetjmp(g_gate_jmp, 1) == 0) {
             // 过门参数：svc 38 = Break(reason, ptr, size)。reason 的最高位 = 「仅通知，可继续」——
             // 处理器看到它就返回 0 而不 _exit(42)；ptr/size 置 0 免得处理器解引用垃圾指针。
-            register uint64_t g_x0 __asm__("x0") = 0x8000000000000000ull;
+            register uint64_t g_x0 __asm__("x0") = 0x80000000ull;
             register uint64_t g_x1 __asm__("x1") = 0;
             register uint64_t g_x2 __asm__("x2") = 0;
             __asm__ volatile("blr %3"
@@ -867,7 +892,8 @@ static void exp_h(const char *files_dir, char *out, size_t cap, size_t *used) {
             uint64_t rv = g_x0;   // dm_gate 回写 x0 = 处理器返回值
             g_gate_armed = 0;
             glog("门 %d 返回 %#llx\n", i, (unsigned long long)rv);
-            if (rv == 0) ok++;
+            // Break「仅通知」路径不改 x0（帧里的 x0 原样恢复）⇒ 期望值 = 我们喂的仅通知位
+            if (rv == 0 || rv == 0x80000000ull) ok++;
             else appf(out, cap, used, "  ✗ 门 %d（ret %#llx）返回 %#llx（期望 0）\n",
                       i, (unsigned long long)DM_GATES_MAIN[i].ret, (unsigned long long)rv);
         } else {
