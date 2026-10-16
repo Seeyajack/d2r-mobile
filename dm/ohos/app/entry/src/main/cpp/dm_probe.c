@@ -892,6 +892,33 @@ static uint64_t plt_stub(void) {
     g_plt_calls++;
     return 0;
 }
+// 宿主分配器：按游戏的对象布局喂堆。分配器 0x9f34d8 的路径：
+//   *(0x226f0a0) → 持有者 → *持有者 = 「对象 A」→ (x1==0 时) 0xa0e2f8 取「当前分配器」
+//   → [A+8] → *该对象 = 虚表 → 虚表[0x30] = 分配方法 → 虚调用 (x0=对象, x1=大小, w2=8)
+// 所以造：A = { &虚表, &A }（+8 自指），虚表[6] = host_alloc；两个全局指向对应持有者。
+static uint64_t g_alloc_calls;
+static void *host_alloc(void *self, uint64_t size, uint64_t flags) {
+    (void)self; (void)flags;
+    g_alloc_calls++;
+    void *p = malloc((size_t)size);
+    klog("[堆] 分配 %llu 字节 → %p\n", (unsigned long long)size, p);
+    return p;
+}
+static uint64_t g_alloc_vtbl[8];      // 虚表：槽 6（+0x30）= host_alloc
+static uint64_t g_alloc_obj[2];       // 对象 A：{ &虚表, &A }
+static uint64_t g_alloc_holder[1];    // 持有者：{ &A }
+static uint64_t g_ctx_holder[1];      // 上下文持有者：{ &ctx }
+static uint64_t g_ctx_obj[0x20];      // 上下文对象（[0x88] 处为 0 = 让 thunk 返回 0，走本线程路径）
+static void k_inject_heap(uint8_t *img) {
+    g_alloc_vtbl[6] = (uint64_t)(uintptr_t)&host_alloc;
+    g_alloc_obj[0] = (uint64_t)(uintptr_t)&g_alloc_vtbl[0];
+    g_alloc_obj[1] = (uint64_t)(uintptr_t)&g_alloc_obj[0];   // +8 自指：0xa0e2f8 的兜底路径取到同一对象
+    g_alloc_holder[0] = (uint64_t)(uintptr_t)&g_alloc_obj[0];
+    g_ctx_holder[0] = (uint64_t)(uintptr_t)&g_ctx_obj[0];
+    *(uint64_t *)(img + 0x226f0a0) = (uint64_t)(uintptr_t)&g_alloc_holder[0];   // 分配器持有者
+    *(uint64_t *)(img + 0x22783d8) = (uint64_t)(uintptr_t)&g_ctx_holder[0];     // 线程上下文持有者
+}
+
 static void *k_thread(void *arg) {
     (void)arg;
     uint64_t b = (uint64_t)g_k_m.base;
@@ -978,6 +1005,7 @@ static void exp_k(const char *files_dir, char *out, size_t cap, size_t *used) {
             if ((uint32_t)r_info == 1027) { *(uint64_t *)(img + r_off) = (uint64_t)img + (uint64_t)r_add; n_rel++; }
             else n_other++;
         }
+        k_inject_heap(img);   // ★ 喂堆：把游戏分配器要的两个全局指向宿主对象（见 k_inject_heap）
         g_nplt = 0; g_plt_calls = 0;
         for (uint64_t off = 0; off + 24 <= DT_PLTRELSZ; off += 24) {
             uint64_t r_off  = *(uint64_t *)(img + DT_JMPREL + off);
@@ -1030,6 +1058,8 @@ static void exp_k(const char *files_dir, char *out, size_t cap, size_t *used) {
     sigaction(SIGILL, &o3, NULL);  sigaction(SIGTRAP, &o4, NULL);
 
     appf(out, cap, used, "  SDK 槽被真实调用 %d 次%s\n", g_plt_calls, g_plt_calls ? "（名见 dm_run_test.log）" : "");
+    appf(out, cap, used, "  宿主堆被分配 %llu 次%s\n", (unsigned long long)g_alloc_calls,
+         g_alloc_calls ? "（游戏分配器已通）" : "（未走到分配器）");
     appf(out, cap, used, "  %s 启动链跑完并返回（rv=%#llx）；门被命中 %d 次%s\n",
          g_k_faulted ? "✗" : "✓", (unsigned long long)g_k_rv, g_k_hits,
          g_k_faulted ? "（中途崩，崩点见 dm_run_test.log）" : "");
