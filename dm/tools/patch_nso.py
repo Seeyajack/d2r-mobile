@@ -901,7 +901,14 @@ if RULE_RUN:
 
 os.makedirs(outdir, exist_ok=True)
 P = lambda ext: os.path.join(outdir, f'{NAME}.{ext}')
-open(P('patched.bin'), 'wb').write(IMG + bytearray(PATCH_OFF - len(IMG)) + patch)
+# ---- 代码洞（code cave）：补丁区之后追加一段全零的可执行空间 ----
+# 用途：宿主在运行时把任意模块函数打 4 字节跳转进来做插桩（"记录 → 执行原指令 → 跳回"）。
+# 为什么必须有它：探针代码所在 .so 与映像相距远（实测 > b 指令的 ±128MB 射程），
+# 无法从 .so 直接打洞；而映像内的补丁区已排满（无 ≥0x200 零间隙，离线核实）。
+# 洞内代码用 `ldr x16,<字面量>; br x16` 访问任意 64 位绝对地址（无射程限制）。
+CAVE_SIZE = 0x4000
+CAVE_OFF = (PATCH_OFF + len(patch) + 0xF) & ~0xF
+open(P('patched.bin'), 'wb').write(IMG + bytearray(PATCH_OFF - len(IMG)) + patch + bytearray(CAVE_OFF - (PATCH_OFF + len(patch))) + bytearray(CAVE_SIZE))
 with open(os.path.join(outdir, f'{NAME}.unresolved.tsv'), 'w', encoding='utf-8') as f:
     f.write('# 未能按已知形态识别的 br x18（已原样保留，运行到它会读未重定位的 x18 —— 待人工处理）\n')
     f.write('# Unrecognized br x18 sites (kept as-is; reaching one reads an unrelocated x18 -- needs manual work)\n')
@@ -923,6 +930,7 @@ elif os.path.exists(P('rules.tsv')):
     os.unlink(P('rules.tsv'))  # 重出native时清本模块旧规则登记，不让旧manifest混入原资源域 | When rebuilding native, clear this module's old rule registration so the old manifest does not leak into the original-resource domain
 with open(P('fixups.tsv'), 'w') as f:
     f.write(f'# PATCH_OFF\t{PATCH_OFF:#x}\n# KEY_PAGE_OFF\t{KEY_PAGE_OFF:#x}\n# KEY_PAGE_SIZE\t0x4000\n# TEXT_END\t{TEXT_END:#x}\n# RO_OFF\t{RO_OFF:#x}\n# DATA_OFF\t{DATA_OFF:#x}\n')
+    f.write(f'# CAVE_OFF\t{CAVE_OFF:#x}\n# CAVE_SIZE\t{CAVE_SIZE:#x}\n')
     for k in KEY_INDEX: f.write(f'# KEY_{k}_IDX\t{KEY_INDEX[k]}\n')
 with open(P('gates.tsv'), 'w') as f:
     for ret, k, arg, orig in gates: f.write(f'{ret:#x}\t{k}\t{arg}\t{orig:#x}\n')
