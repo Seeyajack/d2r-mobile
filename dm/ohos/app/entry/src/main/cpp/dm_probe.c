@@ -880,6 +880,18 @@ static uint64_t k_gate_stub(void) {
     g_k_hits++;
     return 0;   // 首跑：先一律"无事发生"（0），看流程能走多远
 }
+// 记录型 PLT 存根：x16 = 该槽地址（thunk 里 add x16,x16,#imm 后 br），据此认出是哪个 SDK 符号。
+typedef struct { uint64_t slot; const char *name; } plt_ent_t;
+static plt_ent_t g_plt[512];
+static int g_nplt;
+static volatile int g_plt_calls;
+static uint64_t plt_stub(void) {
+    uint64_t x16v; __asm__ volatile("mov %0, x16" : "=r"(x16v));
+    for (int i = 0; i < g_nplt; i++)
+        if (g_plt[i].slot == x16v) { klog("[PLT] %s\n", g_plt[i].name); break; }
+    g_plt_calls++;
+    return 0;
+}
 static void *k_thread(void *arg) {
     (void)arg;
     uint64_t b = (uint64_t)g_k_m.base;
@@ -922,6 +934,57 @@ static void exp_k(const char *files_dir, char *out, size_t cap, size_t *used) {
     g_k_m.x0_end        = DM_IMG_MAIN_X0_END;
     g_k_m.img_end       = DM_IMG_MAIN_END;
     if (dm_ohos_map_image_alloc(&g_k_m)) { app(out, cap, used, "  ✗ alloc 失败\n\n"); return; }
+
+    // ===== 两步：① 应用 RELATIVE 重定位；② 392 个 PLT 槽填「记录型存根」 =====
+    // 为什么：映像只是"照抄图纸"，加载器该做的重定位没做——数据段里的指针全是原始值，
+    // GOT 槽还是「懒绑定占位」（存根自身地址）⇒ 第一个 SDK 调用就跳到沟里（实验 K 首跑实证）。
+    {
+        uint8_t *img = (uint8_t *)g_k_m.base;
+        uint32_t mod0 = 0;
+        for (uint32_t o = 0; o < 0x100; o += 4)
+            if (*(uint32_t *)(img + o) == 0x30444F4Du) { mod0 = o; break; }   // 'MOD0'
+        uint64_t dyn = (uint64_t)(img + mod0 + (mod0 ? *(uint32_t *)(img + mod0 + 4) : 0));   // 动态段偏移是相对 MOD0 起点
+        uint64_t DT_RELA = 0, DT_RELASZ = 0, DT_RELACOUNT = 0;
+        uint64_t DT_JMPREL = 0, DT_PLTRELSZ = 0, DT_SYMTAB = 0, DT_STRTAB = 0;
+        for (int i = 0; mod0 && i < 64; i++) {
+            uint64_t tag = *(uint64_t *)(dyn + (uint64_t)i * 16);
+            uint64_t val = *(uint64_t *)(dyn + (uint64_t)i * 16 + 8);
+            if (tag == 0) break;
+            if (tag == 7) DT_RELA = val;
+            else if (tag == 8) DT_RELASZ = val;
+            else if (tag == 0x6ffffff9ull) DT_RELACOUNT = val;
+            else if (tag == 0x17) DT_JMPREL = val;
+            else if (tag == 2) DT_PLTRELSZ = val;
+            else if (tag == 6) DT_SYMTAB = val;
+            else if (tag == 5) DT_STRTAB = val;
+        }
+        uint64_t n_rel = 0, n_other = 0;
+        for (uint64_t off = 0; off + 24 <= DT_RELASZ; off += 24) {
+            uint64_t r_off  = *(uint64_t *)(img + DT_RELA + off);
+            uint64_t r_info = *(uint64_t *)(img + DT_RELA + off + 8);
+            int64_t  r_add  = *(int64_t  *)(img + DT_RELA + off + 16);
+            if ((uint32_t)r_info == 1027) { *(uint64_t *)(img + r_off) = (uint64_t)img + (uint64_t)r_add; n_rel++; }
+            else n_other++;
+        }
+        g_nplt = 0; g_plt_calls = 0;
+        for (uint64_t off = 0; off + 24 <= DT_PLTRELSZ; off += 24) {
+            uint64_t r_off  = *(uint64_t *)(img + DT_JMPREL + off);
+            uint64_t r_info = *(uint64_t *)(img + DT_JMPREL + off + 8);
+            uint32_t symi   = (uint32_t)(r_info >> 32);
+            const char *nm  = (const char *)(img + DT_STRTAB + *(uint32_t *)(img + DT_SYMTAB + (uint64_t)symi * 24));
+            if (g_nplt < 512) { g_plt[g_nplt].slot = (uint64_t)(img + r_off); g_plt[g_nplt].name = nm; g_nplt++; }
+            *(uint64_t *)(img + r_off) = (uint64_t)(uintptr_t)&plt_stub;   // 槽 → 记录型存根
+        }
+        klog("[重定位诊断] mod0=%#x dyn=%#llx DT_RELA=%#llx RELASZ=%#llx JMPREL=%#llx PLTRELSZ=%#llx SYMTAB=%#llx STRTAB=%#llx\n",
+             mod0, (unsigned long long)dyn, (unsigned long long)DT_RELA, (unsigned long long)DT_RELASZ,
+             (unsigned long long)DT_JMPREL, (unsigned long long)DT_PLTRELSZ,
+             (unsigned long long)DT_SYMTAB, (unsigned long long)DT_STRTAB);
+        klog("[重定位诊断] 映像前 16 字节: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
+             img[0],img[1],img[2],img[3],img[4],img[5],img[6],img[7],img[8],img[9],img[10],img[11],img[12],img[13],img[14],img[15]);
+        appf(out, cap, used, "  ✓ 重定位：RELATIVE %llu 条（共 %llu），非 RELATIVE %llu 条\n",
+             (unsigned long long)n_rel, (unsigned long long)(DT_RELASZ / 24), (unsigned long long)n_other);
+        appf(out, cap, used, "  ✓ SDK 槽打桩：%d 个 PLT 槽 → 记录型存根（调用即记名）\n", g_nplt);
+    }
     if (dm_ohos_map_image_seal(&g_k_m)) { app(out, cap, used, "  ✗ seal 失败\n\n"); return; }
     appf(out, cap, used, "  ✓ 装载并封 R+X：base %p\n", (void *)g_k_m.base);
 
@@ -954,6 +1017,7 @@ static void exp_k(const char *files_dir, char *out, size_t cap, size_t *used) {
     sigaction(SIGSEGV, &o1, NULL); sigaction(SIGBUS, &o2, NULL);
     sigaction(SIGILL, &o3, NULL);  sigaction(SIGTRAP, &o4, NULL);
 
+    appf(out, cap, used, "  SDK 槽被真实调用 %d 次%s\n", g_plt_calls, g_plt_calls ? "（名见 dm_run_test.log）" : "");
     appf(out, cap, used, "  %s 启动链跑完并返回（rv=%#llx）；门被命中 %d 次%s\n",
          g_k_faulted ? "✗" : "✓", (unsigned long long)g_k_rv, g_k_hits,
          g_k_faulted ? "（中途崩，崩点见 dm_run_test.log）" : "");
