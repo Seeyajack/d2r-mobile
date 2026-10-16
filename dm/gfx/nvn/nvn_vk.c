@@ -189,6 +189,12 @@ static VkCommandBuffer g_cb;          // 本帧正在录制的命令缓冲（回
 static VkQueryPool g_qp;
 static float       g_ts_period;
 static int         g_ts_ok;
+// 诊断开关（3.4-D 查「合流后上屏全黑」）：0 = 命令缓冲里**不录**时间戳。
+// 回放层的帧与探针自己的帧在**命令内容**上只差这一样（ResetQueryPool + WriteTimestamp；
+// 渲染通道、帧缓冲、图像、提交顺序都已逐一对过）—— 关掉它再上屏，就能把"画的内容"与"录的命令"分开。
+// 若关掉后画面能出来 ⇒ 男驰 920 上「时间戳查询 + 出图」有相性问题，出图路径就别录时间戳。
+static int         g_ts_record = 1;
+void nvn_vk_ts_record_set(int on) { g_ts_record = on; }
 static uint32_t    g_ts_next;
 static uint32_t    g_ts_frame[2];
 static uint32_t    g_ts_pass[NVN_VK_TS_PASS][2];
@@ -233,6 +239,7 @@ static void ts_init(void) {
 }
 static void ts_mark(VkPipelineStageFlagBits stage, uint32_t *slot) {
     if (!g_ts_ok || g_ts_ok < 0 || g_ts_next >= NVN_VK_TS_MAX) { *slot = (uint32_t)-1; return; }
+    if (!g_ts_record) { *slot = (uint32_t)-1; return; }
     *slot = g_ts_next++;
     vkCmdWriteTimestamp(g_cb, stage, g_qp, *slot);
 }
@@ -825,8 +832,15 @@ static void draw_idx(const p_draw_idx *d) {
     g_st.draws++;
 }
 
-int nvn_vk_frame_begin(void) {
-    if (g_cb) { set_err("已经有一帧在录制"); return -1; }
+// ---- 出图路径的提交同步（见 nvn_vk.h；frame_end 消费后清零）----
+static VkSemaphore g_frame_wait, g_frame_signal;
+static VkPipelineStageFlags g_frame_wait_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+void nvn_vk_frame_wait(VkSemaphore sem, VkPipelineStageFlags stage) {
+    g_frame_wait = sem; g_frame_wait_stage = stage;
+}
+void nvn_vk_frame_signal(VkSemaphore sem) { g_frame_signal = sem; }
+
+int nvn_vk_frame_begin(void) {    if (g_cb) { set_err("已经有一帧在录制"); return -1; }
     VkDevice dev = dm_ohos_vk_device();
     VkCommandPool pool = dm_ohos_vk_pool();
     if (!dev || !pool) { set_err("共享上下文不可用：%s", dm_ohos_vk_err()); return -1; }
@@ -840,7 +854,7 @@ int nvn_vk_frame_begin(void) {
     nvn_vk_stats_reset();
     // 帧计时：起止各一个时间戳
     ts_init();
-    if (g_ts_ok == 1) vkCmdResetQueryPool(g_cb, g_qp, 0, NVN_VK_TS_MAX);
+    if (g_ts_ok == 1 && g_ts_record) vkCmdResetQueryPool(g_cb, g_qp, 0, NVN_VK_TS_MAX);
     g_ts_next = 0;
     ts_mark(VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, &g_ts_frame[0]);
     return 0;
@@ -855,10 +869,18 @@ int nvn_vk_frame_end(void) {
     {
         VkSubmitInfo si = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
         si.commandBufferCount = 1; si.pCommandBuffers = &g_cb;
+        // 出图路径挂进来的提交同步（等待 acquire 信号量 / 给 present 发信号量）——
+        // **等待与绘制必须在同一次提交里**，真机实测分开就"present 成功但屏幕全黑"。用完即清。
+        if (g_frame_wait) {
+            si.waitSemaphoreCount = 1; si.pWaitSemaphores = &g_frame_wait;
+            si.pWaitDstStageMask = &g_frame_wait_stage;
+        }
+        if (g_frame_signal) { si.signalSemaphoreCount = 1; si.pSignalSemaphores = &g_frame_signal; }
         VkQueue q = dm_ohos_vk_queue();
         if (vkQueueSubmit(q, 1, &si, NULL) != VK_SUCCESS) { set_err("vkQueueSubmit 失败"); goto fail; }
         vkQueueWaitIdle(q);
     }
+    g_frame_wait = VK_NULL_HANDLE; g_frame_signal = VK_NULL_HANDLE;
     // 取时间戳：整帧 + 逐通道
     ts_fetch();
     g_st.gpu_ns = ts_delta(g_ts_frame[0], g_ts_frame[1]);

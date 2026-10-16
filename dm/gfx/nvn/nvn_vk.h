@@ -62,6 +62,14 @@ void nvn_vk_set_shader_resolver(nvn_vk_shader_fn fn);
 int  nvn_vk_frame_begin(void);
 int  nvn_vk_frame_end(void);
 
+// ---- 出图路径用（3.4-D 合流）：让**回放层这一次提交**等待/发出信号量 ----
+// 为什么要它：用信号量取回的交换链图像，规范要求"等那个信号量"与"用它"最好在**同一次提交**里 ——
+// 真机实测：把等待放进另一次空提交（回放层的提交自己不等），present 返回成功、像素也对，
+// **但合成器不收**（屏幕全黑）。而"等待与绘制同一次提交"的探针路径（os_frame_do）能显示。
+// frame_end 消费后自动清零，不影响其它调用方。
+void nvn_vk_frame_wait(VkSemaphore sem, VkPipelineStageFlags stage);   // 下一次 frame_end 的提交先等它
+void nvn_vk_frame_signal(VkSemaphore sem);                            // 下一次 frame_end 的提交完成时 signal 它
+
 // 把一段命令流（handle = 段首地址，格式见 nvn_obj.h）回放成 Vulkan 命令。对标 mtl_exec。
 void nvn_vk_exec(const uint8_t *handle);
 
@@ -83,6 +91,11 @@ typedef struct {
 } nvn_vk_stats_t;
 void nvn_vk_stats_get(nvn_vk_stats_t *out);
 void nvn_vk_stats_reset(void);
+
+// 诊断开关（3.4-D 查「合流后上屏全黑」）：0 = 回放层的命令缓冲里**不录**时间戳。
+// 回放层帧与探针帧在命令内容上只差时间戳查询这一样 —— 关掉它再上屏即可二分。
+// 若证实相性问题时，出图路径就长期不录时间戳（GPU 耗时读 0）。
+void nvn_vk_ts_record_set(int on);
 
 // ---- 管线缓存落盘：**Vulkan 特有、Metal 做不到**的一项 ----
 // 建管线 = 驱动编译着色器，是首帧卡顿的主要来源。把 `VkPipelineCache` 存到盘上，第二次启动
