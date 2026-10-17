@@ -26,13 +26,12 @@
 import dmprobe from 'libdmprobe.so';
 import common from '@ohos.app.ability.common';
 
-const HINT: string = '两个探针，点按钮就跑。\n\n' +
-  '【装载机制实验】C 自定义 ELF 段能否生成 __start_/__stop_ 符号（预期：能）\n' +
-  'B  mmap 自己的 .so 能否可执行（预期：成功，整个方案的基石）\n' +
-  '   B-3 换应用数据目录的文件再试，分辨禁令范围\n' +
-  'A  匿名内存能否拿到可执行权限（预期：失败）\n\n' +
-  '【图形层能力探测】枚举设备的 Vulkan 能力，回答"Metal → Vulkan 这条路能不能走"。\n' +
-  '不问窗口、不用 XComponent，纯枚举。最关键的一项是压缩贴图格式。\n\n' +
+const HINT: string = '点按钮就跑（同步，界面会冻住几十秒到几分钟，属正常）。\n\n' +
+  '【全链探针】当前主用：装载 → 重定位 → 注入/插桩 → 静态初始化（1086/1087）\n' +
+  '  → 启动链 0x1c8 → 对象工厂 0x1f8 → nnMain 全程。\n' +
+  '  跑完看报告里的命中计数；明细都在 filesDir/dm_run_test.log（每轮 fopen 覆写）。\n\n' +
+  '【历史探针】折叠区里那批是早期收官的能力探针（装载机制 A/B/C、图形层能力、\n' +
+  '  Vulkan 冒烟、贴图/帧率/节拍单测等），做回归时才点。\n\n' +
   '跑完把报告发回来。';
 
 const VK_HINT: string = '图形层能力探测：只枚举能力，不创建窗口。\n' +
