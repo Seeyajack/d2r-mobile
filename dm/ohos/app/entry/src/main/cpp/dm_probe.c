@@ -1292,6 +1292,58 @@ static uint64_t hook_dbD(uint64_t *f) {   // 指令 0xa1d57c（sead 助手入口
     }
     return 0;
 }
+// ===== 钉子 #8：类型分发函数 0xa00a78 收到空类型标签 ⇒ 返 0 ⇒ 调用方 0xa01790 写 [x21+0xc8] 崩 =====
+// 离线结论（2026-10-17，main.patched.bin 指令级核实）：
+//   0xa00a78 按 [x0] 的低 32 位标签分发：1 → *(*(0x2280a20))（.bss 0x22d8718，全零 ⇒ cbz 返 0）；
+//   2 → 直接调 结构体[8]（Path A 里 = *(0x22809c0) = 函数 0x9fe910，有效代码）；
+//   3 → *(*(0x227b058))（.bss 0x22d8720，全零 ⇒ 返 0）；其他 → 返 0（复现崩溃）。
+//   调用方 0xa01790 用 arg1 的 [0]/[8]/[0x80] 拼栈上结构体喂给它，两个直接调用点：
+//   0xa01490（Path A：函数 0x9fe82c 把标签**硬编码为 2**）与 0xa01f1c（Path B：任务链表节点）。
+//   两条路离线分不清 ⇒ 五个钩子一轮定性：哪条路（x30）、几号标签、tag==2 目标进没进、分发返回什么。
+static int g_n_e1, g_n_e2, g_n_e3, g_n_e4, g_n_e5;
+static uint64_t hook_e1(uint64_t *f) {   // Path A 函数入口 0x9fe82c（标签硬编码 2 的那个）
+    if (++g_n_e1 <= 8)
+        klog("[钉子8] PathA 0x9fe82c 入口：x0=%#llx x1=%#llx x30=%#llx\n",
+             (unsigned long long)f[FR_X0], (unsigned long long)f[FR_X1],
+             (unsigned long long)f[FR_X30]);
+    return 0;
+}
+static uint64_t hook_e2(uint64_t *f) {   // 分发调用方入口 0xa01790
+    if (++g_n_e2 <= 16) {
+        uint64_t a1 = f[FR_X1];
+        uint64_t tag = 0;
+        if (a1) tag = *(const uint64_t *)(uintptr_t)a1;   // arg1[0]：低 32 位是类型标签
+        klog("[钉子8] 0xa01790：this=%#llx arg1=%#llx arg1[0]=%#llx arg2=%#llx x30=%#llx\n",
+             (unsigned long long)f[FR_X0], (unsigned long long)a1,
+             (unsigned long long)tag, (unsigned long long)f[FR_X2],
+             (unsigned long long)f[FR_X30]);
+    }
+    return 0;
+}
+static uint64_t hook_e3(uint64_t *f) {   // 分发函数入口 0xa00a78
+    if (++g_n_e3 <= 16) {
+        uint64_t st = f[FR_X0];
+        uint64_t tag = 0;
+        if (st) tag = *(const uint32_t *)(uintptr_t)st;   // 结构体[0] 低 32 位 = 标签
+        klog("[钉子8] 0xa00a78：结构体=%#llx 标签=%llu x1=%#llx\n",
+             (unsigned long long)st, (unsigned long long)(uint32_t)tag,
+             (unsigned long long)f[FR_X1]);
+    }
+    return 0;
+}
+static uint64_t hook_e4(uint64_t *f) {   // tag==2 目标 0x9fe910 入口（记录式，只看不拦）
+    if (++g_n_e4 <= 8)
+        klog("[钉子8] tag2 0x9fe910 入口：pair=%#llx *pair=%#llx\n",
+             (unsigned long long)f[FR_X0],
+             (unsigned long long)(f[FR_X0] ? *(const uint64_t *)(uintptr_t)f[FR_X0] : 0));
+    return 0;
+}
+static uint64_t hook_e5(uint64_t *f) {   // 0xa01814（bl 0xa00a78 之后）：x0 = 分发返回值
+    if (++g_n_e5 <= 16)
+        klog("[钉子8] 分发返回：x0=%#llx（0 ⇒ 就是要找的返 0；x21 即将拿到它）\n",
+             (unsigned long long)f[FR_X0]);
+    return 0;
+}
 // ===== 替换式安装器：宿主替函数干活（返回值经 x0 带回），**原实现一条都不执行** =====
 // ⚠ 早先这里把桩的"回跳槽"填成 `b 站点+4`——被替换的是**函数入口**，站点+4 就是原实现的
 //   第二条指令，于是变成"宿主跑完、原实现接着跑"（双执行）：首条 stp 被跳过 ⇒ 栈帧少 0x20、
@@ -1563,12 +1615,19 @@ static void exp_k(const char *files_dir, char *out, size_t cap, size_t *used) {
         k_install_hook(img, 0xa08ef4, (void *)hook_ctor_log, "构造器 0xa08ef4 入口");
         k_install_hook(img, 0xa08e94, (void *)hook_ctor2_log, "构造器 0xa08e94 入口");
         // ★★ 沿崩链逐点插桩（链见上面 hook_p* 的注释）。先挂"信息量最大"的链点，
-        //    再挂批量站点——洞只有 728 格，要紧的放前面，满了也丢不了它们。
+        //    再挂批量站点——洞只有 227 格（0x10000/0x120），要紧的放前面，满了也丢不了它们。
         k_install_hook(img, 0x9fe24c, (void *)hook_p9fe24c, "链点 0x9fe24c（链顶函数入口）");
         k_install_hook(img, 0x9fe2e8, (void *)hook_p9fe2e8, "站点→0xa1e484（交出注入对象处）");
         k_install_hook(img, 0xa1e484, (void *)hook_p1e484, "链点 0xa1e484（b 尾调用桩）");
         k_install_hook(img, 0xa1dd94, (void *)hook_p1dd94, "链点 0xa1dd94（分配 0x100 + 调构造器）");
         k_install_hook(img, 0xa1d8e0, (void *)hook_p1d8e0, "链点 0xa1d8e0（派生构造器入口）");
+        // ★ 钉子 #8（当前卡点：0xa00a78 收到空标签 ⇒ 返 0 ⇒ 0xa01790 写 [x21+0xc8] 崩）：
+        //   五个钩子都排在批量挂点之前，保证装得上（离线分析见 hook_e* 处注释）。
+        k_install_hook(img, 0x9fe82c, (void *)hook_e1, "钉子8 PathA 0x9fe82c 入口");
+        k_install_hook(img, 0xa01790, (void *)hook_e2, "钉子8 0xa01790 入口（标签+调用点）");
+        k_install_hook(img, 0xa00a78, (void *)hook_e3, "钉子8 0xa00a78 入口（标签）");
+        k_install_hook(img, 0x9fe910, (void *)hook_e4, "钉子8 tag2 目标 0x9fe910 入口");
+        k_install_hook(img, 0xa01814, (void *)hook_e5, "钉子8 分发返回点 0xa01814");
         k_hook_all_branchers(img, 0xa1d8e0, (void *)hook_s1d8e0, "站点→0xa1d8e0", 64);
         k_hook_all_branchers(img, 0xa08e94, (void *)hook_any_site, "站点→构造器 0xa08e94", 200);
         // 诊断 sead 单例查找 0xa0913c 的分支路径（见 hook_lk_* 处注释）
@@ -1639,6 +1698,9 @@ static void exp_k(const char *files_dir, char *out, size_t cap, size_t *used) {
     appf(out, cap, used, "  崩链插桩命中：链点 0x9fe24c %d / 站点→0xa1e484 %d / 0xa1e484 %d / 0xa1dd94 %d / "
                          "0xa1d8e0 %d；构造器 0xa08e94 入口 %d 次、站点 %d 次（明细见 dm_run_test.log）\n",
          g_n_9fe24c, g_n_9fe2e8, g_n_1e484, g_n_1dd94, g_n_1d8e0, g_n_ctor2, g_n_any);
+    appf(out, cap, used, "  钉子8 命中：PathA入口 %d / 0xa01790 %d / 0xa00a78 %d / 0x9fe910 %d / 分发返回 %d"
+                         "（标签与返回值见 dm_run_test.log 的 [钉子8] 行）\n",
+         g_n_e1, g_n_e2, g_n_e3, g_n_e4, g_n_e5);
     appf(out, cap, used, "  %s 启动链跑完并返回（rv=%#llx）；门被命中 %d 次%s\n",
          g_k_faulted ? "✗" : "✓", (unsigned long long)g_k_rv, g_k_hits,
          g_k_faulted ? "（中途崩，崩点见 dm_run_test.log）" : "");
