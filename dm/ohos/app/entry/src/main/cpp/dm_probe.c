@@ -2273,6 +2273,17 @@ static uint64_t hook_e26(uint64_t *f) {
     return 0;
 }
 
+// ★ 对照实验（2026-10-18 01:00）：0x73557c 的钩子"装上却不命中"，而紧邻的 0x735580 命中了，
+//   这是个矛盾——不解决它，"7 个初始化被跳过"这个结论就不可信。
+//   0x7355a8 是 `cbz x22` **不跳**时才执行的第一条指令（mov x0, x22）：
+//   · 它命中 ⇒ 那 7 个初始化**其实跑了**，之前的结论要推翻（钩子在本区域不可靠）；
+//   · 它不命中 ⇒ x22 确实为 0，结论成立，且钩子本身没问题。
+static int g_n_e27;
+static uint64_t hook_e27(uint64_t *f) {
+    if (++g_n_e27 <= 4) klog("[对照] 0x7355a8 命中 ⇒ cbz x22 **没有**跳，7 个初始化真的执行了\n");
+    return 0;
+}
+
 // ===== 替换式安装器：宿主替函数干活（返回值经 x0 带回），**原实现一条都不执行** =====
 // ⚠ 早先这里把桩的"回跳槽"填成 `b 站点+4`——被替换的是**函数入口**，站点+4 就是原实现的
 //   第二条指令，于是变成"宿主跑完、原实现接着跑"（双执行）：首条 stp 被跳过 ⇒ 栈帧少 0x20、
@@ -2612,6 +2623,7 @@ static void exp_k(const char *files_dir, char *out, size_t cap, size_t *used) {
             k_install_hook(img, g_boot_sites[bi], (void *)hook_boot, "启动链");
         // 决定性挂点：`mov x22, x0`（x22==0 ⇒ 跳过 7 个初始化直接进主循环）
         k_install_hook(img, 0x73557c, (void *)hook_e26, "关键 x22 取值 0x73557c");
+        k_install_hook(img, 0x7355a8, (void *)hook_e27, "对照 cbz 未跳则命中 0x7355a8");
         g_nplt = 0; g_plt_calls = 0;
         for (uint64_t off = 0; off + 24 <= DT_PLTRELSZ; off += 24) {
             uint64_t r_off  = *(uint64_t *)(img + DT_JMPREL + off);
