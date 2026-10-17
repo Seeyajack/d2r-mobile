@@ -1293,14 +1293,20 @@ static uint64_t hook_dbD(uint64_t *f) {   // 指令 0xa1d57c（sead 助手入口
     return 0;
 }
 // ===== 钉子 #8：类型分发函数 0xa00a78 收到空类型标签 ⇒ 返 0 ⇒ 调用方 0xa01790 写 [x21+0xc8] 崩 =====
-// 离线结论（2026-10-17，main.patched.bin 指令级核实）：
+// 离线结论（2026-10-17，main.patched.bin 指令级核实 + 真机日志闭环，见进度文档第十三节）：
 //   0xa00a78 按 [x0] 的低 32 位标签分发：1 → *(*(0x2280a20))（.bss 0x22d8718，全零 ⇒ cbz 返 0）；
 //   2 → 直接调 结构体[8]（Path A 里 = *(0x22809c0) = 函数 0x9fe910，有效代码）；
 //   3 → *(*(0x227b058))（.bss 0x22d8720，全零 ⇒ 返 0）；其他 → 返 0（复现崩溃）。
 //   调用方 0xa01790 用 arg1 的 [0]/[8]/[0x80] 拼栈上结构体喂给它，两个直接调用点：
 //   0xa01490（Path A：函数 0x9fe82c 把标签**硬编码为 2**）与 0xa01f1c（Path B：任务链表节点）。
-//   两条路离线分不清 ⇒ 五个钩子一轮定性：哪条路（x30）、几号标签、tag==2 目标进没进、分发返回什么。
+//   **真机定性（2026-10-17 傍晚）**：x30=0xA01F1C ⇒ 走 Path B；标签=0 ⇒ 返 0 ⇒ x21=0 崩。
+//   **根因**：池节点里的记录是 mgr 构造函数 0xa00afc 从 *(父+0x10) 拷来的**全零副本**
+//   （0xa00cf8 memcpy + 0xa00d48 池注册）；直创路径（mgr 虚表第 23 槽 0x9fe82c）从未被
+//   调用（e1 实测 0 命中）。任务身份铁证 = sead::ControllerMgr：标签 2 工厂 *(0x22809c0)
+//   = 0x9fe910（alloc 0x198 + 0xa1f07c 构造，基类 0x9fd9fc 名字串 0x1ba6eab 且不读 pair）。
 static int g_n_e1, g_n_e2, g_n_e3, g_n_e4, g_n_e5;
+static int g_n_e2fix;      // 影子补丁触发次数（标签 0 ⇒ 补 {2, ControllerMgr 工厂}）
+static int g_n_e6, g_n_e7, g_n_e8;   // 同轮探针：工厂/池注册/G 三点运行时状态
 static uint64_t hook_e1(uint64_t *f) {   // Path A 函数入口 0x9fe82c（标签硬编码 2 的那个）
     if (++g_n_e1 <= 8)
         klog("[钉子8] PathA 0x9fe82c 入口：x0=%#llx x1=%#llx x30=%#llx\n",
@@ -1317,6 +1323,26 @@ static uint64_t hook_e2(uint64_t *f) {   // 分发调用方入口 0xa01790
              (unsigned long long)f[FR_X0], (unsigned long long)a1,
              (unsigned long long)tag, (unsigned long long)f[FR_X2],
              (unsigned long long)f[FR_X30]);
+    }
+    // ★ 钉子 #8 影子补丁（2026-10-17 傍晚，根因见上方注释与进度文档第十三节）：
+    //   记录全零 ⇒ 标签 0 ⇒ 分发器返 0 ⇒ x21=0 ⇒ str [x21+0xc8] 崩。标签 0 不可能是合法
+    //   调用（合法标签只有 1/2/3，且 1/3 路在鸿蒙上也是返 0），只可能是"该填的没填"。
+    //   宿主补影子：补成 {标签=2, 工厂=base+0x9fe910}——与 Path A 直创时 Record::Init
+    //   ({2, *(0x22809c0)}) 的产物逐字节同构（0x9fe910 = alloc 0x198 + 0xa1f07c 构造
+    //   sead::ControllerMgr；基类 0x9fd9fc 不读 pair，其余字段全零无害）。
+    //   写在记录本体上（持久）：F 随后读到的就是修好的标签/工厂，任务创建后 node[0] 有值，
+    //   G 不会再进惰性路径；正常记录（标签≠0）零影响。
+    {
+        uint64_t a1 = f[FR_X1];
+        if (a1 && *(const uint64_t *)(uintptr_t)a1 == 0) {
+            uint64_t base = (uint64_t)(uintptr_t)g_k_m.base;
+            uint64_t fn = base + 0x9fe910;
+            *(uint64_t *)(uintptr_t)a1 = 2;
+            *(uint64_t *)(uintptr_t)(a1 + 8) = fn;
+            if (++g_n_e2fix <= 4)
+                klog("[钉子8] 影子：记录 %#llx 标签 0 ⇒ 补 {2, %#llx}（ControllerMgr 工厂）\n",
+                     (unsigned long long)a1, (unsigned long long)fn);
+        }
     }
     return 0;
 }
@@ -1342,6 +1368,61 @@ static uint64_t hook_e5(uint64_t *f) {   // 0xa01814（bl 0xa00a78 之后）：x
     if (++g_n_e5 <= 16)
         klog("[钉子8] 分发返回：x0=%#llx（0 ⇒ 就是要找的返 0；x21 即将拿到它）\n",
              (unsigned long long)f[FR_X0]);
+    return 0;
+}
+// ===== 钉子 #8 同轮探针（验证"记录全零来自 *(父+0x10)"的根因推断，只读不改）=====
+// 离线只能静态推断父对象身份（工厂 0xa00f8c 零静态引用，疑经 0xa0913c 名字解析间接调），
+// 这三个钩子把运行时三点状态打出来：① 工厂入口的父对象与 *(父+0x10) 的记录内容；
+// ② 池注册时拷进节点的记录源内容；③ G 取任务时看到的池/节点/记录状态。
+static uint64_t hook_e6(uint64_t *f) {   // 管理器工厂入口 0xa00f8c：x0 = 父对象
+    if (++g_n_e6 <= 8) {
+        uint64_t p = f[FR_X0];
+        uint64_t rec = p ? *(const uint64_t *)(uintptr_t)(p + 0x10) : 0;  // *(父+0x10) = 记录指针
+        uint64_t r0 = 0, r8 = 0, r70 = 0;
+        if (rec) {   // mgr 构造函数随后会 memcpy(mgr+0x58, rec, 0xb8)——能读是确定的
+            r0  = *(const uint64_t *)(uintptr_t)rec;
+            r8  = *(const uint64_t *)(uintptr_t)(rec + 8);
+            r70 = *(const uint64_t *)(uintptr_t)(rec + 0x70);
+        }
+        klog("[钉子8] 工厂 0xa00f8c：父=%#llx 父[0x10]=%#llx 记录[0]=%#llx [8]=%#llx [0x70]=%#llx\n",
+             (unsigned long long)p, (unsigned long long)rec,
+             (unsigned long long)r0, (unsigned long long)r8, (unsigned long long)r70);
+    }
+    return 0;
+}
+static uint64_t hook_e7(uint64_t *f) {   // 池注册入口 0xa018f8：x0 = mgr，x1 = mgr+0x58（记录源）
+    if (++g_n_e7 <= 8) {
+        uint64_t r = f[FR_X1];
+        uint64_t r0 = 0, r8 = 0, r70 = 0;
+        if (r) {
+            r0  = *(const uint64_t *)(uintptr_t)r;
+            r8  = *(const uint64_t *)(uintptr_t)(r + 8);
+            r70 = *(const uint64_t *)(uintptr_t)(r + 0x70);
+        }
+        klog("[钉子8] 池注册 0xa018f8：mgr=%#llx 记录源=%#llx [0]=%#llx [8]=%#llx [0x70]=%#llx x2=%#llx\n",
+             (unsigned long long)f[FR_X0], (unsigned long long)r,
+             (unsigned long long)r0, (unsigned long long)r8, (unsigned long long)r70,
+             (unsigned long long)f[FR_X2]);
+    }
+    return 0;
+}
+static uint64_t hook_e8(uint64_t *f) {   // G 入口 0xa01d70：x0 = mgr（读法与 G 自己逐条一致）
+    if (++g_n_e8 <= 8) {
+        uint64_t m = f[FR_X0];
+        uint64_t pool = m ? *(const uint64_t *)(uintptr_t)(m + 0x118) : 0;
+        uint64_t cnt = 0, node = 0, t0 = 0, lab = 0;
+        if (pool) {
+            cnt  = *(const uint32_t *)(uintptr_t)(pool + 0x10);
+            node = *(const uint64_t *)(uintptr_t)(pool + 8);
+            if (node) {                    // G: x23 = 节点-0xe0；[x23]=任务指针；[x23+8]=记录[0]
+                t0  = *(const uint64_t *)(uintptr_t)(node - 0xe0);
+                lab = *(const uint64_t *)(uintptr_t)(node - 0xe0 + 8);
+            }
+        }
+        klog("[钉子8] G 0xa01d70：mgr=%#llx 池=%#llx 计数=%llu 首节点链=%#llx 节点[0]=%#llx 记录[0]=%#llx\n",
+             (unsigned long long)m, (unsigned long long)pool, (unsigned long long)cnt,
+             (unsigned long long)node, (unsigned long long)t0, (unsigned long long)lab);
+    }
     return 0;
 }
 // ===== 替换式安装器：宿主替函数干活（返回值经 x0 带回），**原实现一条都不执行** =====
@@ -1628,6 +1709,11 @@ static void exp_k(const char *files_dir, char *out, size_t cap, size_t *used) {
         k_install_hook(img, 0xa00a78, (void *)hook_e3, "钉子8 0xa00a78 入口（标签）");
         k_install_hook(img, 0x9fe910, (void *)hook_e4, "钉子8 tag2 目标 0x9fe910 入口");
         k_install_hook(img, 0xa01814, (void *)hook_e5, "钉子8 分发返回点 0xa01814");
+        // ★ 钉子 #8 同轮探针（根因验证三连，只读）：工厂真入口 0xa00f8c（0xa00f90 是函数体
+        //   第二条指令）、池注册 0xa018f8、G 真入口 0xa01d70（0xa01d88 同理是体内指令）。
+        k_install_hook(img, 0xa00f8c, (void *)hook_e6, "钉子8 工厂 0xa00f8c 入口（父对象）");
+        k_install_hook(img, 0xa018f8, (void *)hook_e7, "钉子8 池注册 0xa018f8 入口（记录源）");
+        k_install_hook(img, 0xa01d70, (void *)hook_e8, "钉子8 G 0xa01d70 入口（池状态）");
         k_hook_all_branchers(img, 0xa1d8e0, (void *)hook_s1d8e0, "站点→0xa1d8e0", 64);
         k_hook_all_branchers(img, 0xa08e94, (void *)hook_any_site, "站点→构造器 0xa08e94", 200);
         // 诊断 sead 单例查找 0xa0913c 的分支路径（见 hook_lk_* 处注释）
@@ -1701,6 +1787,9 @@ static void exp_k(const char *files_dir, char *out, size_t cap, size_t *used) {
     appf(out, cap, used, "  钉子8 命中：PathA入口 %d / 0xa01790 %d / 0xa00a78 %d / 0x9fe910 %d / 分发返回 %d"
                          "（标签与返回值见 dm_run_test.log 的 [钉子8] 行）\n",
          g_n_e1, g_n_e2, g_n_e3, g_n_e4, g_n_e5);
+    appf(out, cap, used, "  钉子8 影子：记录标签 0 补 {2, ControllerMgr 工厂} %d 次；"
+                         "同轮探针 工厂 %d / 池注册 %d / G %d\n",
+         g_n_e2fix, g_n_e6, g_n_e7, g_n_e8);
     appf(out, cap, used, "  %s 启动链跑完并返回（rv=%#llx）；门被命中 %d 次%s\n",
          g_k_faulted ? "✗" : "✓", (unsigned long long)g_k_rv, g_k_hits,
          g_k_faulted ? "（中途崩，崩点见 dm_run_test.log）" : "");
