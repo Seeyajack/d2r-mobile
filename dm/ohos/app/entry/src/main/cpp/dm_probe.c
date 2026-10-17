@@ -2298,20 +2298,33 @@ static uint64_t hook_e27(uint64_t *f) {
 //   · 所以这里只需要"非空 + 虚表[0x10] 能返回非空"，不要求它是真堆。
 // 风险与判据：后续构造器若解引用它的字段，可能崩在下一个钉子（有 si_addr 可判）；
 //   判据 = `[启动链]` 出现 +0xa22508 … +0xa2469c 这 7 条且不崩。
-// 槽 0x80（下标 16）：真机 np40 实测这个槽被调用过，返回 0 之后紧接着
-// `bl 0xa0913c("GameConfig")` 返回 0 ⇒ nnMain 拿 0 当对象调虚表 ⇒ 崩（si_addr=0）。
-// ⇒ 这个槽极可能就是"分配"。按 (self, size, align) 猜测实现：真分配，并把参数打进日志。
-// 若签名猜错（例如 size 在 x2），日志里的数值会自证。
-static uint64_t fake_heap_alloc(void *self, uint64_t size, uint64_t align) {
+// 槽 0x80（下标 16）：**返回"带头部开销的分配尺寸"，不是指针**。依据 0xa09144 反汇编：
+//     x8 = [heap]; x8 = [x8+0x80]; blr x8(heap, w20=size)   → x0
+//     x24 = x0 & ~7;  if (x24 < 0x131) → 直接返 0（失败）     ← ★ 小尺寸会被判失败
+//     x8 = [heap+0x30]; blr x8(heap, x24, w21*w20)           → 真正的分配（槽 0x30）
+// 真机 np42：返回 8 ⇒ 8 < 0x131 ⇒ 立刻失败（GameConfig 拿不到，x20=0 崩）。
+// ⇒ 真堆这里显然会加上"头部/对齐开销"。这里按 size + 0x130 返回（稳稳越过 0x131 门槛）。
+static uint64_t fake_heap_size(void *self, uint64_t size) {
+    (void)self;
+    uint64_t v = (size + 0x130 + 7) & ~7ull;
+    static int n;
+    if (++n <= 8) klog("[影子堆] 取尺寸 size=%llu → %llu（含 0x130 开销）\n",
+                       (unsigned long long)size, (unsigned long long)v);
+    return v;
+}
+// 槽 0x30（下标 6）：真分配。参数按 (self, size, count) 解读（反汇编：x1=x24 尺寸、w2=w21*w20 个数）。
+static uint64_t fake_heap_alloc(void *self, uint64_t size, uint64_t count) {
     (void)self;
     static int n;
-    if (++n <= 12) klog("[影子堆] 分配调用：size=%llu align=%llu\n",
-                        (unsigned long long)size, (unsigned long long)align);
-    if (size == 0 || size > (64u << 20)) {          // 参数不像大小 ⇒ 不冒然分配
-        if (n <= 12) klog("[影子堆] size 不合理，返 0\n");
+    uint64_t total = size * (count ? count : 1);
+    if (++n <= 12)
+        klog("[影子堆] 分配 size=%llu count=%llu 合计=%llu\n",
+             (unsigned long long)size, (unsigned long long)count, (unsigned long long)total);
+    if (total == 0 || total > (64u << 20)) {
+        if (n <= 12) klog("[影子堆] 合计不合理，返 0\n");
         return 0;
     }
-    void *p = calloc(1, (size_t)size);
+    void *p = calloc(1, (size_t)total);
     if (n <= 12) klog("[影子堆] 分配 → %p\n", p);
     return (uint64_t)(uintptr_t)p;
 }
@@ -2339,12 +2352,12 @@ static const uint64_t g_fake_vt_tab[FAKE_VT_QWORDS] = {
     (uint64_t)(uintptr_t)&vt_s_0,  (uint64_t)(uintptr_t)&vt_s_1,
     (uint64_t)(uintptr_t)&fake_heap_get,   // 下标 2 = 偏移 0x10：取堆（必须返非 0）
     (uint64_t)(uintptr_t)&vt_s_3,  (uint64_t)(uintptr_t)&vt_s_4,
-    (uint64_t)(uintptr_t)&vt_s_5,  (uint64_t)(uintptr_t)&vt_s_6,
+    (uint64_t)(uintptr_t)&vt_s_5,  (uint64_t)(uintptr_t)&fake_heap_alloc,  // 下标 6 = 偏移 0x30：真分配
     (uint64_t)(uintptr_t)&vt_s_7,  (uint64_t)(uintptr_t)&vt_s_8,
     (uint64_t)(uintptr_t)&vt_s_9,  (uint64_t)(uintptr_t)&vt_s_10,
     (uint64_t)(uintptr_t)&vt_s_11, (uint64_t)(uintptr_t)&vt_s_12,
     (uint64_t)(uintptr_t)&vt_s_13, (uint64_t)(uintptr_t)&vt_s_14,
-    (uint64_t)(uintptr_t)&vt_s_15, (uint64_t)(uintptr_t)&fake_heap_alloc,  // 下标 16 = 偏移 0x80：分配
+    (uint64_t)(uintptr_t)&vt_s_15, (uint64_t)(uintptr_t)&fake_heap_size,  // 下标 16 = 偏移 0x80：取尺寸
     (uint64_t)(uintptr_t)&vt_s_17, (uint64_t)(uintptr_t)&vt_s_18,
     (uint64_t)(uintptr_t)&vt_s_19, (uint64_t)(uintptr_t)&vt_s_20,
     (uint64_t)(uintptr_t)&vt_s_21, (uint64_t)(uintptr_t)&vt_s_22,
