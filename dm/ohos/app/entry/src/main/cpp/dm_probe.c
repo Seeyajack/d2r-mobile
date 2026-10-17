@@ -15,6 +15,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "dm.h"                 // module_t
@@ -906,24 +907,141 @@ static void klog(const char *fmt, ...) {
     pthread_mutex_unlock(&g_klog_mu);
 }
 
-// ── NVN 最小空设备（2026-10-18）──
+// ── NVN 最小空设备 + 按名字记账桩（2026-10-17 深夜，Task #9）──
 // 真机实证（np20）：游戏只从 nvnBootstrapLoader 取**两个**名字：nvnDeviceInitialize /
 // nvnDeviceGetProcAddress；其余 NVN 函数全走 GetProcAddress 按名字取。
-// ⇒ 只要这两个真实现 + 一个按名字返回通用桩的 GetProcAddress，图形初始化就能继续往下走，
-//   同时把游戏用到的 NVN API 名字全部记进日志（Vulkan 版按这份清单排期）。
+// 真机实证（np25）：GetProcAddress 被调上百次；但之前**全返同一个通用桩**
+//   ⇒ 日志只知道"被取走多少次"，看不出游戏**先撞哪一族、先撞哪个函数** ⇒ 无法排期实现。
+// 本轮改法：每个名字一个独立桩（表在 dm_nvn_stubs.inc，由 tools/gen_nvn_stubs.py 生成）。
+//   桩一律 `return 0` —— 与改前"全返同一个通用桩"**完全等价**，纯观测、不改语义。
+// 日志给出三样东西：
+//   ① **首次真正调用的顺序**（这就是 NVN 523 个 API 的实现排期依据）
+//   ② 每 2 秒一行的**族合计**（由游戏自己的帧线程打出，见 plt_stub 里的 ConvertToTimeSpan tick）
+//   ③ 崩点现场附带一份非零计数汇总（见 gate_dump_fault → nvn_api_summary）
 // 参考实现：仓库 dm/gfx/nvn/hle_nvn.c（macOS/Metal 版为「强制接管 + 名字表 + 计数跳板」）。
-static int g_n_nvn_gpa;
-static uint64_t nvn_stub(void) { return 0; }     // 通用桩：有返回值的一律 0（void 调用无影响）
+// 表本身（族枚举 + 名字表 + 523 个记账桩 + 桩地址表）由 tools/gen_nvn_stubs.py 生成：
+//   python dm/ohos/tools/gen_nvn_stubs.py     # 输入 = 仓库 dm/gfx/nvn/names.txt（NVN 完整 API 面）
+// ⚠ np26 纠正：早先以为"BotW 只用 120 个 NVN 函数"——那是旧日志只记前 120 次的产物。
+//   真机实测查询 636 次、去重 ~520 个，正好等于 names.txt 的 523 个 ⇒ 一律以全表为准。
+static uint64_t nvn_api_touch(int idx);       // 前置声明：.inc 里的桩体要调它（定义在 .inc 之后）
+#include "dm_nvn_stubs.inc"
+
+static uint64_t nvn_stub(void) { return 0; }  // 兜底桩：清单外的名字（按名记录一次，换游戏会遇到）
+static int g_n_nvn_unknown;
+
+static uint64_t nvn_api_touch(int idx) {
+    nvn_api_t *a = &g_nvn_api[idx];
+    uint64_t old = __atomic_fetch_add(&a->calls, 1, __ATOMIC_RELAXED);
+    if (old == 0)
+        klog("[NVN] 首次调用 %-40s (%-11s)\n", a->name, g_nvn_fam_name[a->fam]);
+    else if ((old % 10000) == 0)
+        klog("[NVN] 累计 %-40s (%-11s) = %llu 次\n", a->name, g_nvn_fam_name[a->fam],
+             (unsigned long long)(old + 1));
+    return 0;
+}
+
+// 汇总：只打非零项，按族分组。崩点现场与收尾都调它——这 523 个 API 里到底谁在干活，一眼看出。
+static void nvn_api_summary(const char *where) {
+    int nz = 0;
+    for (int i = 0; i < NVN_API_N; i++) if (g_nvn_api[i].calls) nz++;
+    if (!nz) { klog("[NVN] 汇总（%s）：%d 个 API 一个都没被真正调用过\n", where, NVN_API_N); return; }
+    klog("[NVN] 汇总（%s）：%d/%d 个 API 被调用过\n", where, nz, NVN_API_N);
+    for (int f = 0; f < NVN_FAM__N; f++) {
+        uint64_t sum = 0; int cnt = 0;
+        for (int i = 0; i < NVN_API_N; i++)
+            if (g_nvn_api[i].fam == f && g_nvn_api[i].calls) { sum += g_nvn_api[i].calls; cnt++; }
+        if (!cnt) continue;
+        klog("[NVN]   %-11s %d 个函数 合计 %llu 次\n", g_nvn_fam_name[f], cnt,
+             (unsigned long long)sum);
+        for (int i = 0; i < NVN_API_N; i++)
+            if (g_nvn_api[i].fam == f && g_nvn_api[i].calls)
+                klog("[NVN]     %-40s %llu\n", g_nvn_api[i].name,
+                     (unsigned long long)g_nvn_api[i].calls);
+    }
+}
+
+// 观察窗之一：**族合计**（谁在干活）。只在有变化时打一行，族级不刷屏。
+// ⚠ 谁来调很关键：np26/np27 真机用"宿主看护线程每 N 秒打一次"——结果**一行都没出**，
+//   而同一时刻游戏线程的日志正常。说明我们起的宿主线程根本没被调度（见 nvn_host_thread_probe）。
+//   ⇒ 改成由**游戏自己的帧线程**打：plt_stub 里 ConvertToTimeSpan 每帧一次，每 120 次 ≈ 2 秒。
+static void nvn_family_totals(uint64_t out[NVN_FAM__N]) {
+    for (int f = 0; f < NVN_FAM__N; f++) out[f] = 0;
+    for (int i = 0; i < NVN_API_N; i++)
+        out[g_nvn_api[i].fam] += __atomic_load_n(&g_nvn_api[i].calls, __ATOMIC_RELAXED);
+}
+static void nvn_family_report(const char *who) {
+    static uint64_t prev[NVN_FAM__N];                 // 初值全 0 ⇒ 第一次调用就打全量
+    uint64_t now[NVN_FAM__N];
+    nvn_family_totals(now);
+    char line[320];
+    size_t used = 0;
+    int changed = 0;
+    line[0] = '\0';
+    for (int f = 0; f < NVN_FAM__N; f++) {
+        if (now[f] == prev[f]) continue;
+        changed = 1;
+        prev[f] = now[f];
+        if (used + 40 >= sizeof line) continue;        // 装不下就跳过这一族（不截断上一次的输出）
+        int n = snprintf(line + used, sizeof line - used, "%s=%llu ",
+                         g_nvn_fam_name[f], (unsigned long long)now[f]);
+        if (n > 0) used += (size_t)n;
+    }
+    if (changed) klog("[NVN] 族合计（%s）：%s\n", who, line);
+}
+
+// 观察窗之二：**宿主线程到底跑不跑**（一个只打心跳的最小实验）。
+// np26/np27：宿主看护线程一行日志都没有，而 pthread_create 返回成功 ⇒ 怀疑被游戏线程饿死。
+// 这里只在前 3 拍打心跳；打得出来说明宿主线程能跑，打不出来就是调度饥饿（本身就是重要结论）。
+static void *nvn_host_thread_probe(void *arg) {
+    (void)arg;
+    for (int i = 1; i <= 3; i++) {
+        // ⚠ 别用 usleep(10*1000*1000)：POSIX 只保证 <1e6，某些 libc 直接 EINVAL ⇒ 瞬间跑完不打一行。
+        struct timespec ts;
+        ts.tv_sec = 2;
+        ts.tv_nsec = 0;
+        while (nanosleep(&ts, &ts) != 0 && errno == EINTR) { }
+        klog("[NVN] 宿主线程心跳 %d/3（能打出这行 ⇒ 宿主线程有被调度）\n", i);
+    }
+    return NULL;
+}
+static void nvn_host_thread_probe_start(void) {
+    static int started;
+    if (started) return;
+    started = 1;
+    pthread_t t;
+    if (pthread_create(&t, NULL, nvn_host_thread_probe, NULL) == 0) pthread_detach(t);
+    else klog("[NVN] 宿主线程起不来（不影响主线）\n");
+}
+
 static uint64_t nvn_dev_init(void *dev, const void *builder) {
     (void)builder;
     if (dev) *(uint64_t *)dev = 0x4E564E44ull;   // 'NVND' 魔数（不 memset：设备对象大小未知，防越界）
     klog("[NVN] nvnDeviceInitialize → 1（空设备）\n");
+    nvn_host_thread_probe_start();                 // 只打 3 拍心跳，测"宿主线程能不能被调度"
     return 1;                                     // NVNboolean 真 = 初始化成功
 }
 static uint64_t nvn_dev_gpa(void *dev, const char *name) {
     (void)dev;
-    if (++g_n_nvn_gpa <= 120)
-        klog("[NVN] GetProcAddress(「%s」) → 通用桩\n", name ? name : "(null)");
+    if (!name) return (uint64_t)(uintptr_t)&nvn_stub;
+    // 这两个是**真实现**，不能走记账桩：np26 真机日志里游戏在 DeviceInitialize 之后又
+    // GetProcAddress("nvnDeviceInitialize") 取了一次（4416/4326 行）——若发记账桩（返 0），
+    // 第二次初始化会被告知"失败"。同理 GetProcAddress 自己也可能被再取一次。
+    if (!strcmp(name, "nvnDeviceInitialize"))    return (uint64_t)(uintptr_t)&nvn_dev_init;
+    if (!strcmp(name, "nvnDeviceGetProcAddress")) return (uint64_t)(uintptr_t)&nvn_dev_gpa;
+    for (int i = 0; i < NVN_API_N; i++) {
+        if (!strcmp(g_nvn_api[i].name, name)) {
+            static int n_logged;
+            if (++n_logged <= 1200)
+                klog("[NVN] GetProcAddress(「%s」) → 独立记账桩 #%d/%s\n",
+                     name, i, g_nvn_fam_name[g_nvn_api[i].fam]);
+            return (uint64_t)(uintptr_t)g_nvn_thunks[i];
+        }
+    }
+    // 清单外的名字 = §18.3 那份 120 项清单漏了东西（换游戏时一定会遇到），记下来但别刷屏。
+    // ⚠ np26 真机：上限 40 被**打满**了 ⇒ 说明原始清单本身就截断了（旧代码只记前 120 个
+    //   GetProcAddress）⇒ 这里放到 400，一次抓全，再把清单补进 nvn-api-botw.txt。
+    if (++g_n_nvn_unknown <= 3000)
+        klog("[NVN] ⚠ 清单外名字「%s」→ 兜底桩（该补进 nvn-api-botw.txt）\n", name);
     return (uint64_t)(uintptr_t)&nvn_stub;
 }
 static volatile int g_k_hits;
@@ -962,6 +1080,8 @@ static void gate_dump_fault(const char *where) {
     }
     sigaction(SIGSEGV, &o1, NULL);
     sigaction(SIGBUS, &o2, NULL);
+    // 顺手把 NVN 记账汇总打出来：崩在哪一步 + 此时 NVN 用到什么程度，放在一起才看得出因果
+    nvn_api_summary(where);
     klog("=== 现场结束 ===\n");
 }
 static uint64_t k_gate_stub(void) {
@@ -1337,6 +1457,16 @@ static uint64_t plt_stub(void) {
         // 通用 PLT 记名 + **全局截断**：init 段约一千行全是信息量；但游戏跑起来后
         // ConvertToTimeSpan/SleepThread 每帧各调一次，一轮能刷出 170MB 日志把别的线索淹掉
         // （2026-10-17 实证）。到上限就只记一条截断宣言，计数仍走 g_plt_calls。
+        // ★ NVN 用量打点：**借游戏自己的帧线程**（ConvertToTimeSpan 每帧一次）。
+        //   为什么不用宿主线程：np26–np29 三个回合，宿主看护线程一行日志都没打出来
+        //   （pthread_create 返回成功、失败分支没触发 ⇒ 线程建了但从未被调度，见
+        //   nvn_host_thread_probe 的注释）⇒ 观测必须挂在"确定会被调度"的线程上。
+        // ⚠ 阈值别定大：np29 用了 120（帧），而日志里 ConvertToTimeSpan 约每 90 行才 1 次
+        //   ⇒ 要 1 万行才打一次，跑测根本等不到。用 20。
+        if (!strcmp(nm, "_ZN2nn2os17ConvertToTimeSpanENS0_4TickE")) {
+            static unsigned tick;
+            if (++tick % 20 == 0) nvn_family_report("帧线程");
+        }
         if (g_plt_log_n < DM_PLT_LOG_CAP) {
             g_plt_log_n++;
             klog("[PLT] %s\n", nm);
@@ -1777,11 +1907,17 @@ static uint64_t hook_e8(uint64_t *f) {   // G 入口 0xa01d70：x0 = mgr（读�
         node8 = *(const uint64_t *)(uintptr_t)(pool8 + 8);
         if (node8) task8 = *(const uint64_t *)(uintptr_t)(node8 - 0xe0);   // 节点[0] = 任务指针
     }
-    if (++g_n_e8 <= 8) {
+    if (++g_n_e8 <= 12 || (g_n_e8 % 5000) == 0) {
         uint64_t lab = node8 ? *(const uint64_t *)(uintptr_t)(node8 - 0xe0 + 8) : 0;
-        klog("[钉子8] G 0xa01d70：mgr=%#llx 池=%#llx 首节点链=%#llx 节点[0]=%#llx 记录[0]=%#llx\n",
-             (unsigned long long)m8, (unsigned long long)pool8,
-             (unsigned long long)node8, (unsigned long long)task8, (unsigned long long)lab);
+        // caller = x30（G 的调用者返回地址）⇒ 减去模块基址就是模块偏移，能直接反查是哪个子系统
+        // 在调用 G。np26 真机：主循环里 G 一直被调但池/记录全空 ⇒ 必须知道"谁在问"。
+        uint64_t base = (uint64_t)(uintptr_t)g_k_m.base;
+        uint64_t lr_off = (f[FR_X30] >= base && f[FR_X30] < base + 0x2600000)
+                          ? f[FR_X30] - base : 0;
+        klog("[钉子8] G#%d 0xa01d70：mgr=%#llx 池=%#llx 首节点链=%#llx 节点[0]=%#llx 记录[0]=%#llx 调用者=+%#llx\n",
+             g_n_e8, (unsigned long long)m8, (unsigned long long)pool8,
+             (unsigned long long)node8, (unsigned long long)task8,
+             (unsigned long long)lab, (unsigned long long)lr_off);
         // 额外 dump 任务 +0x80..0xb8（销毁流的通知数组在 +0x88）：看它在激活前是否已填。
         if (task8) {
             uint64_t *a = (uint64_t *)(uintptr_t)(task8 + 0x80);
@@ -2149,6 +2285,7 @@ static void *k_thread(void *arg) {
         uint64_t r3 = ((uint64_t (*)(uint64_t, uint64_t))(b + 0x735330))(0, 0);
         g_gate_armed = 0;
         klog("=== nnMain 返回：rv=%#llx ===\n", (unsigned long long)r3);
+        nvn_api_summary("nnMain 返回");
     } else {
         g_gate_armed = 0; g_k_faulted = 1;
         klog("=== nnMain 崩：pc %#llx sig %d ===\n", (unsigned long long)g_gate_fault_pc, g_gate_fault_sig);
