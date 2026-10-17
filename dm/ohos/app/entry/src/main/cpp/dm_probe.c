@@ -879,7 +879,9 @@ static FILE *g_k_log;
 static const char *g_k_stage = "准备";
 static void klog(const char *fmt, ...) {
     if (!g_k_log) return;
-    fprintf(g_k_log, "[阶段 %s] ", g_k_stage);
+    // 带线程 ID：游戏有多个线程（探针主线程 / sead 任务线程 / Havok 物理工作线程）都在打日志，
+    // 没有 tid 分不清哪行是谁写的（2026-10-18 加：判读主线程卡在哪必需）。
+    fprintf(g_k_log, "[阶段 %s][T%ld] ", g_k_stage, (long)gettid());
     va_list ap; va_start(ap, fmt);
     vfprintf(g_k_log, fmt, ap);
     va_end(ap);
@@ -934,6 +936,8 @@ typedef struct { uint64_t slot; const char *name; } plt_ent_t;
 static plt_ent_t g_plt[512];
 static int g_nplt;
 static volatile int g_plt_calls;
+static int g_plt_log_n;          // 通用 PLT 记名行数（截断计数，见 plt_stub 末尾）
+#define DM_PLT_LOG_CAP 20000     // init 段约一千行 + 充分余量；循环段靠它挡住
 // 宿主侧"真服务"表：启动链真的需要返回值的几个（不是一律返 0）。
 // 依据：崩点反汇编显示 AllocateMemoryBlock 的返回值被当对象指针使用。
 static char g_host_arg0[] = "main";
@@ -1031,7 +1035,17 @@ static uint64_t plt_stub(void) {
         }
         // C++ 纯虚调用兜底：落到这里就是"调了纯虚函数"，记名后返回（不无限循环，便于定位）
         if (!strcmp(nm, "__cxa_pure_virtual")) { klog("[服务] ⚠ __cxa_pure_virtual 被调用（游戏有纯虚误调）\n"); return 0; }
-        klog("[PLT] %s\n", nm);
+        // 通用 PLT 记名 + **全局截断**：init 段约一千行全是信息量；但游戏跑起来后
+        // ConvertToTimeSpan/SleepThread 每帧各调一次，一轮能刷出 170MB 日志把别的线索淹掉
+        // （2026-10-17 实证）。到上限就只记一条截断宣言，计数仍走 g_plt_calls。
+        if (g_plt_log_n < DM_PLT_LOG_CAP) {
+            g_plt_log_n++;
+            klog("[PLT] %s\n", nm);
+        } else if (g_plt_log_n == DM_PLT_LOG_CAP) {
+            g_plt_log_n++;
+            klog("[PLT] === 截断：通用 PLT 记名已达 %d 行，后续不再逐条记（总数仍在 g_plt_calls）===\n",
+                 DM_PLT_LOG_CAP);
+        }
     }
     return 0;
 }
@@ -1307,6 +1321,7 @@ static uint64_t hook_dbD(uint64_t *f) {   // 指令 0xa1d57c（sead 助手入口
 static int g_n_e1, g_n_e2, g_n_e3, g_n_e4, g_n_e5;
 static int g_n_e2fix;      // 影子补丁触发次数（标签 0 ⇒ 补 {2, ControllerMgr 工厂}）
 static int g_n_e6, g_n_e7, g_n_e8;   // 同轮探针：工厂/池注册/G 三点运行时状态
+static int g_n_e8fix;                // 状态 1→2 补推次数（G 激活路径的放行条件）
 static uint64_t hook_e1(uint64_t *f) {   // Path A 函数入口 0x9fe82c（标签硬编码 2 的那个）
     if (++g_n_e1 <= 8)
         klog("[钉子8] PathA 0x9fe82c 入口：x0=%#llx x1=%#llx x30=%#llx\n",
@@ -1407,21 +1422,34 @@ static uint64_t hook_e7(uint64_t *f) {   // 池注册入口 0xa018f8：x0 = mgr�
     return 0;
 }
 static uint64_t hook_e8(uint64_t *f) {   // G 入口 0xa01d70：x0 = mgr（读法与 G 自己逐条一致）
+    // 先取池状态一次，日志与补推共用。**必须先查计数**（与 G 自己的 cmp w9,#1 判据一致）：
+    // 激活路径会把节点释放回空闲链（计数--），此后再读 pool[8] 可能拿到野值。
+    uint64_t m8 = f[FR_X0];
+    uint64_t pool8 = m8 ? *(const uint64_t *)(uintptr_t)(m8 + 0x118) : 0;
+    uint64_t node8 = 0, task8 = 0;
+    if (pool8 && *(const uint32_t *)(uintptr_t)(pool8 + 0x10) >= 1) {
+        node8 = *(const uint64_t *)(uintptr_t)(pool8 + 8);
+        if (node8) task8 = *(const uint64_t *)(uintptr_t)(node8 - 0xe0);   // 节点[0] = 任务指针
+    }
     if (++g_n_e8 <= 8) {
-        uint64_t m = f[FR_X0];
-        uint64_t pool = m ? *(const uint64_t *)(uintptr_t)(m + 0x118) : 0;
-        uint64_t cnt = 0, node = 0, t0 = 0, lab = 0;
-        if (pool) {
-            cnt  = *(const uint32_t *)(uintptr_t)(pool + 0x10);
-            node = *(const uint64_t *)(uintptr_t)(pool + 8);
-            if (node) {                    // G: x23 = 节点-0xe0；[x23]=任务指针；[x23+8]=记录[0]
-                t0  = *(const uint64_t *)(uintptr_t)(node - 0xe0);
-                lab = *(const uint64_t *)(uintptr_t)(node - 0xe0 + 8);
-            }
-        }
-        klog("[钉子8] G 0xa01d70：mgr=%#llx 池=%#llx 计数=%llu 首节点链=%#llx 节点[0]=%#llx 记录[0]=%#llx\n",
-             (unsigned long long)m, (unsigned long long)pool, (unsigned long long)cnt,
-             (unsigned long long)node, (unsigned long long)t0, (unsigned long long)lab);
+        uint64_t lab = node8 ? *(const uint64_t *)(uintptr_t)(node8 - 0xe0 + 8) : 0;
+        klog("[钉子8] G 0xa01d70：mgr=%#llx 池=%#llx 首节点链=%#llx 节点[0]=%#llx 记录[0]=%#llx\n",
+             (unsigned long long)m8, (unsigned long long)pool8,
+             (unsigned long long)node8, (unsigned long long)task8, (unsigned long long)lab);
+    }
+    // ★ 钉子 #8 续修：状态 1→2 补推（2026-10-18，根因见进度文档 14.5）。
+    //   池节点寿命：注册 → 惰性建任务（状态 1）→ **状态 2** → G 激活（2→4、插 mgr+0x90 链表、
+    //   task 虚表[0x58]、*记录[0xa0]=task、**节点释放回空闲链**）→ 池空。状态 1→2 在鸿蒙上
+    //   没人推：唯一写入者是直创路径后置序列（0xa015a4，从未运行），G 惰性路径里的 notify
+    //   （mgr[0x50] → 虚表[0x18]）也被跳过（mgr[0x50]=0）⇒ 任务线程的 G 永远在
+    //   "状态既非 0 也非 2" 分支空转，物理线程的任务图也跟着停摆。
+    //   宿主补推：任务存在且状态==1 ⇒ 置 2（自限制：置完后不再触发；状态字段是 32 位对齐写，
+    //   与游戏自己的 ldr w8,[x+0xb8] 读法一致）。下一个 G 调用就会走激活路径。
+    if (task8 && *(const uint32_t *)(uintptr_t)(task8 + 0xb8) == 1) {
+        *(uint32_t *)(uintptr_t)(task8 + 0xb8) = 2;
+        if (++g_n_e8fix <= 4)
+            klog("[钉子8] 状态提升：任务 %#llx 状态 1 ⇒ 2（G 激活路径将放行）\n",
+                 (unsigned long long)task8);
     }
     return 0;
 }
@@ -1788,8 +1816,8 @@ static void exp_k(const char *files_dir, char *out, size_t cap, size_t *used) {
                          "（标签与返回值见 dm_run_test.log 的 [钉子8] 行）\n",
          g_n_e1, g_n_e2, g_n_e3, g_n_e4, g_n_e5);
     appf(out, cap, used, "  钉子8 影子：记录标签 0 补 {2, ControllerMgr 工厂} %d 次；"
-                         "同轮探针 工厂 %d / 池注册 %d / G %d\n",
-         g_n_e2fix, g_n_e6, g_n_e7, g_n_e8);
+                         "状态 1⇒2 补推 %d 次；同轮探针 工厂 %d / 池注册 %d / G %d\n",
+         g_n_e2fix, g_n_e8fix, g_n_e6, g_n_e7, g_n_e8);
     appf(out, cap, used, "  %s 启动链跑完并返回（rv=%#llx）；门被命中 %d 次%s\n",
          g_k_faulted ? "✗" : "✓", (unsigned long long)g_k_rv, g_k_hits,
          g_k_faulted ? "（中途崩，崩点见 dm_run_test.log）" : "");
