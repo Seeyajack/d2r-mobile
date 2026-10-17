@@ -1028,6 +1028,13 @@ static void nvn_host_thread_probe_start(void) {
 //     而是用一张小表按 builder 指针记下参数，Initialize 时按指针回查。
 //   · Flush/Invalidate 在 UMA 上天然一致 ⇒ no-op。
 // 判据：si_addr=0x8 崩点消失，游戏能继续往下走（可见 FlushMappedRange 等旁证）。
+// ★ 兜底尺寸（2026-10-18 01:45，用户批准方案 A）：
+//   真机 np44 实测游戏传进来的 size 全是 0（因为它要的尺寸来自 GameConfig，
+//   而我们的 GameConfig 是空壳——真数据在 romfs 里，宿主没挂载）。
+//   这里在 size==0 时给一个默认值，**只为一轮定性**：验证"size=0 是不是唯一障碍"。
+//   日志一律标明「兜底」，将来接上资源层后应当自然消失（届时把这几个默认值删掉）。
+#define NVN_POOL_DEFAULT_SIZE   (16u << 20)   // 16MB
+#define NVN_BUF_DEFAULT_SIZE    (1u << 20)    // 1MB
 #define NVN_MP_MAX   8
 #define NVN_BUF_MAX  32
 typedef struct { const void *builder; void *storage; uint64_t size, flags; } nvn_mp_pend_t;
@@ -1076,11 +1083,14 @@ static void nvn_mpb_set_flags(void *b, uint32_t flags) { nvn_mp_pend_t *e = mp_p
 static uint64_t nvn_mp_init(void *pool, const void *builder) {
     nvn_mp_pend_t *e = mp_pend(builder, 0);
     uint64_t size = e ? e->size : 0;
+    int fallback = 0;
+    if (size == 0) { size = NVN_POOL_DEFAULT_SIZE; fallback = 1; }   // ★ 兜底（见上方注释）
     void *mem = e && e->storage ? e->storage : NULL;
-    if (!mem && size) mem = calloc(1, (size_t)size);
+    if (!mem) mem = calloc(1, (size_t)size);
     if (g_n_mp < NVN_MP_MAX) { g_pools[g_n_mp].obj = pool; g_pools[g_n_mp].mem = mem; g_pools[g_n_mp].size = size; g_n_mp++; }
-    klog("[NVN] 池初始化：pool=%p size=%llu → 内存=%p（%s）\n",
-         pool, (unsigned long long)size, mem, mem ? "就绪" : "空");
+    klog("[NVN] 池初始化：pool=%p size=%llu%s → 内存=%p（%s）\n",
+         pool, (unsigned long long)size, fallback ? "【兜底】" : "",
+         mem, mem ? "就绪" : "空");
     return mem ? 1 : 0;                          // nvnboolean
 }
 static void *nvn_mp_map(const void *pool) { nvn_pool_t *p = pool_of(pool); return p ? p->mem : NULL; }
@@ -1103,18 +1113,21 @@ static uint64_t nvn_buf_init(void *buf, const void *builder) {
     nvn_buf_pend_t *e = buf_pend(builder, 0);
     uint64_t size = e ? e->size : 0, off = e ? e->offset : 0;
     const void *pool = e ? e->pool : NULL;
+    int fallback = 0;
+    if (size == 0) { size = NVN_BUF_DEFAULT_SIZE; fallback = 1; }     // ★ 兜底（见上方注释）
     void *addr = NULL;
     // UMA：优先用池里那块 + 偏移（与真实语义一致）；池里放不下或没有池就单独备一块。
     nvn_pool_t *p = pool ? pool_of(pool) : NULL;
     if (p && p->mem && off + size <= p->size) addr = (uint8_t *)p->mem + off;
-    else if (size) addr = calloc(1, (size_t)size);
+    else addr = calloc(1, (size_t)size);
     if (g_n_buf < NVN_BUF_MAX) {
         g_bufs[g_n_buf].obj = buf; g_bufs[g_n_buf].addr = addr;
         g_bufs[g_n_buf].size = size; g_bufs[g_n_buf].offset = off;
         g_bufs[g_n_buf].pool = pool; g_n_buf++;
     }
-    klog("[NVN] 缓冲初始化：buf=%p size=%llu offset=%llu → 地址=%p（%s）\n",
-         buf, (unsigned long long)size, (unsigned long long)off, addr,
+    klog("[NVN] 缓冲初始化：buf=%p size=%llu%s offset=%llu → 地址=%p（%s）\n",
+         buf, (unsigned long long)size, fallback ? "【兜底】" : "",
+         (unsigned long long)off, addr,
          (p && addr && addr == (uint8_t *)p->mem + off) ? "池内" : "独立");
     return addr ? 1 : 0;
 }
