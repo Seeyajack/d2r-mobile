@@ -1363,6 +1363,8 @@ static int g_n_e1, g_n_e2, g_n_e3, g_n_e4, g_n_e5;
 static int g_n_e2fix;      // 影子补丁触发次数（标签 0 ⇒ 补 {2, ControllerMgr 工厂}）
 static int g_n_e6, g_n_e7, g_n_e8;   // 同轮探针：工厂/池注册/G 三点运行时状态
 static int g_n_e8fix;                // 状态 1→2 补推次数（G 激活路径的放行条件）
+static int g_n_e9, g_n_e10;          // runner 探针：激活检查 0xa01cf0 / 运行转发器 0x9fdccc
+static int g_n_e11;                  // runner 入口链表遍历探针（0xa01fe0）
 static uint64_t hook_e1(uint64_t *f) {   // Path A 函数入口 0x9fe82c（标签硬编码 2 的那个）
     if (++g_n_e1 <= 8)
         klog("[钉子8] PathA 0x9fe82c 入口：x0=%#llx x1=%#llx x30=%#llx\n",
@@ -1477,6 +1479,13 @@ static uint64_t hook_e8(uint64_t *f) {   // G 入口 0xa01d70：x0 = mgr（读�
         klog("[钉子8] G 0xa01d70：mgr=%#llx 池=%#llx 首节点链=%#llx 节点[0]=%#llx 记录[0]=%#llx\n",
              (unsigned long long)m8, (unsigned long long)pool8,
              (unsigned long long)node8, (unsigned long long)task8, (unsigned long long)lab);
+        // 额外 dump 任务 +0x80..0xb8（销毁流的通知数组在 +0x88）：看它在激活前是否已填。
+        if (task8) {
+            uint64_t *a = (uint64_t *)(uintptr_t)(task8 + 0x80);
+            klog("[钉子8] 任务数组 [+0x80..0xb0]：%#llx %#llx %#llx %#llx %#llx %#llx\n",
+                 (unsigned long long)a[0], (unsigned long long)a[1], (unsigned long long)a[2],
+                 (unsigned long long)a[3], (unsigned long long)a[4], (unsigned long long)a[5]);
+        }
     }
     // ★ 钉子 #8 续修：状态 1→2 补推（2026-10-18，根因见进度文档 14.5）。
     //   池节点寿命：注册 → 惰性建任务（状态 1）→ **状态 2** → G 激活（2→4、插 mgr+0x90 链表、
@@ -1488,9 +1497,90 @@ static uint64_t hook_e8(uint64_t *f) {   // G 入口 0xa01d70：x0 = mgr（读�
     //   与游戏自己的 ldr w8,[x+0xb8] 读法一致）。下一个 G 调用就会走激活路径。
     if (task8 && *(const uint32_t *)(uintptr_t)(task8 + 0xb8) == 1) {
         *(uint32_t *)(uintptr_t)(task8 + 0xb8) = 2;
+        // ★ flags 补位（2026-10-18，用户批准）：runner 的外层检查（ldrb [task+0x60]; tbz bit1）
+        //   与激活检查（and #6 == 6）都要求 [task+0x60] 的 bit1|bit2。我们的任务这块全零、
+        //   全代码找不到写入者（无 strb 直写 / 无模板拷贝 / 构造器只清零）⇒ runner 在
+        //   0xa01cf0 之前就跳过任务。**按字节** OR 6（检查用 ldrb 读，别碰 +0x61 起的邻居字节）。
+        *(uint8_t *)(uintptr_t)(task8 + 0x60) |= 6;
         if (++g_n_e8fix <= 4)
-            klog("[钉子8] 状态提升：任务 %#llx 状态 1 ⇒ 2（G 激活路径将放行）\n",
+            klog("[钉子8] 状态提升：任务 %#llx 状态 1 ⇒ 2，flags [0x60] |= 6（runner 放行条件）\n",
                  (unsigned long long)task8);
+    }
+    return 0;
+}
+// ===== 钉子 #8 续修探针（runner 链，只读）：激活之后游戏仍自旋 ⇒ runner（0xa02320 →
+// 尾跳 0xa01fe0）遍历 mgr+0x90 链表、过检查 0xa01cf0 后才调 task->虚表[0x88]（0x9fdccc，
+// 转发给 task+0xd0 子对象）并把状态推 6。检查要求 [task+0x60]&6==6 且状态==4；
+// 我们的任务状态=4 但 [task+0x60]=0 且静态分析找不到写入者。两个钩子回答：
+// ① 检查函数拿到的"任务"到底是谁（x22 是任务本体还是链表节点？）+ flags/状态现场；
+// ② 运行转发器到底有没有被走到。
+static uint64_t hook_e9(uint64_t *f) {   // runner 激活检查 0xa01cf0 入口：x0 = mgr，x1 = 候选对象
+    if (++g_n_e9 <= 8) {
+        uint64_t t = f[FR_X1];
+        uint64_t f60 = t ? *(const uint32_t *)(uintptr_t)(t + 0x60) : 0;
+        uint64_t st = t ? *(const uint32_t *)(uintptr_t)(t + 0xb8) : 0;
+        uint64_t v0 = t ? *(const uint64_t *)(uintptr_t)t : 0;   // 候选对象 [0]（虚表？）
+        klog("[钉子8] 检查 0xa01cf0：mgr=%#llx 候选=%#llx [0]=%#llx [0x60]=%#llx(与6=%u) 状态=%llu\n",
+             (unsigned long long)f[FR_X0], (unsigned long long)t, (unsigned long long)v0,
+             (unsigned long long)f60, (unsigned)((f60 & 6) == 6),
+             (unsigned long long)st);
+    }
+    return 0;
+}
+static uint64_t hook_e10(uint64_t *f) {  // 运行转发器 0x9fdccc 入口：x0 = 任务（→ +0xd0 子对象）
+    if (++g_n_e10 <= 8)
+        klog("[钉子8] 运行 0x9fdccc：任务=%#llx [+0xb8]=%#llx（被 runner 选中执行）\n",
+             (unsigned long long)f[FR_X0],
+             (unsigned long long)(f[FR_X0] ? *(const uint32_t *)(uintptr_t)(f[FR_X0] + 0xb8) : 0));
+    return 0;
+}
+// ★ runner 入口链表遍历（2026-10-18）：上一轮实证 0xa01cf0 零调用 ⇒ 检查根本没走到。
+//   离线已解码：0x9f3904 = 双向链表后插（[link+0]=next [link+8]=prev [link+0x10]=载荷指针），
+//   runner 从 mgr[0x98]（=头.prev=尾）沿 prev 反向走，x22 = [link+0x10] = 任务本体，
+//   然后查 [task+0x60] bit1 —— 我们的任务 flags=0，在 0xa01cf0 之前就被跳过。
+//   这个钩子在 runner 入口用 C 沿链表走一遍，运行时坐实：链表里有没有任务、flags 多少。
+static uint64_t hook_e11(uint64_t *f) {  // runner 0xa01fe0 入口：x0 = mgr
+    if (++g_n_e11 <= 8) {
+        uint64_t m = f[FR_X0];
+        uint64_t head = m ? m + 0x90 : 0;
+        uint64_t cur = m ? *(const uint64_t *)(uintptr_t)(m + 0x98) : 0;
+        int i = 0;
+        while (cur && cur != head && i < 8) {
+            uint64_t task = *(const uint64_t *)(uintptr_t)(cur + 0x10);   // 载荷指针
+            uint64_t f60 = task ? *(const uint32_t *)(uintptr_t)(task + 0x60) : 0;
+            uint64_t st  = task ? *(const uint32_t *)(uintptr_t)(task + 0xb8) : 0;
+            uint64_t v0  = task ? *(const uint64_t *)(uintptr_t)task : 0;
+            klog("[钉子8] runner 链表[%d]：节点=%#llx 任务=%#llx [0]=%#llx [0x60]=%#llx 状态=%llu\n",
+                 i, (unsigned long long)cur, (unsigned long long)task,
+                 (unsigned long long)v0, (unsigned long long)f60, (unsigned long long)st);
+            cur = *(const uint64_t *)(uintptr_t)(cur + 8);   // prev
+            i++;
+        }
+        if (i == 0)
+            klog("[钉子8] runner 链表：空（mgr[0x98]=%#llx，头=%#llx）\n",
+                 (unsigned long long)cur, (unsigned long long)head);
+    }
+    return 0;
+}
+// ★ 销毁入口探针（2026-10-18）：runner 跑完任务（虚表[0x88]）后把任务移进完成链（mgr+0xd8），
+//   下一轮对完成链逐个调 0xa01be8 销毁：状态 <7 ⇒ 推 7、析构 task+0x20、再 memcpy(task+0x88, 5)
+//   逐个调 指针->[0]->虚表[0x20]。本轮崩在这里：第一个指针（=task+0xf0）的 [0]=0。
+//   这个钩子 dump 销毁时的状态、子任务链、以及那 5 个指针（含各自 [0]）——判定数组是不是垃圾。
+static int g_n_e12;
+static uint64_t hook_e12(uint64_t *f) {   // 销毁入口 0xa01be8：x0 = mgr，x1 = 任务
+    if (++g_n_e12 <= 8) {
+        uint64_t t = f[FR_X1];
+        uint64_t st = t ? *(const uint32_t *)(uintptr_t)(t + 0xb8) : 0;
+        uint64_t sub = t ? *(const uint64_t *)(uintptr_t)(t + 0x28) : 0;
+        uint64_t a0 = t ? *(const uint64_t *)(uintptr_t)(t + 0x88) : 0;
+        uint64_t a1 = t ? *(const uint64_t *)(uintptr_t)(t + 0x90) : 0;
+        uint64_t a2 = t ? *(const uint64_t *)(uintptr_t)(t + 0x98) : 0;
+        uint64_t a0v = a0 ? *(const uint64_t *)(uintptr_t)a0 : 0;
+        klog("[钉子8] 销毁 0xa01be8：mgr=%#llx 任务=%#llx 状态=%llu 子链=%#llx "
+             "数组[88]=%#llx(→[0]=%#llx) [90]=%#llx [98]=%#llx\n",
+             (unsigned long long)f[FR_X0], (unsigned long long)t, (unsigned long long)st,
+             (unsigned long long)sub, (unsigned long long)a0, (unsigned long long)a0v,
+             (unsigned long long)a1, (unsigned long long)a2);
     }
     return 0;
 }
@@ -1786,6 +1876,11 @@ static void exp_k(const char *files_dir, char *out, size_t cap, size_t *used) {
         k_install_hook(img, 0xa00f8c, (void *)hook_e6, "钉子8 工厂 0xa00f8c 入口（父对象）");
         k_install_hook(img, 0xa018f8, (void *)hook_e7, "钉子8 池注册 0xa018f8 入口（记录源）");
         k_install_hook(img, 0xa01d70, (void *)hook_e8, "钉子8 G 0xa01d70 入口（池状态）");
+        // ★ 钉子 #8 续修探针（runner 链，只读）：激活检查 + 运行转发器，见 hook_e9/e10 注释。
+        k_install_hook(img, 0xa01cf0, (void *)hook_e9, "钉子8 runner 检查 0xa01cf0 入口");
+        k_install_hook(img, 0x9fdccc, (void *)hook_e10, "钉子8 运行转发器 0x9fdccc 入口");
+        k_install_hook(img, 0xa01fe0, (void *)hook_e11, "钉子8 runner 入口 0xa01fe0（链表遍历）");
+        k_install_hook(img, 0xa01be8, (void *)hook_e12, "钉子8 销毁入口 0xa01be8（数组 dump）");
         k_hook_all_branchers(img, 0xa1d8e0, (void *)hook_s1d8e0, "站点→0xa1d8e0", 64);
         k_hook_all_branchers(img, 0xa08e94, (void *)hook_any_site, "站点→构造器 0xa08e94", 200);
         // 诊断 sead 单例查找 0xa0913c 的分支路径（见 hook_lk_* 处注释）
@@ -1862,6 +1957,9 @@ static void exp_k(const char *files_dir, char *out, size_t cap, size_t *used) {
     appf(out, cap, used, "  钉子8 影子：记录标签 0 补 {2, ControllerMgr 工厂} %d 次；"
                          "状态 1⇒2 补推 %d 次；同轮探针 工厂 %d / 池注册 %d / G %d\n",
          g_n_e2fix, g_n_e8fix, g_n_e6, g_n_e7, g_n_e8);
+    appf(out, cap, used, "  钉子8 runner 链：激活检查 %d 次 / 运行转发器 %d 次 / "
+                         "runner 入口 %d 次 / 销毁 %d 次（明细见日志）\n",
+         g_n_e9, g_n_e10, g_n_e11, g_n_e12);
     appf(out, cap, used, "  %s 启动链跑完并返回（rv=%#llx）；门被命中 %d 次%s\n",
          g_k_faulted ? "✗" : "✓", (unsigned long long)g_k_rv, g_k_hits,
          g_k_faulted ? "（中途崩，崩点见 dm_run_test.log）" : "");
