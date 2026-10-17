@@ -1033,18 +1033,28 @@ static void *thr_trampoline(void *p) {
 // 旧语义：槽号恒 0、Set 忽略、Get 恒返影子对象。真线程共享这个影子可接受
 // （它只被当作"当前上下文对象"用，[+0xb0] 是全局分配器）。
 
-// ── nn::os 互斥量：**真 pthread_mutex**（真线程后必须有真互斥）──
-// 注：游戏自己的快路径是内联原子操作（CPU 指令，本来就是真的）；这里管 PLT 上的三条调用。
+// ── nn::os 互斥量：**真 pthread_mutex，且必须递归** ──
+// ⚠ 2026-10-18 真机实证（0xa01924 二次加锁挂死）：sead 的"锁"（0xa1d56c/0xa1d57c）其实就是
+//   `add x0,#0x20; b nn::os::LockMutex/UnlockMutex`（PLT 槽 0x22636f0/0x22636f8）。
+//   **nn::os::Mutex 是递归语义**（同一线程可重复加锁、靠计数解锁），于是同一线程先由
+//   mgr 构造器加锁、再由池注册函数加锁是正常路径。非递归 pthread_mutex 在这里必死锁。
 #define DM_MUTEX_MAX 64
 static void *g_mtx_key[DM_MUTEX_MAX];
 static pthread_mutex_t g_mtx_impl[DM_MUTEX_MAX];
 static pthread_mutex_t g_mtx_reg = PTHREAD_MUTEX_INITIALIZER;   // 登记表自身的锁
+static pthread_mutexattr_t g_mtx_attr;
+static pthread_once_t g_mtx_once = PTHREAD_ONCE_INIT;
+static void mtx_attr_init(void) {
+    pthread_mutexattr_init(&g_mtx_attr);
+    pthread_mutexattr_settype(&g_mtx_attr, PTHREAD_MUTEX_RECURSIVE);
+}
 static pthread_mutex_t *mtx_get(void *m) {
+    pthread_once(&g_mtx_once, mtx_attr_init);
     pthread_mutex_lock(&g_mtx_reg);
     for (int i = 0; i < DM_MUTEX_MAX; i++) if (g_mtx_key[i] == m) { pthread_mutex_unlock(&g_mtx_reg); return &g_mtx_impl[i]; }
     for (int i = 0; i < DM_MUTEX_MAX; i++) if (!g_mtx_key[i]) {
         g_mtx_key[i] = m;
-        pthread_mutex_init(&g_mtx_impl[i], NULL);
+        pthread_mutex_init(&g_mtx_impl[i], &g_mtx_attr);
         pthread_mutex_unlock(&g_mtx_reg);
         return &g_mtx_impl[i];
     }
@@ -1083,6 +1093,9 @@ static dm_mq_t *mq_get(void *q) {
     pthread_mutex_unlock(&g_mq_reg);
     return NULL;
 }
+
+// 前置声明：TLS 的每线程影子要把 [+0xb0] 填成注入的分配器对象（定义在后面，C 的试探性定义合法）
+static uint64_t g_alloc_obj[2];
 
 static uint64_t plt_stub(void) {
     uint64_t x16v, a0, a1, a2;
@@ -1175,21 +1188,25 @@ static uint64_t plt_stub(void) {
             if (slot >= 0) return g_thr[slot].game;
             return (uint64_t)(uintptr_t)&g_thread_shadow[0];
         }
-        // nn::os::AllocateTlsSlot / SetTlsValue / GetTlsValue —— **保持 2026-10-17 的旧语义**
-        // ⚠ 2026-10-18 教训（真机实证 si_addr=0xb1）：把 TLS 做成"真槽 + 按线程存储"后，
-        //   游戏某处往同一槽存了 1，而 sead 的"设置分配器"助手（0xa0e33c）从线程对象 [+0x88]
-        //   取槽号 → GetTlsValue → 读 [返回对象+0xb0]，拿到 1 就去读 [1+0xb0] ⇒ 崩。
-        //   旧语义之所以能跑：槽号恒 0、Get 恒返影子对象（其 [+0xb0] 由宿主注入分配器）。
-        //   ⇒ 槽号回 0、Set 忽略、Get 恒影子。真线程共享这个影子可接受（[+0xb0] 是全局分配器）。
+        // nn::os::AllocateTlsSlot / SetTlsValue / GetTlsValue
+        // 2026-10-18 最终形态：**每线程一份影子对象**（_Thread_local），首次取用时把 [+0xb0]
+        //   填成注入的分配器对象。为什么不是"真槽 + 按线程存值"（那次崩在 0xa0e33c：某槽被
+        //   存过 1，sead 的"设置分配器"助手拿 1 去读 [1+0xb0]）；为什么也不能共用一份
+        //   （那会让两个真线程的"当前线程"身份撞车 ⇒ sead 互斥量重入判断失效 ⇒ 第二次
+        //   加锁就挂住，真机实证 0xa01924 两连击后停住）。每线程影子两头都占：
+        //   [+0xb0] 是全局分配器，其余字段各自独立。
         if (!strcmp(nm, "_ZN2nn2os15AllocateTlsSlotEPNS0_7TlsSlotEPFvmE")) {
-            if (a0) *(uint32_t *)(uintptr_t)a0 = 0;      // 旧行为：不给真槽号
+            if (a0) *(uint32_t *)(uintptr_t)a0 = 0;      // 槽号恒 0（旧行为，见上）
             return 0;
         }
         if (!strcmp(nm, "_ZN2nn2os11SetTlsValueENS0_7TlsSlotEm")) {
-            return 0;                                     // 旧行为：忽略（见上）
+            return 0;                                     // 忽略（见上，防"存非指针值"崩）
         }
         if (!strcmp(nm, "_ZN2nn2os11GetTlsValueENS0_7TlsSlotE")) {
-            return (uint64_t)(uintptr_t)&g_tls_shadow[0]; // 旧行为：恒影子对象
+            static _Thread_local uint64_t tls_shadow[0x40];
+            if (!tls_shadow[0xb0 / 8])
+                tls_shadow[0xb0 / 8] = (uint64_t)(uintptr_t)&g_alloc_obj[0];
+            return (uint64_t)(uintptr_t)&tls_shadow[0];
         }
         // 核掩码 / 栈信息 / 优先级 —— 影子语义，别让游戏拿到 0 而误判"没有可用核"
         if (!strcmp(nm, "_ZN2nn2os26GetThreadAvailableCoreMaskEv")) return 0xF;
@@ -1886,6 +1903,47 @@ static uint64_t hook_e14(uint64_t *f) {   // mgr 构造尾部 0xa00d4c（注册�
         klog("[钉子8] 构造尾 0xa00d4c 到达（注册已返回、准备解锁）\n");
     return 0;
 }
+// ★ 日志系统探针（2026-10-18）：崩点 = 日志遍历（0xf35400）拿节点 [node+8] 当串与 "main"
+//   做 strcmp，而该串指针已被写坏（si_addr 恒 0x61fbXXXX5e，高 16 位一致 ⇒ 系统性写坏）。
+//   离线已解码：日志对象 [0]=链头 [+0x10]=计数 [+0x18]=空闲链 [+0x28]=容量；
+//   节点 [0]=tick [8]=消息串 [0x10]=链节点。两枪对夹：添加入口看"游戏传什么"，遍历入口看现场。
+static int g_n_e15, g_n_e16;
+static uint64_t hook_e15(uint64_t *f) {   // 日志添加 0xf35374：x0 = 消息（串？结构？）
+    if (++g_n_e15 <= 10) {
+        uint64_t a = f[FR_X0];
+        uint64_t obj = *(const uint64_t *)(uintptr_t)((uint64_t)(uintptr_t)g_k_m.base + 0x2288548);   // 日志对象全局
+        uint64_t cnt = obj ? *(const uint32_t *)(uintptr_t)(obj + 0x10) : 0;
+        klog("[日志] 添加：参数=%#llx 日志对象=%#llx 计数=%llu\n",
+             (unsigned long long)a, (unsigned long long)obj, (unsigned long long)cnt);
+    }
+    return 0;
+}
+static uint64_t hook_e16(uint64_t *f) {   // 日志遍历 0xf35400
+    if (++g_n_e16 <= 10) {
+        uint64_t obj = *(const uint64_t *)(uintptr_t)((uint64_t)(uintptr_t)g_k_m.base + 0x2288548);
+        uint64_t head = obj ? *(const uint64_t *)(uintptr_t)obj : 0;
+        uint64_t cnt = obj ? *(const uint32_t *)(uintptr_t)(obj + 0x10) : 0;
+        uint64_t msg = head ? *(const uint64_t *)(uintptr_t)(head - 0x10 + 8) : 0;
+        klog("[日志] 遍历：对象=%#llx 计数=%llu 链头=%#llx 首节点消息=%#llx\n",
+             (unsigned long long)obj, (unsigned long long)cnt,
+             (unsigned long long)head, (unsigned long long)msg);
+    }
+    return 0;
+}
+// ★ 注册体加锁点 0xa01924（2026-10-18）：e13（0xa01928 注册体第一条）从未触发 ⇒ 卡在它前一条
+//   `bl 0xa1d56c`（给 mgr+8 上 sead 锁）。这里在锁调用前 dump 锁对象四个字，看 state/owner。
+static int g_n_e17;
+static uint64_t hook_e17(uint64_t *f) {   // 0xa01924 处：x0 = &mgr[8]（锁对象）
+    if (++g_n_e17 <= 8) {
+        uint64_t o = f[FR_X0];
+        uint64_t w0 = o ? *(const uint64_t *)(uintptr_t)o : 0;
+        uint64_t w1 = o ? *(const uint64_t *)(uintptr_t)(o + 8) : 0;
+        klog("[钉子8] 注册体上锁前 0xa01924：锁对象=%#llx [0]=%#llx [8]=%#llx\n",
+             (unsigned long long)o, (unsigned long long)w0, (unsigned long long)w1);
+    }
+    return 0;
+}
+
 // ===== 替换式安装器：宿主替函数干活（返回值经 x0 带回），**原实现一条都不执行** =====
 // ⚠ 早先这里把桩的"回跳槽"填成 `b 站点+4`——被替换的是**函数入口**，站点+4 就是原实现的
 //   第二条指令，于是变成"宿主跑完、原实现接着跑"（双执行）：首条 stp 被跳过 ⇒ 栈帧少 0x20、
@@ -2186,6 +2244,10 @@ static void exp_k(const char *files_dir, char *out, size_t cap, size_t *used) {
         // ★ 注册体/构造尾定位钩（见 hook_e13/e14 注释）
         k_install_hook(img, 0xa01928, (void *)hook_e13, "钉子8 注册体 0xa01928");
         k_install_hook(img, 0xa00d4c, (void *)hook_e14, "钉子8 构造尾 0xa00d4c");
+        // ★ 日志系统探针（见 hook_e15/e16 注释）
+        k_install_hook(img, 0xf35374, (void *)hook_e15, "日志 添加 0xf35374");
+        k_install_hook(img, 0xf35400, (void *)hook_e16, "日志 遍历 0xf35400");
+        k_install_hook(img, 0xa01924, (void *)hook_e17, "钉子8 注册体上锁前 0xa01924");
         k_hook_all_branchers(img, 0xa1d8e0, (void *)hook_s1d8e0, "站点→0xa1d8e0", 64);
         k_hook_all_branchers(img, 0xa08e94, (void *)hook_any_site, "站点→构造器 0xa08e94", 200);
         // 诊断 sead 单例查找 0xa0913c 的分支路径（见 hook_lk_* 处注释）
