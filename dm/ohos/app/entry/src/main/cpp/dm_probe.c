@@ -8,6 +8,7 @@
 #include <fcntl.h>
 #include <hilog/log.h>
 #include <pthread.h>
+#include <sched.h>
 #include <setjmp.h>
 #include <signal.h>
 #include <stdarg.h>
@@ -1018,6 +1019,38 @@ static pthread_mutex_t *mtx_get(void *m) {
     return &g_mtx_impl[0];      // 表满：退化（不该发生）
 }
 
+// ── 消息队列（2026-10-18）──
+// Prepare Thread 用 ReceiveMessageQueue 收命令。之前存根秒返 0 但不写消息 ⇒ 游戏可能读到
+// 未初始化消息，且线程只能忙等（真机日志实证：Receive+Yield 空转 11 轮）。真实现：
+// 游戏提供**值缓冲区**（InitializeMessageQueue 的 buf/count），我们维护头尾 + 条件变量，
+// 支持阻塞收/阻塞发（Send/Receive）与非阻塞（TrySend/TryReceive，bool 返回：1=成功）。
+#define DM_MQ_MAX 8
+typedef struct {
+    uint64_t *buf;                 // 游戏侧值缓冲区
+    size_t cap, head, tail, n;
+    pthread_mutex_t mu;
+    pthread_cond_t cv_notempty;    // 收方等"有消息"
+    pthread_cond_t cv_notfull;     // 发方等"有空位"
+} dm_mq_t;
+static void *g_mq_key[DM_MQ_MAX];
+static dm_mq_t g_mq[DM_MQ_MAX];
+static pthread_mutex_t g_mq_reg = PTHREAD_MUTEX_INITIALIZER;
+static dm_mq_t *mq_get(void *q) {
+    pthread_mutex_lock(&g_mq_reg);
+    for (int i = 0; i < DM_MQ_MAX; i++) if (g_mq_key[i] == q) { pthread_mutex_unlock(&g_mq_reg); return &g_mq[i]; }
+    for (int i = 0; i < DM_MQ_MAX; i++) if (!g_mq_key[i]) {
+        g_mq_key[i] = q;
+        memset(&g_mq[i], 0, sizeof g_mq[i]);
+        pthread_mutex_init(&g_mq[i].mu, NULL);
+        pthread_cond_init(&g_mq[i].cv_notempty, NULL);
+        pthread_cond_init(&g_mq[i].cv_notfull, NULL);
+        pthread_mutex_unlock(&g_mq_reg);
+        return &g_mq[i];
+    }
+    pthread_mutex_unlock(&g_mq_reg);
+    return NULL;
+}
+
 static uint64_t plt_stub(void) {
     uint64_t x16v, a0, a1, a2;
     __asm__ volatile("mov %0, x16" : "=r"(x16v));
@@ -1160,6 +1193,70 @@ static uint64_t plt_stub(void) {
             pthread_mutex_unlock(mtx_get((void *)(uintptr_t)a0));
             return 0;
         }
+        // ═══ 消息队列（见 mq_get 处注释）═══
+        if (!strcmp(nm, "_ZN2nn2os22InitializeMessageQueueEPNS0_16MessageQueueTypeEPmm")) {
+            dm_mq_t *q = mq_get((void *)(uintptr_t)a0);
+            if (q) {
+                q->buf = (uint64_t *)(uintptr_t)a1;    // 游戏提供的值缓冲区
+                q->cap = (size_t)a2;
+                q->head = q->tail = q->n = 0;
+                klog("[队列] 初始化：%#llx buf=%#llx 容量=%llu\n",
+                     (unsigned long long)a0, (unsigned long long)a1, (unsigned long long)a2);
+            }
+            return 0;
+        }
+        if (!strcmp(nm, "_ZN2nn2os19ReceiveMessageQueueEPmPNS0_16MessageQueueTypeE")) {
+            dm_mq_t *q = mq_get((void *)(uintptr_t)a1);
+            if (!q || !q->cap) return 0;               // 未初始化：别悬住（宁可空转）
+            pthread_mutex_lock(&q->mu);
+            while (q->n == 0) pthread_cond_wait(&q->cv_notempty, &q->mu);
+            uint64_t v = q->buf[q->head];
+            q->head = (q->head + 1) % q->cap;
+            q->n--;
+            pthread_cond_signal(&q->cv_notfull);
+            pthread_mutex_unlock(&q->mu);
+            if (a0) *(uint64_t *)(uintptr_t)a0 = v;
+            return 0;
+        }
+        if (!strcmp(nm, "_ZN2nn2os19TrySendMessageQueueEPNS0_16MessageQueueTypeEm")) {
+            dm_mq_t *q = mq_get((void *)(uintptr_t)a0);
+            if (!q || !q->cap) return 0;
+            pthread_mutex_lock(&q->mu);
+            if (q->n >= q->cap) { pthread_mutex_unlock(&q->mu); return 0; }   // 满：bool 假
+            q->buf[q->tail] = a1;
+            q->tail = (q->tail + 1) % q->cap;
+            q->n++;
+            pthread_cond_signal(&q->cv_notempty);
+            pthread_mutex_unlock(&q->mu);
+            return 1;                                   // bool 真 = 已送入
+        }
+        if (!strcmp(nm, "_ZN2nn2os16SendMessageQueueEPNS0_16MessageQueueTypeEm")) {
+            dm_mq_t *q = mq_get((void *)(uintptr_t)a0);
+            if (!q || !q->cap) return 0;
+            pthread_mutex_lock(&q->mu);
+            while (q->n >= q->cap) pthread_cond_wait(&q->cv_notfull, &q->mu);
+            q->buf[q->tail] = a1;
+            q->tail = (q->tail + 1) % q->cap;
+            q->n++;
+            pthread_cond_signal(&q->cv_notempty);
+            pthread_mutex_unlock(&q->mu);
+            return 0;
+        }
+        if (!strcmp(nm, "_ZN2nn2os22TryReceiveMessageQueueEPmPNS0_16MessageQueueTypeE")) {
+            dm_mq_t *q = mq_get((void *)(uintptr_t)a1);
+            if (!q || !q->cap) return 0;
+            pthread_mutex_lock(&q->mu);
+            if (q->n == 0) { pthread_mutex_unlock(&q->mu); return 0; }
+            uint64_t v = q->buf[q->head];
+            q->head = (q->head + 1) % q->cap;
+            q->n--;
+            pthread_cond_signal(&q->cv_notfull);
+            pthread_mutex_unlock(&q->mu);
+            if (a0) *(uint64_t *)(uintptr_t)a0 = v;
+            return 1;
+        }
+        // 让出/等待类：真线程下 Yield 用 sched_yield
+        if (!strcmp(nm, "_ZN2nn2os11YieldThreadEv")) { sched_yield(); return 0; }
         // ★ 关键：C++ 静态局部对象的初始化守卫。返回 1 = "由我来初始化"；
         // 返回 0 会被当成"别人已初始化"而跳过 ⇒ 全部静态单例没建、虚表为空（本轮崩因）。
         if (!strcmp(nm, "__cxa_guard_acquire")) { klog("[服务] __cxa_guard_acquire → 1（由我来初始化）\n"); return 1; }
