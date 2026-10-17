@@ -995,12 +995,9 @@ static void *thr_trampoline(void *p) {
     return NULL;
 }
 
-// ── 线程局部存储：每个宿主线程一份 ──
-// 之前所有线程共享一个影子对象（g_tls_shadow），真线程后会互相串数据 ⇒ 改为 _Thread_local。
-// 语义保留：某槽没被 SetTlsValue 设过时，slot 0 仍回落到影子对象（历史行为，别处依赖它）。
-#define DM_TLS_MAX 16
-static _Thread_local uint64_t g_tls_val[DM_TLS_MAX];
-static int g_tls_slot_next;     // AllocateTlsSlot 发号
+// ── 线程局部存储：**不做真槽**（2026-10-18 真机实证回退，见 plt_stub 里 TLS 三行的注释）──
+// 旧语义：槽号恒 0、Set 忽略、Get 恒返影子对象。真线程共享这个影子可接受
+// （它只被当作"当前上下文对象"用，[+0xb0] 是全局分配器）。
 
 // ── nn::os 互斥量：**真 pthread_mutex**（真线程后必须有真互斥）──
 // 注：游戏自己的快路径是内联原子操作（CPU 指令，本来就是真的）；这里管 PLT 上的三条调用。
@@ -1112,23 +1109,21 @@ static uint64_t plt_stub(void) {
             if (slot >= 0) return g_thr[slot].game;
             return (uint64_t)(uintptr_t)&g_thread_shadow[0];
         }
-        // nn::os::AllocateTlsSlot(TlsSlot*, void(*)(void*)) —— 发号（u32）
+        // nn::os::AllocateTlsSlot / SetTlsValue / GetTlsValue —— **保持 2026-10-17 的旧语义**
+        // ⚠ 2026-10-18 教训（真机实证 si_addr=0xb1）：把 TLS 做成"真槽 + 按线程存储"后，
+        //   游戏某处往同一槽存了 1，而 sead 的"设置分配器"助手（0xa0e33c）从线程对象 [+0x88]
+        //   取槽号 → GetTlsValue → 读 [返回对象+0xb0]，拿到 1 就去读 [1+0xb0] ⇒ 崩。
+        //   旧语义之所以能跑：槽号恒 0、Get 恒返影子对象（其 [+0xb0] 由宿主注入分配器）。
+        //   ⇒ 槽号回 0、Set 忽略、Get 恒影子。真线程共享这个影子可接受（[+0xb0] 是全局分配器）。
         if (!strcmp(nm, "_ZN2nn2os15AllocateTlsSlotEPNS0_7TlsSlotEPFvmE")) {
-            int slot = g_tls_slot_next++;
-            if (a0) *(uint32_t *)(uintptr_t)a0 = (uint32_t)slot;
-            klog("[线程] AllocateTlsSlot → 槽 %d\n", slot);
+            if (a0) *(uint32_t *)(uintptr_t)a0 = 0;      // 旧行为：不给真槽号
             return 0;
         }
-        // nn::os::SetTlsValue(TlsSlot, uintptr_t) / GetTlsValue(TlsSlot) —— 按线程分开
         if (!strcmp(nm, "_ZN2nn2os11SetTlsValueENS0_7TlsSlotEm")) {
-            if ((uint32_t)a0 < DM_TLS_MAX) g_tls_val[(uint32_t)a0] = a1;
-            return 0;
+            return 0;                                     // 旧行为：忽略（见上）
         }
         if (!strcmp(nm, "_ZN2nn2os11GetTlsValueENS0_7TlsSlotE")) {
-            uint32_t s = (uint32_t)a0;
-            if (s < DM_TLS_MAX && g_tls_val[s]) return g_tls_val[s];
-            // 未设过：slot 0 回落到影子对象（历史行为：游戏拿 [+0xb0] 当分配器对象）
-            return (uint64_t)(uintptr_t)&g_tls_shadow[0];
+            return (uint64_t)(uintptr_t)&g_tls_shadow[0]; // 旧行为：恒影子对象
         }
         // 核掩码 / 栈信息 / 优先级 —— 影子语义，别让游戏拿到 0 而误判"没有可用核"
         if (!strcmp(nm, "_ZN2nn2os26GetThreadAvailableCoreMaskEv")) return 0xF;
