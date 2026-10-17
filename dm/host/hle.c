@@ -38,7 +38,7 @@ extern const hle_ent __start_dmswhle[] __attribute__((weak));
 extern const hle_ent __stop_dmswhle[] __attribute__((weak));
 #endif
 
-uint64_t resolve_import(module_t *m, const char *name) {
+uint64_t resolve_import(module_t *m, const char *name, int weak) {
     static const hle_ent *sec; static unsigned long secsz;
     if (!sec) {
 #if defined(__OHOS__)
@@ -55,6 +55,9 @@ uint64_t resolve_import(module_t *m, const char *name) {
             if (g_flag.imports) { Dl_info di; dladdr(sec[i].fn, &di); LOG("import %s -> %s", name, di.dli_sname); }
             void *hlecount_wrap(const char *, const char *, void *); return (uint64_t)hlecount_wrap("HLE", name, sec[i].fn);   // DM_HLECOUNT 时为计数桩（含 libc 直通表） | With DM_HLECOUNT it is a counting stub (including the libc passthrough table)
         }
+    // 未解析的弱导入保持零，让客体能检测可选函数缺失。
+    // Leave unresolved weak imports null so the guest can detect absent optional functions.
+    if (weak) return 0;
     // 已为同名分过桩就复用
     // Reuse the stub if one was already allocated for the same name
     void *hlecount_wrap(const char *, const char *, void *);
