@@ -1145,6 +1145,47 @@ static void k_inject_log(uint8_t *img) {
 // 它只能打 ±128MB 内的直接跳转，且随后就被下面的「替换式插桩」覆盖（同一批站点），
 // 日志里的"已接到宿主 alloc"与实际执行路径不符，留着只会误导。
 
+// ★ 数据导入补值（2026-10-18）：main 的动态符号表里有 13 个 nn::util 数学常量 + std::nothrow
+//   是**未定义导入**（GLOB_DAT 重定位，type 1025）。Switch 上由运行时链接器从 SDK 模块
+//   （sdk/subsdk*，本环境没加载）解析进槽；我们的探针对非 RELATIVE"只计数不解析"，
+//   槽留文件原值 0。游戏代码的用法是 `ldr x8,[槽]; ldr s0,[x8]`——**槽 0 = 解引用空指针崩**。
+//   实证：静态构造器 #184（`*(0x22d84a0)=2π`）就是这么崩的（读 nn::util::FloatPi 的槽）。
+//   这里把**数学事实型标量**按 IEEE754 二进制位补上（槽指向宿主静态量）；std::nothrow 给
+//   1 字节哑对象（只当标签传地址）。
+//   ⚠ 仍留 0 的（登记在案的地雷，内容未知无法编造）：
+//     - detail::SinCoefficients / CosCoefficients / AtanCoefficients（多项式系数表）
+//     - detail::SinCosSampleTable（正弦采样表）、detail::AngleIndexHalfRound（表半周长）
+//     - detail::FloatQuaternionEpsilon（四元数 epsilon，量级约 1e-5/1e-6）
+//     - glslc* ×8（弱符号，语义上就该是 0——可选着色器编译器，客体自行空判）
+//     - __rel_dyn_start/end、__rel_plt_start/end（链接器边界符号：填了反而可能诱使游戏
+//       去"自遍历重定位表"重复应用重定位，保持 0 与既往实测行为一致）
+static float g_c_pi, g_c_2pi, g_c_pi2, g_c_inv2pi, g_c_deg180, g_c_ulp;
+static uint8_t g_c_nothrow;
+static void k_fill_data_imports(uint8_t *img) {
+    // 位模式（Python struct 核过）：π=0x40490FDB 2π=0x40C90FDB π/2=0x3FC90FDB
+    // 1/(2π)=0x3E22F983 180.0=0x43340000 ULP(2^-23)=0x34000000
+    uint32_t pi = 0x40490FDBu, pi2 = 0x3FC90FDBu, tpi = 0x40C90FDBu;
+    uint32_t inv2pi = 0x3E22F983u, d180 = 0x43340000u, ulp = 0x34000000u;
+    __builtin_memcpy(&g_c_pi, &pi, 4);      __builtin_memcpy(&g_c_2pi, &tpi, 4);
+    __builtin_memcpy(&g_c_pi2, &pi2, 4);    __builtin_memcpy(&g_c_inv2pi, &inv2pi, 4);
+    __builtin_memcpy(&g_c_deg180, &d180, 4); __builtin_memcpy(&g_c_ulp, &ulp, 4);
+    g_c_nothrow = 0;
+    struct { uint32_t slot; void *p; } tab[] = {
+        { 0x2280648, &g_c_pi      },   // nn::util::FloatPi
+        { 0x2280528, &g_c_pi      },   // nn::util::detail::FloatPi
+        { 0x2280548, &g_c_2pi     },   // nn::util::detail::Float2Pi
+        { 0x2280550, &g_c_pi2     },   // nn::util::detail::FloatPiDivided2
+        { 0x2280530, &g_c_inv2pi  },   // nn::util::detail::Float1Divided2Pi
+        { 0x2280460, &g_c_deg180  },   // nn::util::detail::FloatDegree180
+        { 0x2280650, &g_c_ulp     },   // nn::util::detail::FloatUlp
+        { 0x2264110, &g_c_nothrow },   // std::nothrow（1 字节哑对象）
+    };
+    for (unsigned i = 0; i < sizeof tab / sizeof tab[0]; i++)
+        *(uint64_t *)(img + tab[i].slot) = (uint64_t)(uintptr_t)tab[i].p;
+    klog("[数据导入] 补 %u 个标量常量槽（π/2π/π/2/1/(2π)/180/ULP + nothrow）\n",
+         (unsigned)(sizeof tab / sizeof tab[0]));
+}
+
 // ===== 洞内插桩：安装器 =====
 // 把 hook_stub.S 的桩整段复制进代码洞，填三个槽（原指令 / 回跳 / 宿主函数地址），
 // 再把目标函数首指令改成 4 字节 b 跳进桩。全部在 seal 之前做。
@@ -1550,9 +1591,11 @@ static void k_inject_heap(uint8_t *img) {
 #define DM_IMG_MAIN_INIT_ARRAY_OFF  0x2293390u
 #define DM_IMG_MAIN_INIT_ARRAY_SIZE 0x21f8u
 // 已知会崩的构造器（先跳过以验证因果，别让它们污染后面）：
-//   #184 把 x20 当对象指针，而真实调用方才会往 x20 放上下文（我们按 ELF ABI 传 (0,NULL,NULL)）
-//   #206 待查
-static int k_skip_ctor(size_t i) { return i == 184 || i == 206; }
+//   #184 = `*(0x22d84a0)=2π`，崩因是读 nn::util::FloatPi 的 GLOB_DAT 槽（0x2280648）为空指针
+//         （2026-10-18：槽已在 k_fill_data_imports 补上 ⇒ 放出来重跑，静观是否真过）。
+//         旧注释"把 x20 当对象指针"是早前误判——反汇编显示它根本不碰 x20。
+//   #206 待查（0xb2a370，一个注册表构造器）。
+static int k_skip_ctor(size_t i) { return i == 206; }
 
 static void k_run_module_init(const module_t *m) {
     uint8_t *b = m->base;
@@ -1713,6 +1756,7 @@ static void exp_k(const char *files_dir, char *out, size_t cap, size_t *used) {
             if ((uint32_t)r_info == 1027) { *(uint64_t *)(img + r_off) = (uint64_t)img + (uint64_t)r_add; n_rel++; }
             else n_other++;
         }
+        k_fill_data_imports(img);   // ★ 补数据导入常量（nn::util 数学常量等，见函数注释）
         g_hook_n = 0;   // ★ 每轮从零开始：洞是映像内的固定空间，上一轮装的桩还占着格
         k_inject_heap(img);   // ★ 喂堆：把游戏分配器要的两个全局指向宿主对象（见 k_inject_heap）
         k_inject_log(img);    // ★ 喂日志对象 + 节点池（见 k_inject_log）
