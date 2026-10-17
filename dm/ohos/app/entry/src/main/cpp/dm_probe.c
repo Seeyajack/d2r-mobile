@@ -879,19 +879,31 @@ static FILE *g_k_log;
 // 阶段标签：实验 K 连跑三站（启动链 → 对象工厂 → nnMain），同一批插桩在三站都会响。
 // 每条日志带上"当前在哪一站"，读日志时才分得清"这次命中属于哪一站"。
 static const char *g_k_stage = "准备";
+// 日志串行化用的递归锁（见 klog 里的理由）
+static pthread_mutex_t g_klog_mu;
+static pthread_once_t  g_klog_once = PTHREAD_ONCE_INIT;
+static void klog_mu_init(void) {
+    pthread_mutexattr_t a;
+    pthread_mutexattr_init(&a);
+    pthread_mutexattr_settype(&a, PTHREAD_MUTEX_RECURSIVE);
+    pthread_mutex_init(&g_klog_mu, &a);
+    pthread_mutexattr_destroy(&a);
+}
 static void klog(const char *fmt, ...) {
     if (!g_k_log) return;
     // 带线程 ID：游戏有多个线程（探针主线程 / sead 任务线程 / Havok 物理工作线程）都在打日志，
     // 没有 tid 分不清哪行是谁写的（2026-10-18 加：判读主线程卡在哪必需）。
-    // 真线程后必须串行化：否则多线程的 fprintf 会互相穿插、把行撕成两半。
-    static pthread_mutex_t klog_mu = PTHREAD_MUTEX_INITIALIZER;
-    pthread_mutex_lock(&klog_mu);
+    // 真线程后必须串行化（否则多线程 fprintf 会互相穿插）。**必须递归锁**：
+    // 万一某线程在写日志时崩了、故障处理器（gate_dump_fault）又要写日志，
+    // 非递归锁会把它自己锁死 ⇒ 整份日志从那一刻静默（2026-10-18 现场嫌疑之一）。
+    pthread_once(&g_klog_once, klog_mu_init);
+    pthread_mutex_lock(&g_klog_mu);
     fprintf(g_k_log, "[阶段 %s][T%ld] ", g_k_stage, (long)gettid());
     va_list ap; va_start(ap, fmt);
     vfprintf(g_k_log, fmt, ap);
     va_end(ap);
     fflush(g_k_log);
-    pthread_mutex_unlock(&klog_mu);
+    pthread_mutex_unlock(&g_klog_mu);
 }
 static volatile int g_k_hits;
 static uint64_t g_k_hit_lr[16];
@@ -1821,6 +1833,22 @@ static uint64_t hook_e12(uint64_t *f) {   // 销毁入口 0xa01be8：x0 = mgr，
     }
     return 0;
 }
+// ★ 池注册体内 / mgr 构造尾部的定位钩（2026-10-18）：真机现场「日志停在池注册入口之后、
+//   内部 memcpy 之前」两轮完全一致 ⇒ 在注册体入口与构造尾部各放一枪，把区间切成两段：
+//   若 e13 到、e14 不到 ⇒ 卡在注册体内；若 e14 到 ⇒ 卡在更后面。
+static int g_n_e13, g_n_e14;
+static uint64_t hook_e13(uint64_t *f) {   // 注册体 0xa01928：x0 = mgr，x1 = 记录源
+    if (++g_n_e13 <= 4)
+        klog("[钉子8] 注册体 0xa01928：mgr=%#llx 记录源=%#llx\n",
+             (unsigned long long)f[FR_X0], (unsigned long long)f[FR_X1]);
+    return 0;
+}
+static uint64_t hook_e14(uint64_t *f) {   // mgr 构造尾部 0xa00d4c（注册之后的解锁点）
+    (void)f;                              // 该点 x19=this 不在帧里（桩只存 x0-x17/x29/x30）
+    if (++g_n_e14 <= 4)
+        klog("[钉子8] 构造尾 0xa00d4c 到达（注册已返回、准备解锁）\n");
+    return 0;
+}
 // ===== 替换式安装器：宿主替函数干活（返回值经 x0 带回），**原实现一条都不执行** =====
 // ⚠ 早先这里把桩的"回跳槽"填成 `b 站点+4`——被替换的是**函数入口**，站点+4 就是原实现的
 //   第二条指令，于是变成"宿主跑完、原实现接着跑"（双执行）：首条 stp 被跳过 ⇒ 栈帧少 0x20、
@@ -2118,6 +2146,9 @@ static void exp_k(const char *files_dir, char *out, size_t cap, size_t *used) {
         k_install_hook(img, 0x9fdccc, (void *)hook_e10, "钉子8 运行转发器 0x9fdccc 入口");
         k_install_hook(img, 0xa01fe0, (void *)hook_e11, "钉子8 runner 入口 0xa01fe0（链表遍历）");
         k_install_hook(img, 0xa01be8, (void *)hook_e12, "钉子8 销毁入口 0xa01be8（数组 dump）");
+        // ★ 注册体/构造尾定位钩（见 hook_e13/e14 注释）
+        k_install_hook(img, 0xa01928, (void *)hook_e13, "钉子8 注册体 0xa01928");
+        k_install_hook(img, 0xa00d4c, (void *)hook_e14, "钉子8 构造尾 0xa00d4c");
         k_hook_all_branchers(img, 0xa1d8e0, (void *)hook_s1d8e0, "站点→0xa1d8e0", 64);
         k_hook_all_branchers(img, 0xa08e94, (void *)hook_any_site, "站点→构造器 0xa08e94", 200);
         // 诊断 sead 单例查找 0xa0913c 的分支路径（见 hook_lk_* 处注释）
