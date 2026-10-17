@@ -2548,6 +2548,26 @@ static void k_fake_heap_install(uint8_t *img) {
          (void *)&g_fake_heap, (void *)&g_fake_vt);
 }
 
+static int g_n_e28;
+static uint64_t hook_e28(uint64_t *f) {
+    // ★ 挂的是 worker **0xa051c4**（不是 0xa05110——后者只是"创建/取单例"：
+    //   里面 bl 0x9f3464 分配 0x7c8 字节、bl 0xa08ef4 构造，然后返回那个单例）。
+    //   崩点 0xa05324 在 worker 里：`mov x23, x2`（第 3 个参数）随后 `ldr w8,[x23,#8]`。
+    //   这里把 4 个入参与调用者打出来，看"是谁把 0 传进来的"。
+    if (++g_n_e28 <= 12) {
+        uint64_t base = (uint64_t)(uintptr_t)g_k_m.base;
+        uint64_t lr = f[FR_X30];
+        uint64_t lo = (lr >= base && lr < base + DM_IMG_MAIN_END) ? lr - base : 0;
+        // 帧下标：FR_X0=0/FR_X1=1/FR_X2=2，FR_NZCV=18/FR_X29=20/FR_X30=21/FR_SITE=22
+        // ⇒ x3..x17 就是 3..17（没有专门宏，直接用下标）
+        klog("[建对象] worker 0xa051c4#%d：x0=%#llx x1=%#llx **x2=%#llx** w3=%#llx 调用者=+%#llx\n",
+             g_n_e28, (unsigned long long)f[FR_X0], (unsigned long long)f[FR_X1],
+             (unsigned long long)f[FR_X2], (unsigned long long)f[3],
+             (unsigned long long)lo);
+    }
+    return 0;
+}
+
 // ===== 替换式安装器：宿主替函数干活（返回值经 x0 带回），**原实现一条都不执行** =====
 // ⚠ 早先这里把桩的"回跳槽"填成 `b 站点+4`——被替换的是**函数入口**，站点+4 就是原实现的
 //   第二条指令，于是变成"宿主跑完、原实现接着跑"（双执行）：首条 stp 被跳过 ⇒ 栈帧少 0x20、
@@ -2893,6 +2913,7 @@ static void exp_k(const char *files_dir, char *out, size_t cap, size_t *used) {
         // 决定性挂点：`mov x22, x0`（x22==0 ⇒ 跳过 7 个初始化直接进主循环）
         k_install_hook(img, 0x73557c, (void *)hook_e26, "关键 x22 取值 0x73557c");
         k_install_hook(img, 0x7355a8, (void *)hook_e27, "对照 cbz 未跳则命中 0x7355a8");
+        k_install_hook(img, 0xa051c4, (void *)hook_e28, "建对象 worker 0xa051c4（看 x2 是谁传的 0）");
         g_nplt = 0; g_plt_calls = 0;
         for (uint64_t off = 0; off + 24 <= DT_PLTRELSZ; off += 24) {
             uint64_t r_off  = *(uint64_t *)(img + DT_JMPREL + off);
