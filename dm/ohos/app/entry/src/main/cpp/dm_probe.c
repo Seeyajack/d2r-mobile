@@ -7,6 +7,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <hilog/log.h>
+#include <pthread.h>
 #include <setjmp.h>
 #include <signal.h>
 #include <stdarg.h>
@@ -881,11 +882,15 @@ static void klog(const char *fmt, ...) {
     if (!g_k_log) return;
     // 带线程 ID：游戏有多个线程（探针主线程 / sead 任务线程 / Havok 物理工作线程）都在打日志，
     // 没有 tid 分不清哪行是谁写的（2026-10-18 加：判读主线程卡在哪必需）。
+    // 真线程后必须串行化：否则多线程的 fprintf 会互相穿插、把行撕成两半。
+    static pthread_mutex_t klog_mu = PTHREAD_MUTEX_INITIALIZER;
+    pthread_mutex_lock(&klog_mu);
     fprintf(g_k_log, "[阶段 %s][T%ld] ", g_k_stage, (long)gettid());
     va_list ap; va_start(ap, fmt);
     vfprintf(g_k_log, fmt, ap);
     va_end(ap);
     fflush(g_k_log);
+    pthread_mutex_unlock(&klog_mu);
 }
 static volatile int g_k_hits;
 static uint64_t g_k_hit_lr[16];
@@ -955,16 +960,65 @@ static uint64_t g_thread_shadow[DM_THREAD_SHADOW_QWORDS];
 // 注：槽号目前只有 0（注入的上下文对象 [0x88] 为 0），故一个影子对象够用。
 static uint64_t g_tls_shadow[0x40];             // 0x200 字节，覆盖到 [+0xb0]
 
-// ── nn::os 互斥量：深跑是**单线程**的，所以锁永远无竞争 ──
-// 语义做成最小可用：TryLockMutex 抢到就返 1；Lock/Unlock 维护同一个标志。
-// 为什么必须做：不实现时一律返 0，游戏把 0 当"没锁上"⇒ 死等（真机见过 136 万次轮询 + TryLockMutex 刷屏）。
+// ── 真实线程（2026-10-18）：之前 CreateThread/StartThread 完全没实现 ⇒ 游戏所有"线程"在
+//    单线程上内联跑 ⇒ **子系统工作线程压根不存在 ⇒ 它们的任务永远不产生 ⇒ sead 主循环空转**
+//    （真机实证：28811 行日志只有两个 tid；主循环回调 633 万次却无事可做）。
+//    这里用 pthread 真建线程：ThreadType* ↔ 线程槽 映射表，StartThread 用蹦床调 entry(arg)。
+//    ⚠ 副作用：真线程后，互斥量必须是真的、TLS 必须按线程分开、日志必须串行化。
+#define DM_THREAD_MAX 16
+typedef struct {
+    uint64_t game;              // 游戏侧 ThreadType*（0 = 空槽）
+    pthread_t tid;              // 宿主线程
+    void (*entry)(void *);
+    void *arg;
+    volatile int started;
+    int prio, core_mask;
+    char name[24];              // SetThreadName 存的线程名（pthread_setname_np 用）
+    uint64_t id;                // 游戏侧线程号（GetThreadId 用；稳定、不复用）
+} dm_thread_t;
+static dm_thread_t g_thr[DM_THREAD_MAX];
+static pthread_mutex_t g_thr_mu = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t g_thr_id_next = 1;
+static int thr_find_by_game(uint64_t game) {
+    for (int i = 0; i < DM_THREAD_MAX; i++) if (g_thr[i].game == game) return i;
+    return -1;
+}
+static int thr_find_by_self(void) {
+    pthread_t me = pthread_self();
+    for (int i = 0; i < DM_THREAD_MAX; i++)
+        if (g_thr[i].game && g_thr[i].started && pthread_equal(g_thr[i].tid, me)) return i;
+    return -1;
+}
+static void *thr_trampoline(void *p) {
+    dm_thread_t *t = (dm_thread_t *)p;
+    t->entry(t->arg);           // 游戏的线程体
+    return NULL;
+}
+
+// ── 线程局部存储：每个宿主线程一份 ──
+// 之前所有线程共享一个影子对象（g_tls_shadow），真线程后会互相串数据 ⇒ 改为 _Thread_local。
+// 语义保留：某槽没被 SetTlsValue 设过时，slot 0 仍回落到影子对象（历史行为，别处依赖它）。
+#define DM_TLS_MAX 16
+static _Thread_local uint64_t g_tls_val[DM_TLS_MAX];
+static int g_tls_slot_next;     // AllocateTlsSlot 发号
+
+// ── nn::os 互斥量：**真 pthread_mutex**（真线程后必须有真互斥）──
+// 注：游戏自己的快路径是内联原子操作（CPU 指令，本来就是真的）；这里管 PLT 上的三条调用。
 #define DM_MUTEX_MAX 64
-static void *g_mtx[DM_MUTEX_MAX];
-static int    g_mtx_locked[DM_MUTEX_MAX];
-static int mtx_slot(void *m) {
-    for (int i = 0; i < DM_MUTEX_MAX; i++) if (g_mtx[i] == m) return i;
-    for (int i = 0; i < DM_MUTEX_MAX; i++) if (!g_mtx[i]) { g_mtx[i] = m; return i; }
-    return 0;
+static void *g_mtx_key[DM_MUTEX_MAX];
+static pthread_mutex_t g_mtx_impl[DM_MUTEX_MAX];
+static pthread_mutex_t g_mtx_reg = PTHREAD_MUTEX_INITIALIZER;   // 登记表自身的锁
+static pthread_mutex_t *mtx_get(void *m) {
+    pthread_mutex_lock(&g_mtx_reg);
+    for (int i = 0; i < DM_MUTEX_MAX; i++) if (g_mtx_key[i] == m) { pthread_mutex_unlock(&g_mtx_reg); return &g_mtx_impl[i]; }
+    for (int i = 0; i < DM_MUTEX_MAX; i++) if (!g_mtx_key[i]) {
+        g_mtx_key[i] = m;
+        pthread_mutex_init(&g_mtx_impl[i], NULL);
+        pthread_mutex_unlock(&g_mtx_reg);
+        return &g_mtx_impl[i];
+    }
+    pthread_mutex_unlock(&g_mtx_reg);
+    return &g_mtx_impl[0];      // 表满：退化（不该发生）
 }
 
 static uint64_t plt_stub(void) {
@@ -995,29 +1049,120 @@ static uint64_t plt_stub(void) {
             klog("[服务] GetHostArgv → argv[0]=main\n");
             return (uint64_t)(uintptr_t)g_host_argv;
         }
-        // nn::os::GetCurrentThread —— 返回线程影子对象（见 g_thread_shadow 处的注释）。
-        // 真机实证：不实现它 ⇒ 调用者拿到 0 ⇒ 0xa1d8e0 在 0xa1d94c 读 [0+0x58] 崩。
+        // ═══ 线程 / TLS / 互斥（2026-10-18 改造：真 pthread）═══
+        // nn::os::CreateThread(ThreadType*, entry, arg, stack, stack_size, prio)
+        if (!strcmp(nm, "_ZN2nn2os12CreateThreadEPNS0_10ThreadTypeEPFvPvES3_S3_mi")) {
+            pthread_mutex_lock(&g_thr_mu);
+            int slot = -1;
+            for (int i = 0; i < DM_THREAD_MAX; i++)
+                if (!g_thr[i].game) { slot = i; break; }
+            if (slot >= 0) {
+                memset(&g_thr[slot], 0, sizeof g_thr[slot]);
+                g_thr[slot].game = a0;
+                g_thr[slot].entry = (void (*)(void *))(uintptr_t)a1;
+                g_thr[slot].arg = (void *)(uintptr_t)a2;
+                g_thr[slot].prio = 16;
+                g_thr[slot].id = g_thr_id_next++;
+            }
+            pthread_mutex_unlock(&g_thr_mu);
+            klog("[线程] CreateThread：类型=%#llx 入口=%#llx 参数=%#llx → 槽 %d\n",
+                 (unsigned long long)a0, (unsigned long long)a1,
+                 (unsigned long long)a2, slot);
+            return slot >= 0 ? 0 : 1;      // 0 = 成功
+        }
+        // nn::os::StartThread(ThreadType*) —— 真建宿主线程，蹦床调 entry(arg)
+        if (!strcmp(nm, "_ZN2nn2os11StartThreadEPNS0_10ThreadTypeE")) {
+            pthread_mutex_lock(&g_thr_mu);
+            int slot = thr_find_by_game(a0);
+            int ok = -1;
+            if (slot >= 0 && !g_thr[slot].started) {
+                g_thr[slot].started = 1;
+                ok = pthread_create(&g_thr[slot].tid, NULL, thr_trampoline, &g_thr[slot]);
+                if (ok != 0) g_thr[slot].started = 0;
+            } else if (slot >= 0) ok = 0;      // 已启动：幂等
+            pthread_mutex_unlock(&g_thr_mu);
+            klog("[线程] StartThread：类型=%#llx 槽 %d → %s\n",
+                 (unsigned long long)a0, slot, ok == 0 ? "已启动" : "失败");
+            return ok == 0 ? 0 : 1;
+        }
+        // nn::os::SetThreadName(ThreadType*, const char*)
+        if (!strcmp(nm, "_ZN2nn2os13SetThreadNameEPNS0_10ThreadTypeEPKc")) {
+            pthread_mutex_lock(&g_thr_mu);
+            int slot = thr_find_by_game(a0);
+            if (slot >= 0 && a1) {
+                snprintf(g_thr[slot].name, sizeof g_thr[slot].name, "%s", (const char *)(uintptr_t)a1);
+                if (g_thr[slot].started) pthread_setname_np(g_thr[slot].tid, g_thr[slot].name);
+            }
+            pthread_mutex_unlock(&g_thr_mu);
+            klog("[线程] SetThreadName：类型=%#llx → 「%s」\n",
+                 (unsigned long long)a0, a1 ? (const char *)(uintptr_t)a1 : "?");
+            return 0;
+        }
+        // nn::os::GetThreadId(const ThreadType*)
+        if (!strcmp(nm, "_ZN2nn2os11GetThreadIdEPKNS0_10ThreadTypeE")) {
+            pthread_mutex_lock(&g_thr_mu);
+            int slot = thr_find_by_game(a0);
+            uint64_t id = slot >= 0 ? g_thr[slot].id : 0;
+            pthread_mutex_unlock(&g_thr_mu);
+            return id ? id : 1;            // 主线程等未登记者给 1
+        }
+        // nn::os::GetCurrentThread —— 已启动的游戏线程回它自己的 ThreadType；其余回影子
         if (!strcmp(nm, "_ZN2nn2os16GetCurrentThreadEv")) {
-            klog("[服务] GetCurrentThread → %p（宿主影子 ThreadType）\n", (void *)&g_thread_shadow[0]);
+            int slot = thr_find_by_self();
+            if (slot >= 0) return g_thr[slot].game;
             return (uint64_t)(uintptr_t)&g_thread_shadow[0];
         }
-        // nn::os::GetTlsValue —— 返回线程局部存储的影子对象（见 g_tls_shadow 处注释）。
-        // 真机实证：不实现它 ⇒ 0xa0e2f8 走兜底读到 0 ⇒ sead::ThreadMgr 查找失败 ⇒ 崩在 0x9fe2ec。
+        // nn::os::AllocateTlsSlot(TlsSlot*, void(*)(void*)) —— 发号（u32）
+        if (!strcmp(nm, "_ZN2nn2os15AllocateTlsSlotEPNS0_7TlsSlotEPFvmE")) {
+            int slot = g_tls_slot_next++;
+            if (a0) *(uint32_t *)(uintptr_t)a0 = (uint32_t)slot;
+            klog("[线程] AllocateTlsSlot → 槽 %d\n", slot);
+            return 0;
+        }
+        // nn::os::SetTlsValue(TlsSlot, uintptr_t) / GetTlsValue(TlsSlot) —— 按线程分开
+        if (!strcmp(nm, "_ZN2nn2os11SetTlsValueENS0_7TlsSlotEm")) {
+            if ((uint32_t)a0 < DM_TLS_MAX) g_tls_val[(uint32_t)a0] = a1;
+            return 0;
+        }
         if (!strcmp(nm, "_ZN2nn2os11GetTlsValueENS0_7TlsSlotE")) {
+            uint32_t s = (uint32_t)a0;
+            if (s < DM_TLS_MAX && g_tls_val[s]) return g_tls_val[s];
+            // 未设过：slot 0 回落到影子对象（历史行为：游戏拿 [+0xb0] 当分配器对象）
             return (uint64_t)(uintptr_t)&g_tls_shadow[0];
         }
-        // nn::os 互斥量（单线程 ⇒ 无竞争；见 mtx_slot 处注释）
+        // 核掩码 / 栈信息 / 优先级 —— 影子语义，别让游戏拿到 0 而误判"没有可用核"
+        if (!strcmp(nm, "_ZN2nn2os26GetThreadAvailableCoreMaskEv")) return 0xF;
+        if (!strcmp(nm, "_ZN2nn2os20GetCurrentCoreNumberEv")) return 0;
+        if (!strcmp(nm, "_ZN2nn2os19GetCurrentStackInfoEPmS1_")) {
+            if (a0) *(uint64_t *)(uintptr_t)a0 = 0;
+            if (a1) *(uint64_t *)(uintptr_t)a1 = 0x100000;   // 1 MB
+            return 0;
+        }
+        if (!strcmp(nm, "_ZN2nn2os17GetThreadPriorityEPKNS0_10ThreadTypeE")) return 16;
+        if (!strcmp(nm, "_ZN2nn2os20ChangeThreadPriorityEPNS0_10ThreadTypeEi")) {
+            pthread_mutex_lock(&g_thr_mu);
+            int slot = thr_find_by_game(a0);
+            if (slot >= 0) g_thr[slot].prio = (int)(int32_t)a1;
+            pthread_mutex_unlock(&g_thr_mu);
+            return 0;
+        }
+        if (!strcmp(nm, "_ZN2nn2os17SetThreadCoreMaskEPNS0_10ThreadTypeEim")) {
+            pthread_mutex_lock(&g_thr_mu);
+            int slot = thr_find_by_game(a0);
+            if (slot >= 0) g_thr[slot].core_mask = (int)(int32_t)a1;
+            pthread_mutex_unlock(&g_thr_mu);
+            return 0;
+        }
+        // nn::os 互斥量 —— 真 pthread_mutex
         if (!strcmp(nm, "_ZN2nn2os12TryLockMutexEPNS0_9MutexTypeE")) {
-            int s = mtx_slot((void *)(uintptr_t)a0);
-            if (!g_mtx_locked[s]) { g_mtx_locked[s] = 1; return 1; }
-            return 0;                      // 已锁：让调用方走"重试/等待"分支
+            return pthread_mutex_trylock(mtx_get((void *)(uintptr_t)a0)) == 0 ? 1 : 0;
         }
         if (!strcmp(nm, "_ZN2nn2os9LockMutexEPNS0_9MutexTypeE")) {
-            g_mtx_locked[mtx_slot((void *)(uintptr_t)a0)] = 1;
+            pthread_mutex_lock(mtx_get((void *)(uintptr_t)a0));
             return 0;
         }
         if (!strcmp(nm, "_ZN2nn2os11UnlockMutexEPNS0_9MutexTypeE")) {
-            g_mtx_locked[mtx_slot((void *)(uintptr_t)a0)] = 0;
+            pthread_mutex_unlock(mtx_get((void *)(uintptr_t)a0));
             return 0;
         }
         // ★ 关键：C++ 静态局部对象的初始化守卫。返回 1 = "由我来初始化"；
@@ -1960,6 +2105,11 @@ static void exp_k(const char *files_dir, char *out, size_t cap, size_t *used) {
     appf(out, cap, used, "  钉子8 runner 链：激活检查 %d 次 / 运行转发器 %d 次 / "
                          "runner 入口 %d 次 / 销毁 %d 次（明细见日志）\n",
          g_n_e9, g_n_e10, g_n_e11, g_n_e12);
+    {
+        int n = 0;
+        for (int i = 0; i < DM_THREAD_MAX; i++) if (g_thr[i].game) n++;
+        appf(out, cap, used, "  线程：游戏建了 %d 个（明细见日志 [线程] 行）\n", n);
+    }
     appf(out, cap, used, "  %s 启动链跑完并返回（rv=%#llx）；门被命中 %d 次%s\n",
          g_k_faulted ? "✗" : "✓", (unsigned long long)g_k_rv, g_k_hits,
          g_k_faulted ? "（中途崩，崩点见 dm_run_test.log）" : "");

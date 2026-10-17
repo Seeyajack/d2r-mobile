@@ -64,7 +64,7 @@ struct Index {
       .fontColor('#5F5E5A')
       .width('100%')
 
-    Button('执行链探针（G 装载 / H 门回路 / I 真实执行 / J 门+执行 / K 启动链）')
+    Button('全链探针（装载 → 静态初始化 → 启动链 → nnMain 全程）')
       .width('100%')
       .onClick(() => {
         try {
