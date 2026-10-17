@@ -1918,6 +1918,15 @@ static uint64_t hook_e8(uint64_t *f) {   // G 入口 0xa01d70：x0 = mgr（读�
              g_n_e8, (unsigned long long)m8, (unsigned long long)pool8,
              (unsigned long long)node8, (unsigned long long)task8,
              (unsigned long long)lab, (unsigned long long)lr_off);
+        // ★ Task #16：G 的惰性创建路径末尾会 `if (mgr[0x50]) mgr[0x50]->虚表[0x18](1,1)`——
+        //   任务建好后通知"观察者"。真机上它恒 0，通知整条跳过。这里把 0x50 与 0x48（通知数组）
+        //   一起打出来：确认到底是"观察者缺失"还是"数组也空"。
+        if (m8) {
+            uint64_t obs = *(const uint64_t *)(uintptr_t)(m8 + 0x50);
+            uint64_t arr = *(const uint64_t *)(uintptr_t)(m8 + 0x48);
+            klog("[任务]   mgr[0x50]观察者=%#llx  mgr[0x48]通知数组=%#llx\n",
+                 (unsigned long long)obs, (unsigned long long)arr);
+        }
         // 额外 dump 任务 +0x80..0xb8（销毁流的通知数组在 +0x88）：看它在激活前是否已填。
         if (task8) {
             uint64_t *a = (uint64_t *)(uintptr_t)(task8 + 0x80);
@@ -2076,6 +2085,73 @@ static uint64_t hook_e17(uint64_t *f) {   // 0xa01924 处：x0 = &mgr[8]（锁�
         uint64_t w1 = o ? *(const uint64_t *)(uintptr_t)(o + 8) : 0;
         klog("[钉子8] 注册体上锁前 0xa01924：锁对象=%#llx [0]=%#llx [8]=%#llx\n",
              (unsigned long long)o, (unsigned long long)w0, (unsigned long long)w1);
+    }
+    return 0;
+}
+
+// ===== Task #16：追「第一个任务由谁创建」（离线结论见进度文档 §20）=====
+// 背景：sead 主循环每帧只做 lock → G(取任务) → runner(跑任务) → unlock → 睡。
+// G 只有在池里**已经有登记项**时才会创建/激活任务；而池的唯一填充入口是 0xa018f8，
+// 它的调用者里只有"创建路径"和"任务自建子任务"两条是真来源。
+// 建任务的 API 只有两个：0xa0143c（立即，6 个调用点）和 0x9fe314（虚调用，0 个直接调用点）。
+// 而 0x726xxx 那三个疑似"连建根任务"的站点，全映像没有任何 bl/b 能到达 ⇒ 只能运行时抓。
+//
+// 两个探针：
+//   ① 0xa0143c 入口：谁调的（x30−基址）、mgr、参数结构体指针；
+//   ② 0xa01490（`bl 0xa01790` 的下一条）：此时 **x0 = 刚创建出来的任务**，
+//      顺手把 [task]（虚表指针）记下来，供离线反查类名（vtable−0x10 → typeinfo → 名字串）。
+static int g_n_e18, g_n_e19;
+// 从**我们自己 mmap 的映像**里读一段可打印 ASCII（最长 48 字符）。
+// 为什么不用 RTTI 反查类名：实测映像里 `N4sead` 出现 0 次、`typeinfo for` 0 次
+// ⇒ 零售版把 RTTI 名字剥了，vtable−0x10 那条路走不通。改读"创建参数里的名字串"。
+// 安全性：只读 [base, base+DM_IMG_MAIN_END) 这一段（我们自己的映射，必然可读）。
+static int k_img_str(uint64_t addr, char *out, size_t cap) {
+    uint64_t base = (uint64_t)(uintptr_t)g_k_m.base;
+    if (addr < base || addr >= base + DM_IMG_MAIN_END) return 0;
+    const char *p = (const char *)(uintptr_t)addr;
+    size_t n = 0;
+    while (n < 48 && n + 1 < cap) {
+        char c = p[n];
+        if (!c) break;
+        if (c < 0x20 || c > 0x7e) return 0;
+        n++;
+    }
+    if (n < 3) return 0;
+    memcpy(out, p, n);
+    out[n] = '\0';
+    return 1;
+}
+static uint64_t hook_e18(uint64_t *f) {   // 0xa0143c：CreateTaskImmediate(mgr, param)
+    if (++g_n_e18 <= 12 || (g_n_e18 % 200) == 0) {
+        uint64_t base = (uint64_t)(uintptr_t)g_k_m.base;
+        uint64_t lr = f[FR_X30];
+        uint64_t lr_off = (lr >= base && lr < base + DM_IMG_MAIN_END) ? lr - base : 0;
+        uint64_t par = f[FR_X1];
+        klog("[任务] CreateTaskImmediate#%d 调用者=+%#llx mgr=%#llx 参数=%#llx\n",
+             g_n_e18, (unsigned long long)lr_off,
+             (unsigned long long)f[FR_X0], (unsigned long long)par);
+        // 参数结构体（0xb0 字节）头 8 个 qword 里凡是"指向映像内的字符串"，都打出来——
+        // 任务名几乎一定在里面（这是唯一不依赖 RTTI 的识别手段）。
+        if (par) {
+            for (int i = 0; i < 8; i++) {
+                uint64_t v = *(const uint64_t *)(uintptr_t)(par + (uint64_t)i * 8);
+                char s[64];
+                if (k_img_str(v, s, sizeof s))
+                    klog("[任务]   参数[%d]=%#llx 「%s」\n", i, (unsigned long long)v, s);
+            }
+        }
+    }
+    return 0;
+}
+static uint64_t hook_e19(uint64_t *f) {   // 0xa01490：刚建好的任务在 x0
+    if (++g_n_e19 <= 12) {
+        uint64_t t = f[FR_X0];
+        uint64_t vt = t ? *(const uint64_t *)(uintptr_t)t : 0;
+        uint64_t base = (uint64_t)(uintptr_t)g_k_m.base;
+        uint64_t vt_off = (vt >= base && vt < base + DM_IMG_MAIN_END) ? vt - base : 0;
+        uint64_t st = t ? *(const uint32_t *)(uintptr_t)(t + 0xb8) : 0;
+        klog("[任务] 建出任务=%#llx 虚表=+%#llx 状态=%llu\n",
+             (unsigned long long)t, (unsigned long long)vt_off, (unsigned long long)st);
     }
     return 0;
 }
@@ -2385,6 +2461,9 @@ static void exp_k(const char *files_dir, char *out, size_t cap, size_t *used) {
         k_install_hook(img, 0xf35374, (void *)hook_e15, "日志 添加 0xf35374");
         k_install_hook(img, 0xf35400, (void *)hook_e16, "日志 遍历 0xf35400");
         k_install_hook(img, 0xa01924, (void *)hook_e17, "钉子8 注册体上锁前 0xa01924");
+        // ★ Task #16：第一个任务由谁创建（见 hook_e18/e19 注释；离线结论见进度文档 §20）
+        k_install_hook(img, 0xa0143c, (void *)hook_e18, "任务 CreateTaskImmediate 0xa0143c 入口");
+        k_install_hook(img, 0xa01490, (void *)hook_e19, "任务 建出任务回填 0xa01490（x0=新任务）");
         k_hook_all_branchers(img, 0xa1d8e0, (void *)hook_s1d8e0, "站点→0xa1d8e0", 64);
         k_hook_all_branchers(img, 0xa08e94, (void *)hook_any_site, "站点→构造器 0xa08e94", 200);
         // 诊断 sead 单例查找 0xa0913c 的分支路径（见 hook_lk_* 处注释）
