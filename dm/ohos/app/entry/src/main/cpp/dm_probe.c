@@ -1881,19 +1881,20 @@ static uint64_t hook_e6(uint64_t *f) {   // 管理器工厂入口 0xa00f8c：x0 
     }
     return 0;
 }
-static uint64_t hook_e7(uint64_t *f) {   // 池注册入口 0xa018f8：x0 = mgr，x1 = mgr+0x58（记录源）
+static uint64_t hook_e7(uint64_t *f) {   // 池注册入口 0xa018f8：x0 = mgr，x1 = 记录源（真机实测 = mgr+0x130）
     if (++g_n_e7 <= 8) {
         uint64_t r = f[FR_X1];
-        uint64_t r0 = 0, r8 = 0, r70 = 0;
-        if (r) {
-            r0  = *(const uint64_t *)(uintptr_t)r;
-            r8  = *(const uint64_t *)(uintptr_t)(r + 8);
-            r70 = *(const uint64_t *)(uintptr_t)(r + 0x70);
-        }
-        klog("[钉子8] 池注册 0xa018f8：mgr=%#llx 记录源=%#llx [0]=%#llx [8]=%#llx [0x70]=%#llx x2=%#llx\n",
+        uint64_t q[8] = {0};
+        if (r) for (int i = 0; i < 8; i++) q[i] = *(const uint64_t *)(uintptr_t)(r + (uint64_t)i * 8);
+        klog("[钉子8] 池注册 0xa018f8：mgr=%#llx 记录源=%#llx（mgr+%#llx） x2=%#llx\n",
              (unsigned long long)f[FR_X0], (unsigned long long)r,
-             (unsigned long long)r0, (unsigned long long)r8, (unsigned long long)r70,
-             (unsigned long long)f[FR_X2]);
+             (unsigned long long)(r - f[FR_X0]), (unsigned long long)f[FR_X2]);
+        // 记录头 8 个 qword 全打——真机 5122 行那次 [0]/[8]/[0x70] 全是 0，
+        // 这次看清整个头部：如果里面有"名字串指针"却没值，就能确认"该填没填"。
+        klog("[钉子8]   记录头：%#llx %#llx %#llx %#llx %#llx %#llx %#llx %#llx\n",
+             (unsigned long long)q[0], (unsigned long long)q[1], (unsigned long long)q[2],
+             (unsigned long long)q[3], (unsigned long long)q[4], (unsigned long long)q[5],
+             (unsigned long long)q[6], (unsigned long long)q[7]);
     }
     return 0;
 }
@@ -2152,6 +2153,122 @@ static uint64_t hook_e19(uint64_t *f) {   // 0xa01490：刚建好的任务在 x0
         uint64_t st = t ? *(const uint32_t *)(uintptr_t)(t + 0xb8) : 0;
         klog("[任务] 建出任务=%#llx 虚表=+%#llx 状态=%llu\n",
              (unsigned long long)t, (unsigned long long)vt_off, (unsigned long long)st);
+    }
+    return 0;
+}
+
+static int g_n_e20, g_n_e21;
+// 0xa0913c 是"按名字建/查管理器对象"的助手（x1 指向一个 {虚表?, 名字串} 结构）。
+// 真机日志 5100 行那次唯一的方法树创建就用了它，名字来自 0x1ba6xxx 那张表——
+// 那张表里全是 sead 的方法/管理器名：CalculateTask、RootCalc/SysCalc/AppCalc、
+// RootDraw/SysDraw/AppDraw/AppDrawFinal、sead::MethodTreeMgr / ThreadMgr / SystemManagers …
+// ⇒ 只要把"被请求的名字 + 拿到的结果"打出来，就知道哪一环在宿主上没建起来。
+static uint64_t hook_e20(uint64_t *f) {   // 0xa0913c 入口
+    if (++g_n_e20 <= 40) {
+        uint64_t st = f[FR_X1];
+        uint64_t nm = 0;
+        char s[64] = {0};
+        if (st) nm = *(const uint64_t *)(uintptr_t)(st + 8);
+        if (nm && k_img_str(nm, s, sizeof s)) { /* 拿到名字 */ }
+        klog("[名字] 建/查#%d 结构=%#llx 名字指针=%#llx 「%s」\n",
+             g_n_e20, (unsigned long long)st, (unsigned long long)nm, s);
+    }
+    return 0;
+}
+static uint64_t hook_e21(uint64_t *f) {   // 0x9fe380：刚拿到 0xa0913c 的返回值（x0）
+    if (++g_n_e21 <= 20) {
+        klog("[名字] 方法树创建结果 x0=%#llx（0 = 没建起来）\n", (unsigned long long)f[FR_X0]);
+    }
+    return 0;
+}
+// ⚠ 真机教训（np32）：只挂了 0xa0913c（thunk：`and w5,w5,#1` 后 b 到实体）→ **一行都没打**。
+//   全映像统计：`bl 0xa0913c` 102 处、`bl 0xa09144`（实体入口）26 处 ⇒ 这个 API 有**两个入口**，
+//   只挂一个必然漏。两个都挂，才能拿到完整的"按名字建对象"序列。
+static int g_n_e22;
+static uint64_t hook_e22(uint64_t *f) {   // 0xa09144：同一 API 的实体入口
+    if (++g_n_e22 <= 40) {
+        uint64_t st = f[FR_X1];
+        uint64_t nm = 0;
+        char s[64] = {0};
+        if (st) nm = *(const uint64_t *)(uintptr_t)(st + 8);
+        if (nm) k_img_str(nm, s, sizeof s);
+        klog("[名字] 实体入口#%d 结构=%#llx 名字=%#llx 「%s」\n",
+             g_n_e22, (unsigned long long)st, (unsigned long long)nm, s);
+    }
+    return 0;
+}
+// 0x9fe984 是 `SystemManagers::initialize()` 里"去建 ThreadMgr"的那一步（0x9fe984 → 0x9fe24c）。
+// 它命中 ⇒ 框架初始化确实走到这里；不命中 ⇒ 卡在更前面。
+static int g_n_e23;
+static uint64_t hook_e23(uint64_t *f) {
+    if (++g_n_e23 <= 6) klog("[框架] 0x9fe984：SystemManagers 初始化里要建 ThreadMgr\n");
+    return 0;
+}
+// 0xa112fc = 「往列表里塞 {节点, 名字}」的助手。7 棵方法树（RootCalc/SysCalc/AppCalc/
+// RootDraw/SysDraw/AppDraw/AppDrawFinal）就是靠它连续挂 7 次（见 0x9ff398–0x9ff430）。
+// 它被调几次、每次名字是什么，直接回答"方法树有没有挂上去"。
+static int g_n_e24;
+static uint64_t hook_e24(uint64_t *f) {
+    if (++g_n_e24 <= 40) {
+        uint64_t st = f[FR_X1];
+        uint64_t nm = st ? *(const uint64_t *)(uintptr_t)(st + 8) : 0;
+        char s[64] = {0};
+        if (nm) k_img_str(nm, s, sizeof s);
+        klog("[挂载] 0xa112fc#%d 目标=%#llx 名字指针=%#llx 「%s」\n",
+             g_n_e24, (unsigned long long)f[FR_X0], (unsigned long long)nm, s);
+    }
+    return 0;
+}
+static int g_n_e25;
+static uint64_t hook_e25(uint64_t *f) {   // 0x9ff3a0：7 棵树挂载段（纯 store，不喂寄存器）
+    if (++g_n_e25 <= 4) klog("[框架] 0x9ff3a0：进入「挂 7 棵方法树」这一段\n");
+    return 0;
+}
+
+// ===== 启动链追踪（Task #16 第三步）=====
+// 思路换档：前几轮都是"猜一个点、挂一个钩"，一次只回答一个是非题，太慢。
+// 这里把 **nnMain 里所有 bl 目标**按出现顺序一次性挂上，用同一个宿主函数（靠 f[FR_SITE] 区分站点）。
+// 一次跑测就能得到"初始化走到第几步、在哪一步之后断掉"的完整顺序图。
+// 站点顺序 = nnMain（0x735330）里 bl 的出现顺序（离线反汇编得到，见进度文档 §22/§23）。
+static const uint32_t g_boot_sites[] = {
+    0x9f3830, 0xf32228, 0xf326d4, 0x9fe234, 0xc4f3e4,
+    0x8115d4, 0x811730, 0x815254, 0xdaab74, 0xc4f2f4,
+    0xdaabc0, 0x9fc450, 0xa22508, 0xa2262c, 0xa03178,
+    0xa03224, 0xa025f0, 0xa026a0, 0xa2469c, 0x9fce0c,
+    0xa003f0, 0x9fe240, 0xa1e5f0, 0xa9cc4c,
+};
+static int g_n_boot;
+static uint64_t hook_boot(uint64_t *f) {
+    uint64_t base = (uint64_t)(uintptr_t)g_k_m.base;
+    uint64_t site = f[FR_SITE];
+    uint64_t so = (site >= base && site < base + DM_IMG_MAIN_END) ? site - base : site;
+    uint64_t lr = f[FR_X30];
+    uint64_t lo = (lr >= base && lr < base + DM_IMG_MAIN_END) ? lr - base : 0;
+    if (++g_n_boot <= 80)
+        klog("[启动链] #%d 进入 +%#llx（返回地址 +%#llx）\n",
+             g_n_boot, (unsigned long long)so, (unsigned long long)lo);
+    return 0;
+}
+// ★ 决定性挂点（2026-10-18）：nnMain 0x73557c 是 `mov x22, x0`——x0 就是后面那个
+//   `cbz x22, 0x735650` 的判断依据。为 0 就**跳过 7 个初始化调用**直接进主循环（真机已证）。
+//   x0 来自 0x1074b2c / 0x1074b50 两个"取单例 + 调其虚表[0x10]"的小函数，
+//   单例槽在 0x2289e60 / 0x2289e68。这里把"取值结果 + 两个单例槽 + 对象的虚表"一起打出来。
+static int g_n_e26;
+static uint64_t hook_e26(uint64_t *f) {
+    if (++g_n_e26 <= 8) {
+        uint64_t base = (uint64_t)(uintptr_t)g_k_m.base;
+        uint64_t v = f[FR_X0];
+        uint64_t s60 = *(const uint64_t *)(uintptr_t)(base + 0x2289e60);
+        uint64_t s68 = *(const uint64_t *)(uintptr_t)(base + 0x2289e68);
+        uint64_t vt = 0, fn10 = 0;
+        if (s60) {
+            vt = *(const uint64_t *)(uintptr_t)s60;
+            if (vt >= base && vt < base + DM_IMG_MAIN_END)
+                fn10 = *(const uint64_t *)(uintptr_t)(vt + 0x10);
+        }
+        klog("[关键] 0x73557c x0(=x22)=%#llx  单例[0x2289e60]=%#llx [0x2289e68]=%#llx 虚表=%#llx 虚表[0x10]=%#llx\n",
+             (unsigned long long)v, (unsigned long long)s60, (unsigned long long)s68,
+             (unsigned long long)vt, (unsigned long long)fn10);
     }
     return 0;
 }
@@ -2464,19 +2581,37 @@ static void exp_k(const char *files_dir, char *out, size_t cap, size_t *used) {
         // ★ Task #16：第一个任务由谁创建（见 hook_e18/e19 注释；离线结论见进度文档 §20）
         k_install_hook(img, 0xa0143c, (void *)hook_e18, "任务 CreateTaskImmediate 0xa0143c 入口");
         k_install_hook(img, 0xa01490, (void *)hook_e19, "任务 建出任务回填 0xa01490（x0=新任务）");
-        k_hook_all_branchers(img, 0xa1d8e0, (void *)hook_s1d8e0, "站点→0xa1d8e0", 64);
-        k_hook_all_branchers(img, 0xa08e94, (void *)hook_any_site, "站点→构造器 0xa08e94", 200);
-        // 诊断 sead 单例查找 0xa0913c 的分支路径（见 hook_lk_* 处注释）
-        k_install_hook(img, 0xa0919c, (void *)hook_lk_a, "查找路径 0xa0919c");
-        k_install_hook(img, 0xa091e4, (void *)hook_lk_b, "查找路径 0xa091e4");
-        k_install_hook(img, 0xa091dc, (void *)hook_lk_c, "查找路径 0xa091dc");
-        k_install_hook(img, 0xa092a0, (void *)hook_lk_d, "查找路径 0xa092a0");
-        k_install_hook(img, 0xa092a8, (void *)hook_lk_e, "查找路径 0xa092a8");
-        // 更细一层：0xa0e2f8 的入参与返回值（见 hook_dbA/hook_dbB 处注释）
-        k_install_hook(img, 0xa09184, (void *)hook_dbA, "诊断 0xa09184（调 0xa0e2f8）");
-        k_install_hook(img, 0xa0e330, (void *)hook_dbB, "诊断 0xa0e330（取值点之后）");
-        k_install_hook(img, 0xa0c1b0, (void *)hook_dbC, "诊断 0xa0c1b0（调 sead 助手前）");
-        k_install_hook(img, 0xa1d57c, (void *)hook_dbD, "诊断 0xa1d57c（sead 助手入口）");
+        // ★ Task #16 第二轮：名字级追踪（见 hook_e20/e21 注释）
+        k_install_hook(img, 0xa0913c, (void *)hook_e20, "名字 建/查管理器 0xa0913c 入口");
+        k_install_hook(img, 0x9fe380, (void *)hook_e21, "名字 方法树创建结果 0x9fe380");
+        k_install_hook(img, 0xa09144, (void *)hook_e22, "名字 建/查管理器 0xa09144 实体入口");
+        k_install_hook(img, 0x9fe984, (void *)hook_e23, "框架 SystemManagers 建 ThreadMgr 0x9fe984");
+        k_install_hook(img, 0xa112fc, (void *)hook_e24, "挂载 方法树列表 0xa112fc");
+        // ⚠ np34 教训：原来挂在 0x9ff398（`adrp x8,#0x1ba6000`）——那是**给后续指令喂寄存器**的位置，
+        //   宿主函数调用会破坏 caller-saved 的 x8，导致紧跟的 `add x8,x8,#0x891` 算出垃圾指针。
+        //   改挂 0x9ff3a0（`str x21,[x23,#0x350]`，纯 store，不喂任何寄存器给后续指令）。
+        k_install_hook(img, 0x9ff3a0, (void *)hook_e25, "框架 挂 7 棵方法树 0x9ff3a0（纯 store）");
+        // ⚠ 2026-10-18：洞容量 227 格、已用 218 ⇒ 快满了。下面两条 all_branchers 最多各占
+        //   64/200 格，且"找站点"的使命已经完成（钉子 #8 早已闭环）⇒ 暂时关闭，把格子让给
+        //   **启动链追踪**（一次拿到 nnMain 的完整调用顺序，比逐个微探针性价比高得多）。
+        // k_hook_all_branchers(img, 0xa1d8e0, (void *)hook_s1d8e0, "站点→0xa1d8e0", 64);
+        // k_hook_all_branchers(img, 0xa08e94, (void *)hook_any_site, "站点→构造器 0xa08e94", 200);
+        // 诊断 sead 单例查找 0xa0913c 的分支路径 —— 同样已完成使命，关掉腾格子。
+        // k_install_hook(img, 0xa0919c, (void *)hook_lk_a, "查找路径 0xa0919c");
+        // k_install_hook(img, 0xa091e4, (void *)hook_lk_b, "查找路径 0xa091e4");
+        // k_install_hook(img, 0xa091dc, (void *)hook_lk_c, "查找路径 0xa091dc");
+        // k_install_hook(img, 0xa092a0, (void *)hook_lk_d, "查找路径 0xa092a0");
+        // k_install_hook(img, 0xa092a8, (void *)hook_lk_e, "查找路径 0xa092a8");
+        // k_install_hook(img, 0xa09184, (void *)hook_dbA, "诊断 0xa09184（调 0xa0e2f8）");
+        // k_install_hook(img, 0xa0e330, (void *)hook_dbB, "诊断 0xa0e330（取值点之后）");
+        // k_install_hook(img, 0xa0c1b0, (void *)hook_dbC, "诊断 0xa0c1b0（调 sead 助手前）");
+        // k_install_hook(img, 0xa1d57c, (void *)hook_dbD, "诊断 0xa1d57c（sead 助手入口）");
+        // ★ 启动链追踪：nnMain 的 bl 目标按出现顺序全部挂上（一个宿主函数，靠 f[FR_SITE] 区分）。
+        //   目的：拿到"初始化走到第几步、在哪一步之后断掉"的完整顺序图。
+        for (size_t bi = 0; bi < sizeof g_boot_sites / sizeof g_boot_sites[0]; bi++)
+            k_install_hook(img, g_boot_sites[bi], (void *)hook_boot, "启动链");
+        // 决定性挂点：`mov x22, x0`（x22==0 ⇒ 跳过 7 个初始化直接进主循环）
+        k_install_hook(img, 0x73557c, (void *)hook_e26, "关键 x22 取值 0x73557c");
         g_nplt = 0; g_plt_calls = 0;
         for (uint64_t off = 0; off + 24 <= DT_PLTRELSZ; off += 24) {
             uint64_t r_off  = *(uint64_t *)(img + DT_JMPREL + off);
