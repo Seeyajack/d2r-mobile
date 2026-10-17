@@ -905,6 +905,27 @@ static void klog(const char *fmt, ...) {
     fflush(g_k_log);
     pthread_mutex_unlock(&g_klog_mu);
 }
+
+// ── NVN 最小空设备（2026-10-18）──
+// 真机实证（np20）：游戏只从 nvnBootstrapLoader 取**两个**名字：nvnDeviceInitialize /
+// nvnDeviceGetProcAddress；其余 NVN 函数全走 GetProcAddress 按名字取。
+// ⇒ 只要这两个真实现 + 一个按名字返回通用桩的 GetProcAddress，图形初始化就能继续往下走，
+//   同时把游戏用到的 NVN API 名字全部记进日志（Vulkan 版按这份清单排期）。
+// 参考实现：仓库 dm/gfx/nvn/hle_nvn.c（macOS/Metal 版为「强制接管 + 名字表 + 计数跳板」）。
+static int g_n_nvn_gpa;
+static uint64_t nvn_stub(void) { return 0; }     // 通用桩：有返回值的一律 0（void 调用无影响）
+static uint64_t nvn_dev_init(void *dev, const void *builder) {
+    (void)builder;
+    if (dev) *(uint64_t *)dev = 0x4E564E44ull;   // 'NVND' 魔数（不 memset：设备对象大小未知，防越界）
+    klog("[NVN] nvnDeviceInitialize → 1（空设备）\n");
+    return 1;                                     // NVNboolean 真 = 初始化成功
+}
+static uint64_t nvn_dev_gpa(void *dev, const char *name) {
+    (void)dev;
+    if (++g_n_nvn_gpa <= 120)
+        klog("[NVN] GetProcAddress(「%s」) → 通用桩\n", name ? name : "(null)");
+    return (uint64_t)(uintptr_t)&nvn_stub;
+}
 static volatile int g_k_hits;
 static uint64_t g_k_hit_lr[16];
 static volatile int g_k_faulted;
@@ -1269,6 +1290,18 @@ static uint64_t plt_stub(void) {
         }
         // 让出/等待类：真线程下 Yield 用 sched_yield
         if (!strcmp(nm, "_ZN2nn2os11YieldThreadEv")) { sched_yield(); return 0; }
+        // nvnBootstrapLoader —— NVN 图形驱动引导（图形栈大门，2026-10-18 到达）
+        // 真机实证：游戏只取两个名字（nvnDeviceInitialize / nvnDeviceGetProcAddress），
+        // 其余全走 GetProcAddress。⇒ 这里按名字分派到最小空设备（见 nvn_dev_init 注释）。
+        if (!strcmp(nm, "nvnBootstrapLoader")) {
+            const char *nvn = a0 ? (const char *)(uintptr_t)a0 : NULL;
+            static int n_nvn;
+            if (++n_nvn <= 40)
+                klog("[NVN] nvnBootstrapLoader(「%s」)\n", nvn ? nvn : "(null)");
+            if (nvn && !strcmp(nvn, "nvnDeviceInitialize")) return (uint64_t)(uintptr_t)&nvn_dev_init;
+            if (nvn && !strcmp(nvn, "nvnDeviceGetProcAddress")) return (uint64_t)(uintptr_t)&nvn_dev_gpa;
+            return (uint64_t)(uintptr_t)&nvn_stub;
+        }
         // ★ 关键：C++ 静态局部对象的初始化守卫。返回 1 = "由我来初始化"；
         // 返回 0 会被当成"别人已初始化"而跳过 ⇒ 全部静态单例没建、虚表为空（本轮崩因）。
         if (!strcmp(nm, "__cxa_guard_acquire")) { klog("[服务] __cxa_guard_acquire → 1（由我来初始化）\n"); return 1; }
@@ -1379,7 +1412,11 @@ static uint64_t mgr_method(void *self) {
 // 字段：[+0x10]=计数（0）、[+0x28]=上限（64）、[+0x18]=节点链表头。
 // 节点：>=0x20 字节，[+0]=下一节点。链表**必须非空**（空表会让它往地址 0 写）。
 #define LOG_POOL_N 64
-static uint64_t g_log_pool[LOG_POOL_N][4];      // 每节点 0x20 字节
+// 每节点 0x40 字节（2026-10-18 从 0x20 扩容）：离线解码游戏日志添加函数 0xf35374 得到
+// 节点布局 [0]=tick、[8]=消息串、[0x10]=链节点（0x9f3904 插入用，[link]=next/[link+8]=prev）、
+// [0x18]=0 ⇒ 至少 0x20；留一倍余量，排除"节点写越界污染相邻节点"的嫌疑（真机上见过
+// [node+8] 拿到低 32 位对、高 16 位 +0x200 的坏指针）。
+static uint64_t g_log_pool[LOG_POOL_N][8];      // 每节点 0x40 字节
 static uint64_t g_log_obj[8];
 static void k_inject_log(uint8_t *img) {
     for (int i = 0; i < LOG_POOL_N; i++)
