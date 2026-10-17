@@ -13,6 +13,7 @@
 #include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <time.h>
@@ -2284,6 +2285,85 @@ static uint64_t hook_e27(uint64_t *f) {
     return 0;
 }
 
+// ===== 影子「当前堆」（2026-10-18 01:05，用户批准方案 A）=====
+// 真机结论（进度文档 §24/§25）：nnMain 在 0x7355a4 `cbz x22, 0x735650`，
+// 而 x22 来自两个"取当前堆"的 getter（0x1074b2c / 0x1074b50）：
+//     x8 = *(0x2289e60) → base+0x232f9e8；x0 = *(base+0x232f9e8)；
+//     if (!x0) return 0;  return (*(*(x0)+0x10))(x0);
+// 这两个变量在文件里是 0、全映像没有任何代码写它们 ⇒ 宿主上恒 0 ⇒
+// x22==0 ⇒ nnMain 跳过 7 个初始化（a22508/a2262c/a03178/a03224/a025f0/a026a0/a2469c）直接进主循环。
+//
+// 修法（方案 A）：造一个最小"堆对象"挂上去，让 getter 能返回非 0。
+//   · 分配仍然走我们已替换的宿主分配器（0x9f34d8/0x9f3464/0x9f33f0），它们**忽略**这个上下文指针；
+//   · 所以这里只需要"非空 + 虚表[0x10] 能返回非空"，不要求它是真堆。
+// 风险与判据：后续构造器若解引用它的字段，可能崩在下一个钉子（有 si_addr 可判）；
+//   判据 = `[启动链]` 出现 +0xa22508 … +0xa2469c 这 7 条且不崩。
+// 槽 0x80（下标 16）：真机 np40 实测这个槽被调用过，返回 0 之后紧接着
+// `bl 0xa0913c("GameConfig")` 返回 0 ⇒ nnMain 拿 0 当对象调虚表 ⇒ 崩（si_addr=0）。
+// ⇒ 这个槽极可能就是"分配"。按 (self, size, align) 猜测实现：真分配，并把参数打进日志。
+// 若签名猜错（例如 size 在 x2），日志里的数值会自证。
+static uint64_t fake_heap_alloc(void *self, uint64_t size, uint64_t align) {
+    (void)self;
+    static int n;
+    if (++n <= 12) klog("[影子堆] 分配调用：size=%llu align=%llu\n",
+                        (unsigned long long)size, (unsigned long long)align);
+    if (size == 0 || size > (64u << 20)) {          // 参数不像大小 ⇒ 不冒然分配
+        if (n <= 12) klog("[影子堆] size 不合理，返 0\n");
+        return 0;
+    }
+    void *p = calloc(1, (size_t)size);
+    if (n <= 12) klog("[影子堆] 分配 → %p\n", p);
+    return (uint64_t)(uintptr_t)p;
+}
+#define FAKE_VT_QWORDS   32
+static uint64_t g_fake_vt[FAKE_VT_QWORDS];        // 假虚表
+static uint64_t g_fake_heap[64];                  // 假堆对象（首字 = 虚表指针）
+// 虚表[0x10]（下标 2）：返回"堆"本身。签名按 (self) → uint64_t。
+static uint64_t fake_heap_get(void *self) {
+    return (uint64_t)(uintptr_t)self;
+}
+// 其余槽：真机 np39 教训——只填了槽 2，结果在"堆对象"上做了另一次虚调用 ⇒ 槽里是 0 ⇒
+// `blr x8` 直接 pc=0 崩。现在把 32 个槽**全填上**（每个槽一个独立桩，带槽号日志），
+// 返回值一律 0：既不会 pc=0 崩，又能从日志看出"游戏对堆对象调了哪个方法"。
+static int g_n_vtstub;
+static uint64_t fake_vt_ret0(int idx) {
+    if (++g_n_vtstub <= 40) klog("[影子堆] 虚表[+%#x] 被调用 → 返 0\n", idx * 8);
+    return 0;
+}
+#define VT_STUB(I) static uint64_t vt_s_##I(void *p) { (void)p; return fake_vt_ret0(I); }
+VT_STUB(0)  VT_STUB(1)  VT_STUB(2)  VT_STUB(3)  VT_STUB(4)  VT_STUB(5)  VT_STUB(6)  VT_STUB(7)
+VT_STUB(8)  VT_STUB(9)  VT_STUB(10) VT_STUB(11) VT_STUB(12) VT_STUB(13) VT_STUB(14) VT_STUB(15)
+VT_STUB(16) VT_STUB(17) VT_STUB(18) VT_STUB(19) VT_STUB(20) VT_STUB(21) VT_STUB(22) VT_STUB(23)
+VT_STUB(24) VT_STUB(25) VT_STUB(26) VT_STUB(27) VT_STUB(28) VT_STUB(29) VT_STUB(30) VT_STUB(31)
+static const uint64_t g_fake_vt_tab[FAKE_VT_QWORDS] = {
+    (uint64_t)(uintptr_t)&vt_s_0,  (uint64_t)(uintptr_t)&vt_s_1,
+    (uint64_t)(uintptr_t)&fake_heap_get,   // 下标 2 = 偏移 0x10：取堆（必须返非 0）
+    (uint64_t)(uintptr_t)&vt_s_3,  (uint64_t)(uintptr_t)&vt_s_4,
+    (uint64_t)(uintptr_t)&vt_s_5,  (uint64_t)(uintptr_t)&vt_s_6,
+    (uint64_t)(uintptr_t)&vt_s_7,  (uint64_t)(uintptr_t)&vt_s_8,
+    (uint64_t)(uintptr_t)&vt_s_9,  (uint64_t)(uintptr_t)&vt_s_10,
+    (uint64_t)(uintptr_t)&vt_s_11, (uint64_t)(uintptr_t)&vt_s_12,
+    (uint64_t)(uintptr_t)&vt_s_13, (uint64_t)(uintptr_t)&vt_s_14,
+    (uint64_t)(uintptr_t)&vt_s_15, (uint64_t)(uintptr_t)&fake_heap_alloc,  // 下标 16 = 偏移 0x80：分配
+    (uint64_t)(uintptr_t)&vt_s_17, (uint64_t)(uintptr_t)&vt_s_18,
+    (uint64_t)(uintptr_t)&vt_s_19, (uint64_t)(uintptr_t)&vt_s_20,
+    (uint64_t)(uintptr_t)&vt_s_21, (uint64_t)(uintptr_t)&vt_s_22,
+    (uint64_t)(uintptr_t)&vt_s_23, (uint64_t)(uintptr_t)&vt_s_24,
+    (uint64_t)(uintptr_t)&vt_s_25, (uint64_t)(uintptr_t)&vt_s_26,
+    (uint64_t)(uintptr_t)&vt_s_27, (uint64_t)(uintptr_t)&vt_s_28,
+    (uint64_t)(uintptr_t)&vt_s_29, (uint64_t)(uintptr_t)&vt_s_30,
+    (uint64_t)(uintptr_t)&vt_s_31,
+};
+static void k_fake_heap_install(uint8_t *img) {
+    memcpy(g_fake_vt, g_fake_vt_tab, sizeof g_fake_vt);
+    g_fake_heap[0] = (uint64_t)(uintptr_t)&g_fake_vt[0];
+    // 两个"当前堆"变量（模块偏移，来自 RELA addend 反查：0x2289e60→0x232f9e8、0x2289e68→0x232f9f0）
+    *(uint64_t *)(img + 0x232f9e8) = (uint64_t)(uintptr_t)&g_fake_heap;
+    *(uint64_t *)(img + 0x232f9f0) = (uint64_t)(uintptr_t)&g_fake_heap;
+    klog("[影子堆] 已挂：堆=%p 虚表=%p（32 槽全填，槽[0x10]=取堆）\n",
+         (void *)&g_fake_heap, (void *)&g_fake_vt);
+}
+
 // ===== 替换式安装器：宿主替函数干活（返回值经 x0 带回），**原实现一条都不执行** =====
 // ⚠ 早先这里把桩的"回跳槽"填成 `b 站点+4`——被替换的是**函数入口**，站点+4 就是原实现的
 //   第二条指令，于是变成"宿主跑完、原实现接着跑"（双执行）：首条 stp 被跳过 ⇒ 栈帧少 0x20、
@@ -2435,6 +2515,9 @@ static void *k_thread(void *arg) {
     // 装机他判：把本次编译时间打进日志——跑完先看这一行与本地编译时间是否一致，
     // 不一致就说明设备上跑的是旧包（今天已被这个问题浪费三轮）。
     klog("=== 探针构建：%s %s ===\n", __DATE__, __TIME__);
+    // ★ 影子「当前堆」：必须在静态初始化与 nnMain **之前**挂上——
+    //   nnMain 一开始就要"取当前堆"，取不到就跳过 7 个初始化（见 §24/§25）。
+    k_fake_heap_install((uint8_t *)g_k_m.base);
     k_run_module_init(&g_k_m);   // ★ 先跑模块自己的静态初始化（否则 data 段的全局对象全是空的）
     {   // 崩点归属用：把本进程映射抄进日志（模块区 / 探针 .so / 宿主堆 各自范围）
         FILE *mp = fopen("/proc/self/maps", "r");
@@ -2475,6 +2558,8 @@ static void *k_thread(void *arg) {
     // 依据：rtld 的符号表里列出它要为主模块解析的入口名 nnMain（启动约定，非猜测）。
     g_k_stage = "nnMain";
     klog("=== 终站：nnMain（0x735330）===\n");
+    // 再挂一次影子堆：万一静态初始化里有构造器把它清零，这里补回来（代价极小）。
+    k_fake_heap_install((uint8_t *)b);
     g_gate_armed = 1; g_gate_fault_pc = 0;
     if (sigsetjmp(g_gate_jmp, 1) == 0) {
         // 按"干净调用"准备寄存器：x21 = 模块基址（Switch SDK 约定），x0..x7 清零。
