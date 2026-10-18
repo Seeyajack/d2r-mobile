@@ -1554,7 +1554,18 @@ static uint64_t plt_stub(void) {
             return pthread_mutex_trylock(mtx_get((void *)(uintptr_t)a0)) == 0 ? 1 : 0;
         }
         if (!strcmp(nm, "_ZN2nn2os9LockMutexEPNS0_9MutexTypeE")) {
+            // np76：加"等待时长"打点。互斥/队列是**真阻塞点**，它们走专门实现、不走通用记名，
+            //   所以日志里看不见——帧循环停住时，正是要在这里找"卡在谁身上"。
+            struct timespec t0, t1;
+            clock_gettime(CLOCK_MONOTONIC, &t0);
             pthread_mutex_lock(mtx_get((void *)(uintptr_t)a0));
+            clock_gettime(CLOCK_MONOTONIC, &t1);
+            long ms = (long)(t1.tv_sec - t0.tv_sec) * 1000 + (long)(t1.tv_nsec - t0.tv_nsec) / 1000000;
+            if (ms >= 5) {
+                static int n; if (++n <= 20)
+                    klog("[锁] LockMutex(%#llx) 等了 %ld ms（被别的线程占着）\n",
+                         (unsigned long long)a0, ms);
+            }
             return 0;
         }
         if (!strcmp(nm, "_ZN2nn2os11UnlockMutexEPNS0_9MutexTypeE")) {
@@ -1577,7 +1588,12 @@ static uint64_t plt_stub(void) {
             dm_mq_t *q = mq_get((void *)(uintptr_t)a1);
             if (!q || !q->cap) return 0;               // 未初始化：别悬住（宁可空转）
             pthread_mutex_lock(&q->mu);
-            while (q->n == 0) pthread_cond_wait(&q->cv_notempty, &q->mu);
+            if (q->n == 0) {
+                static int nw; if (++nw <= 20)
+                    klog("[队列] ReceiveMessageQueue(%#llx) 队列空 → 阻塞等（第 %d 次）\n",
+                         (unsigned long long)a1, nw);
+                while (q->n == 0) pthread_cond_wait(&q->cv_notempty, &q->mu);
+            }
             uint64_t v = q->buf[q->head];
             q->head = (q->head + 1) % q->cap;
             q->n--;
@@ -1649,6 +1665,17 @@ static uint64_t plt_stub(void) {
             uint64_t now = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
             if (!base_ns) base_ns = now;
             return (now - base_ns) * 19200ull / 1000000000ull;   // Switch 时基 ≈ 19.2MHz
+        }
+        // np76：SleepThread(TimeSpan) —— TimeSpan 按值传（x0 = int64 纳秒）。
+        //   当前**不真睡**（保持行为不变），只把时长记下来：若出现离谱值（>1s），就是"帧循环停住"的头号嫌疑人。
+        if (!strcmp(nm, "_ZN2nn2os11SleepThreadENS_8TimeSpanE")) {
+            static int n;
+            long long ns = (long long)a0;
+            if (n < 12 || ns > 1000000000LL) {
+                if (n < 12) n++;
+                klog("[睡] SleepThread(%lld ns)%s\n", ns, ns > 1000000000LL ? " ← 超过 1 秒！" : "");
+            }
+            return 0;
         }
         // C++ 纯虚调用兜底：落到这里就是"调了纯虚函数"，记名后返回（不无限循环，便于定位）
         if (!strcmp(nm, "__cxa_pure_virtual")) { klog("[服务] ⚠ __cxa_pure_virtual 被调用（游戏有纯虚误调）\n"); return 0; }
