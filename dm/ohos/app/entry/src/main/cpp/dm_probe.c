@@ -588,6 +588,15 @@ static void gate_fault_handler(int sig, siginfo_t *si, void *uc_) {
         // worker 0xa051c4..0xa05fa0 是"命令编码"大函数：多处 `stp/str ...,[x0]` 用同一个
         // 写游标，游标来源（解析结果链条）目前恒 0。这里在整个函数范围内兜底：
         // 每次给一块新的暂存区（按 0x100 步进、0x4000 回绕），模拟"缓冲区在推进"。
+        // np81：竞态崩点 +0xA011F4（`ldrb w10,[x9,#0x14]`，x9=0 ⇒ si_addr=0x2c）——
+        //   "任务节点没注册 ⇒ 查找落空 x9=0 ⇒ 从 0x18 起遍历"。给 x9 一块**全零**暂存区：
+        //   读到的字节是 0 ⇒ 该节点被跳过，循环继续（计数正常时很快结束）。
+        if (off >= 0xA011E4 && off < 0xA01220 && (uint64_t)(uintptr_t)si->si_addr < 0x1000) {
+            g_fixup_n++;
+            uc->uc_mcontext.regs[9] = (uint64_t)(uintptr_t)g_fixup_page;   // x9 = 零页
+            if (g_fixup_n <= 8) g_fixup_last[g_fixup_n - 1] = off;
+            return;
+        }
         if (off >= 0xA051C4 && off < 0xA05FA0 && (uint64_t)(uintptr_t)si->si_addr < 0x1000) {
             g_fixup_n++;
             uc->uc_mcontext.regs[0] = (uint64_t)(uintptr_t)(g_fixup_page + ((size_t)g_fixup_n % 64) * 0x100);
