@@ -3036,6 +3036,21 @@ static void *k_thread(void *arg) {
             klog("[槽检] .bss 0x22d8790 内容=%#llx；0x22d8798 首字节=%#x（once 标志）\n",
                  (unsigned long long)*(const uint64_t *)(im + 0x22d8790),
                  (unsigned)*(const unsigned char *)(im + 0x22d8798));
+            // np70：崩时把槽**前后各 4 个 qword** 也打出来——判"整片被清零（memset 越界）"
+            //      还是"只有这一个槽被改（定向写/竞态）"。这是回答 §38.6 那个"两指令内变 0"的直证。
+            {
+                const uint64_t *p = (const uint64_t *)(im + 0x2280eb8);
+                klog("[槽周边] 0x2280eb8 前4: %016llx %016llx %016llx %016llx\n",
+                     (unsigned long long)p[-4], (unsigned long long)p[-3],
+                     (unsigned long long)p[-2], (unsigned long long)p[-1]);
+                klog("[槽周边] 自身/后3: %016llx %016llx %016llx %016llx\n",
+                     (unsigned long long)p[0], (unsigned long long)p[1],
+                     (unsigned long long)p[2], (unsigned long long)p[3]);
+                const uint64_t *q = (const uint64_t *)(im + 0x22d9260);
+                klog("[槽周边] 变量 0x22d9260 及其后: %016llx %016llx %016llx %016llx\n",
+                     (unsigned long long)q[0], (unsigned long long)q[1],
+                     (unsigned long long)q[2], (unsigned long long)q[3]);
+            }
         }
         if (g_fixup_n)
             klog("[越障] 共拦截 %d 次；前 8 处 PC 偏移：%#llx %#llx %#llx %#llx %#llx %#llx %#llx %#llx\n",
