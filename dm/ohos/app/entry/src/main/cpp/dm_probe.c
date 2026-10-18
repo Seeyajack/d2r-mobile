@@ -23,6 +23,7 @@
 #include "map_image_ohos.h"     // 鸿蒙版 map_image —— 实验 D 的被测对象
 #include "dm_fs_ohos.h"         // 最小 nn::fs（romfs → 宿主目录；导入按符号名分流到这里）
 #include "dm_sdk_ohos.h"        // 通用 SDK 胶水层（vi/oe 等轻量语义；与游戏无关）
+#include "dm_nvn_ohos.h"        // 通用 NVN 胶水层（设备族等平台中立语义）
 #include "dm_main_layout.h"     // 旷野之息 main 的布局常数（fixups 表头生成）
 #include "dm_main_gates.h"      // 旷野之息 main 的门表（93 个 svc 门，实验 H 登记）
 
@@ -1190,6 +1191,8 @@ static const nvn_real_t g_nvn_real[] = {
     { "nvnBufferFinalize",                    (void *)nvn_buf_finalize },
 };
 static void *nvn_real_lookup(const char *name) {
+    void *r = dm_nvn_real(name);            // 通用 NVN 胶水层（设备族等，L1，与游戏无关）
+    if (r) return r;
     for (size_t i = 0; i < sizeof g_nvn_real / sizeof g_nvn_real[0]; i++)
         if (!strcmp(g_nvn_real[i].name, name)) return g_nvn_real[i].fn;
     return NULL;
@@ -3220,6 +3223,7 @@ static void exp_k(const char *files_dir, char *out, size_t cap, size_t *used) {
         }
         dm_fs_set_log(klog);
         dm_sdk_set_log(klog);   // 通用 SDK 胶水层也用同一份日志
+        dm_nvn_set_log(klog);   // 通用 NVN 胶水层同此
         dm_fs_selftest();
         // np65 槽体检（装载后、游戏跑之前）：崩点 +0xA246A4 的 `str x0,[*(0x2280eb8)]` 里那个槽
         // 运行期是 0，但镜像里它有 RELA（addend 0x22d87e0）。这里在**游戏动手之前**读一次：

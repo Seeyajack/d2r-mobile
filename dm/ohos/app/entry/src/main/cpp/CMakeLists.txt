@@ -41,6 +41,8 @@ add_library(dmprobe SHARED
     ${DM_DIR}/ohos/dm_fs_ohos.c
     # 通用 SDK 胶水层（L1）：vi/oe 等轻量语义按"符号名 → 实现"表组织，与游戏无关。
     ${DM_DIR}/ohos/dm_sdk_ohos.c
+    # 通用 NVN 胶水层（L1）：设备属性表/原点深度模式/句柄换算等平台中立语义。
+    ${DM_DIR}/ohos/dm_nvn_ohos.c
     # romfs 启动子集的内嵌归档（段 dmromfs，.incbin 一份 .pack；打档工具 mk_romfs_pack.py）。
     # 为什么内嵌：鸿蒙沙箱看不到 /data/local/tmp，hdc 也写不进应用沙箱 ⇒ 只能放进 HAP。
     ${DM_DIR}/ohos/dm_romfs.S
