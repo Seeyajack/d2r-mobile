@@ -25,6 +25,9 @@ void *dm_fs_impl(const char *sym_name);
 // 日志出口（探针的 klog 接进来，保证与探针日志同一文件）。
 void dm_fs_set_log(void (*fn)(const char *, ...));
 
+// np80：注入映像基址，供日志把调用者的 LR 换算成映像内偏移。
+void dm_fs_set_base(void *base);
+
 // 启动自检：打三行日志说明 rom 根能不能读、关键文件在不在。
 void dm_fs_selftest(void);
 

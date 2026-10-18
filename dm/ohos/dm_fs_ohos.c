@@ -44,7 +44,9 @@ typedef struct {
 _Static_assert(sizeof(dm_dir_entry) == 0x310, "DirectoryEntry 布局应为 0x310");
 
 static void (*g_log)(const char *, ...);
+static uint64_t g_fs_base;   // np80：映像基址（探针注入，用于把 LR 换算成偏移）
 void dm_fs_set_log(void (*fn)(const char *, ...)) { g_log = fn; }
+void dm_fs_set_base(void *base) { g_fs_base = (uint64_t)(uintptr_t)base; }
 #define FSLOG(...) do { if (g_log) g_log(__VA_ARGS__); } while (0)
 
 // ---------- 内嵌归档 ----------
@@ -143,6 +145,16 @@ static uint32_t fs_query_rom_cache(size_t *out) { *out = 0x1000; return RES_OK; 
 
 static uint32_t fs_mount_rom(const char *name, void *cache, size_t sz) {
     (void)cache; (void)sz;
+    // np80：谁挂的载？x30 = 调用者的返回地址（宿主函数入口就能读，不需要额外 plumbing）。
+    //   基址通过 dm_fs_set_base() 由探针注入；没有基址时打原始值。
+    {
+        uint64_t lr; __asm__ volatile("mov %0, x30" : "=r"(lr));
+        if (g_fs_base && lr >= g_fs_base && lr < g_fs_base + 0x2404a70ull)
+            FSLOG("[fs] MountRom 调用者 = +%#llx（映像内）\n",
+                  (unsigned long long)(lr - g_fs_base));
+        else
+            FSLOG("[fs] MountRom 调用者 = %#llx（映像外）\n", (unsigned long long)lr);
+    }
     arc_init();
     FSLOG("[fs] MountRom(%s)：归档 %u 文件%s\n", name && *name ? name : "?", g_arc_n,
           g_arc_state == 1 ? "，宿主回退启用" : "（无归档，仅宿主回退）");

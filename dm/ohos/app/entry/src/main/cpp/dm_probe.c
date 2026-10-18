@@ -3248,6 +3248,7 @@ static void exp_k(const char *files_dir, char *out, size_t cap, size_t *used) {
                                               : (uint64_t)(uintptr_t)&plt_stub;
         }
         dm_fs_set_log(klog);
+        dm_fs_set_base(img);   // np80：让 fs 日志能把调用者 LR 换算成映像内偏移
         dm_sdk_set_log(klog);   // 通用 SDK 胶水层也用同一份日志
         dm_nvn_set_log(klog);   // 通用 NVN 胶水层同此
         dm_fs_selftest();
