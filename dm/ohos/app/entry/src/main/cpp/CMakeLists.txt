@@ -36,6 +36,12 @@ add_library(dmprobe SHARED
     ${DM_DIR}/ohos/host_tests.c
     ${DM_DIR}/ohos/host_tests_gen.c   # 生成：单测清单（哪些 .so、叫什么名字）
     ${DM_DIR}/ohos/dm_log.c
+    # 最小 nn::fs：客体 romfs 路径 → 宿主目录（DM_ROMFS，默认 /data/local/tmp/romfs）。
+    # 只覆盖 main 导入的 23 个符号；按符号名在重定位时分流（dm_probe.c 的 PLT 循环）。
+    ${DM_DIR}/ohos/dm_fs_ohos.c
+    # romfs 启动子集的内嵌归档（段 dmromfs，.incbin 一份 .pack；打档工具 mk_romfs_pack.py）。
+    # 为什么内嵌：鸿蒙沙箱看不到 /data/local/tmp，hdc 也写不进应用沙箱 ⇒ 只能放进 HAP。
+    ${DM_DIR}/ohos/dm_romfs.S
     # 被测对象：鸿蒙版 map_image（与宿主 loader.c 用的是同一份）
     ${DM_DIR}/ohos/map_image_ohos.c
     # 门机制三件套（实验 H 门回路）：分派器/登记（hle.c）、svc 语义（hle_svc.c）、

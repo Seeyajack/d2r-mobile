@@ -21,6 +21,7 @@
 
 #include "dm.h"                 // module_t
 #include "map_image_ohos.h"     // 鸿蒙版 map_image —— 实验 D 的被测对象
+#include "dm_fs_ohos.h"         // 最小 nn::fs（romfs → 宿主目录；导入按符号名分流到这里）
 #include "dm_main_layout.h"     // 旷野之息 main 的布局常数（fixups 表头生成）
 #include "dm_main_gates.h"      // 旷野之息 main 的门表（93 个 svc 门，实验 H 登记）
 
@@ -1266,6 +1267,7 @@ static uint64_t k_gate_stub(void) {
 typedef struct { uint64_t slot; const char *name; } plt_ent_t;
 static plt_ent_t g_plt[512];
 static int g_nplt;
+static int g_nimpl;      // 直连宿主的导入个数（nn::fs 等，见重定位循环）
 static volatile int g_plt_calls;
 static int g_plt_log_n;          // 通用 PLT 记名行数（截断计数，见 plt_stub 末尾）
 #define DM_PLT_LOG_CAP 20000     // init 段约一千行 + 充分余量；循环段靠它挡住
@@ -3063,8 +3065,15 @@ static void exp_k(const char *files_dir, char *out, size_t cap, size_t *used) {
             uint32_t symi   = (uint32_t)(r_info >> 32);
             const char *nm  = (const char *)(img + DT_STRTAB + *(uint32_t *)(img + DT_SYMTAB + (uint64_t)symi * 24));
             if (g_nplt < 512) { g_plt[g_nplt].slot = (uint64_t)(img + r_off); g_plt[g_nplt].name = nm; g_nplt++; }
-            *(uint64_t *)(img + r_off) = (uint64_t)(uintptr_t)&plt_stub;   // 槽 → 记录型存根
+            // ★ 已实现的导入直连宿主函数（目前 = nn::fs 23 个）；其余仍落记录型存根。
+            //   分流按**符号名**，换游戏不用改表（只要 ABI 同名）。
+            void *impl = dm_fs_impl(nm);
+            if (impl) { g_nimpl++; if (g_nimpl <= 40) klog("[导入] 直连 %s\n", nm); }
+            *(uint64_t *)(img + r_off) = impl ? (uint64_t)(uintptr_t)impl
+                                              : (uint64_t)(uintptr_t)&plt_stub;
         }
+        dm_fs_set_log(klog);
+        dm_fs_selftest();
         klog("[重定位诊断] mod0=%#x dyn=%#llx DT_RELA=%#llx RELASZ=%#llx JMPREL=%#llx PLTRELSZ=%#llx SYMTAB=%#llx STRTAB=%#llx\n",
              mod0, (unsigned long long)dyn, (unsigned long long)DT_RELA, (unsigned long long)DT_RELASZ,
              (unsigned long long)DT_JMPREL, (unsigned long long)DT_PLTRELSZ,
