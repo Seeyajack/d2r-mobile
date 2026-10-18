@@ -2517,6 +2517,22 @@ static int g_n_boot;
 // 真机怪象：启动链钩子（同一入口）读到槽是对的（base+0x22d9260），两条指令后 `ldr` 却拿到 0。
 // 与其继续猜"谁在两指令间清零"，不如替它干活：槽正常就直接替它写，槽异常就记录并跳过。
 // 这样既能绕开，又能把"槽异常"这一事实打在日志里。
+// np88：解析器入口 0x9fa4c8（stp 开头，可挂）——把游戏正在解析的**键名**打出来。
+// 这是配置/内容路径的正门：键名能告诉我们游戏在找什么（配置项？文件？命令？）。
+static int g_n_parse;
+static uint64_t hook_parse(uint64_t *f) {
+    if (++g_n_parse <= 40) {
+        uint64_t k = f[FR_X1];
+        char buf[64]; size_t i = 0;
+        if (k > 0x10000ull && k < 0x800000000000ull) {
+            const char *key = (const char *)(uintptr_t)k;
+            for (; i < sizeof buf - 1 && key[i]; i++) buf[i] = key[i];
+        }
+        buf[i] = 0;
+        klog("[解析] #%d 键=\"%s\"\n", g_n_parse, buf);
+    }
+    return 0;
+}
 // np84：线程消息处理的虚调用点（0xa1e32c：mov x0,x19 在 blr x9 之前，此时 x9=处理函数、x1=消息）。
 // 目的：看这条"唯一被处理的消息"到底调到哪里——若调进我们的零桩，就是"收了但什么都没做"。
 static int g_n_msg;
@@ -2850,8 +2866,25 @@ static uint64_t hook_rep_parse(uint64_t *f) {
     void *old = g_fake_parse_obj;                 // 旧值：0=从没写过；94=被污染（np54 实证）
     void *obj = calloc(1, 0x2000);                // 局部现分配，不依赖 .bss
     g_fake_parse_obj = obj;                       // 留档（便于事后比对），不用于判断
-    klog("[键解析·替身] 0x9fa4c8：旧值=%p 新对象=%p（x0=%#llx x1=%#llx）\n",
-         old, obj, (unsigned long long)f[FR_X0], (unsigned long long)f[FR_X1]);
+    {   // np88/np89：把**键名**打出来。注意 x1 不是字符串本身，而是**字符串对象**
+        //   （sead::BufferedSafeString 布局：+0 数据指针、+4 长度、+8 容量）——真正的串在 [x1+0]。
+        uint64_t so = f[FR_X1];
+        char buf[64]; size_t i = 0; const char *key = NULL;
+        if (so > 0x10000ull && so < 0x800000000000ull) {
+            uint64_t k = *(const uint64_t *)(uintptr_t)so;      // [x1+0] = 数据指针
+            if (k > 0x10000ull && k < 0x800000000000ull) key = (const char *)(uintptr_t)k;
+        }
+        if (key) for (; i < sizeof buf - 1 && key[i]; i++) buf[i] = key[i];
+        buf[i] = 0;
+        if (++g_n_parse <= 3 && so > 0x10000ull && so < 0x800000000000ull) {
+            const uint64_t *q = (const uint64_t *)(uintptr_t)so;
+            klog("[键解析·替身] 串对象布局：%016llx %016llx %016llx %016llx\n",
+                 (unsigned long long)q[0], (unsigned long long)q[1],
+                 (unsigned long long)q[2], (unsigned long long)q[3]);
+        }
+        klog("[键解析·替身] 键=\"%s\"（串对象=%#llx）旧值=%p 新对象=%p\n", buf,
+             (unsigned long long)so, old, obj);
+    }
     return (uint64_t)(uintptr_t)obj;
 }
 
