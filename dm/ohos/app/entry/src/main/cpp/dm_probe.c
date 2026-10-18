@@ -570,9 +570,29 @@ static uint64_t g_gate_regs[GATE_REG_N];
 static uint64_t g_gate_sp;
 static volatile uint64_t g_gate_fault_addr;   // ★ si_addr：真正访问失败的地址（缺了它，"崩在哪条指令"会骗人）
 static volatile int g_gate_have_regs;
+// ── Task #5 越障（np60）：崩点 +0xA05620 的定点修复 ──
+// 崩点本质：worker 0xa051c4 用"解析结果"（我们给的全零替身）拼出 0 尺寸的命令编码，
+// 最后 `str x8,[x0]` 时 x0=0。正解是让解析拿到真数据（§37.5 方案 B），这里只是**诊断越障**：
+// 把写目标换成一块暂存页再放行，看下一层需求是什么。
+static volatile sig_atomic_t g_fixup_n;
+static volatile uint64_t g_fixup_last[8];     // 最近 8 次拦截的 PC 偏移（信号里不打印，崩后统一报）
+static uint8_t *g_fixup_page;                 // 安装期 calloc（不在信号上下文里分配——np58 教训）
+static uintptr_t g_fixup_base;                // 模块基址（处理器里不能用 g_k_m，它在文件后面才声明）
 static void gate_fault_handler(int sig, siginfo_t *si, void *uc_) {
     // 字段写法与 dm/host/crash.c 的鸿蒙分支一致：mcontext_t = { regs[31], sp, pc, pstate }
     ucontext_t *uc = (ucontext_t *)uc_;
+    if (g_fixup_page && g_fixup_base && g_fixup_n < 400) {
+        uint64_t off = (uint64_t)uc->uc_mcontext.pc - (uint64_t)g_fixup_base;
+        // worker 0xa051c4..0xa05fa0 是"命令编码"大函数：多处 `stp/str ...,[x0]` 用同一个
+        // 写游标，游标来源（解析结果链条）目前恒 0。这里在整个函数范围内兜底：
+        // 每次给一块新的暂存区（按 0x100 步进、0x4000 回绕），模拟"缓冲区在推进"。
+        if (off >= 0xA051C4 && off < 0xA05FA0 && (uint64_t)(uintptr_t)si->si_addr < 0x1000) {
+            g_fixup_n++;
+            uc->uc_mcontext.regs[0] = (uint64_t)(uintptr_t)(g_fixup_page + ((size_t)g_fixup_n % 64) * 0x100);
+            if (g_fixup_n <= 8) g_fixup_last[g_fixup_n - 1] = off;   // 信号里只记账，崩后统一打印
+            return;    // ★ 同步信号的处理函数返回 ⇒ 内核**重试**那条指令（这次写暂存页）
+        }
+    }
     g_gate_fault_sig = sig;
     g_gate_fault_pc = (uint64_t)uc->uc_mcontext.pc;   // aarch64 mcontext 的 pc
     g_gate_fault_addr = (uint64_t)(uintptr_t)si->si_addr;   // 出错的内存地址
@@ -2598,6 +2618,8 @@ static uint64_t hook_e28(uint64_t *f) {
     //   里面 bl 0x9f3464 分配 0x7c8 字节、bl 0xa08ef4 构造，然后返回那个单例）。
     //   崩点 0xa05324 在 worker 里：`mov x23, x2`（第 3 个参数）随后 `ldr w8,[x23,#8]`。
     //   这里把 4 个入参与调用者打出来，看"是谁把 0 传进来的"。
+    // ⚠ np58 教训：钩子里**别在静态初始化期做 calloc/多行日志/解引用客体指针**——会卡死
+    //   （真机卡在 ctor #385）。这里保持 np57 的形态：静态计数器 + 只多打两行映像内标量。
     if (++g_n_e28 <= 12) {
         uint64_t base = (uint64_t)(uintptr_t)g_k_m.base;
         uint64_t lr = f[FR_X30];
@@ -2608,6 +2630,23 @@ static uint64_t hook_e28(uint64_t *f) {
              g_n_e28, (unsigned long long)f[FR_X0], (unsigned long long)f[FR_X1],
              (unsigned long long)f[FR_X2], (unsigned long long)f[3],
              (unsigned long long)lo);
+        // np58：后段崩点 (+0xA05620) 的关键标量——**只读映像内的槽、不碰客体指针**
+        // （上一版在这里解引用客体指针 + 多打 6 行，真机卡死在静态初始化 #385，已回退）。
+        {
+            const uint8_t *im = (const uint8_t *)(uintptr_t)g_k_m.base;
+            uint64_t sa = *(const uint64_t *)(im + 0x227f900);   // 槽 → .bss 变量（或运行期换成的堆对象）
+            uint64_t sb = *(const uint64_t *)(im + 0x227f8e8);
+            int sa_in = sa >= base && sa < base + DM_IMG_MAIN_END;
+            int sb_in = sb >= base && sb < base + DM_IMG_MAIN_END;
+            klog("[建对象] 槽A(0x227f900)=%#llx%s 槽B(0x227f8e8)=%#llx%s\n",
+                 (unsigned long long)sa, sa_in ? "（映像内）" : "（非映像）",
+                 (unsigned long long)sb, sb_in ? "（映像内）" : "（非映像）");
+            if (sa_in) {
+                uint64_t fn = *(const uint64_t *)(uintptr_t)sa;
+                klog("[建对象] 槽A内容=%#llx%s\n", (unsigned long long)fn,
+                     (fn >= base && fn < base + DM_IMG_MAIN_END) ? "（是映像内函数）" : "（非映像）");
+            }
+        }
     }
     return 0;
 }
@@ -2903,6 +2942,8 @@ static void *k_thread(void *arg) {
     // 再挂一次影子堆：万一静态初始化里有构造器把它清零，这里补回来（代价极小）。
     k_fake_heap_install((uint8_t *)b);
     g_gate_armed = 1; g_gate_fault_pc = 0;
+    if (!g_fixup_page) g_fixup_page = calloc(1, 0x8000);   // 越障暂存区 32KB（64 块 × 0x100，见 gate_fault_handler）
+    g_fixup_base = (uintptr_t)b;
     if (sigsetjmp(g_gate_jmp, 1) == 0) {
         // 按"干净调用"准备寄存器：x21 = 模块基址（Switch SDK 约定），x0..x7 清零。
         register uint64_t r21 __asm__("x21") = b;
@@ -2920,6 +2961,13 @@ static void *k_thread(void *arg) {
     } else {
         g_gate_armed = 0; g_k_faulted = 1;
         klog("=== nnMain 崩：pc %#llx sig %d ===\n", (unsigned long long)g_gate_fault_pc, g_gate_fault_sig);
+        if (g_fixup_n)
+            klog("[越障] 共拦截 %d 次；前 8 处 PC 偏移：%#llx %#llx %#llx %#llx %#llx %#llx %#llx %#llx\n",
+                 (int)g_fixup_n,
+                 (unsigned long long)g_fixup_last[0], (unsigned long long)g_fixup_last[1],
+                 (unsigned long long)g_fixup_last[2], (unsigned long long)g_fixup_last[3],
+                 (unsigned long long)g_fixup_last[4], (unsigned long long)g_fixup_last[5],
+                 (unsigned long long)g_fixup_last[6], (unsigned long long)g_fixup_last[7]);
         k_log_counters("崩时");
         gate_dump_fault("nnMain");
     }
