@@ -577,6 +577,7 @@ static volatile int g_gate_have_regs;
 // 最后 `str x8,[x0]` 时 x0=0。正解是让解析拿到真数据（§37.5 方案 B），这里只是**诊断越障**：
 // 把写目标换成一块暂存页再放行，看下一层需求是什么。
 static uint64_t g_self_base;            // np82：本 .so 的装载基址（dladdr 取，用于识别"外"调用者）
+static int g_nnmain_entered;      // np86：nnMain 段是否已进入（工厂分支的迟到防护）
 static volatile sig_atomic_t g_fixup_n;
 static volatile uint64_t g_fixup_last[8];     // 最近 8 次拦截的 PC 偏移（信号里不打印，崩后统一报）
 static uint8_t *g_fixup_page;                 // 安装期 calloc（不在信号上下文里分配——np58 教训）
@@ -3052,10 +3053,19 @@ static void *k_thread(void *arg) {
         g_gate_armed = 0; g_k_faulted = 1;
         klog("=== 0x1f8 崩：pc %#llx sig %d ===\n", (unsigned long long)g_gate_fault_pc, g_gate_fault_sig);
         gate_dump_fault("工厂 0x1f8");
+        // np86：**迟到防护**——本分支是 fall-through（设计上崩完要继续跑 nnMain）。但若
+        //   nnMain 段已经进入过，说明这次 longjmp 是"后面阶段的崩倒流回本阶段的 setjmp"，
+        //   继续 fall-through 就会"装影子堆→崩→回这里→又跑 nnMain"无限循环（np85 实测
+        //   空转 94,108 次、日志 226 万行）。此时必须止步。
+        if (g_nnmain_entered) {
+            klog("【红】工厂分支被迟到触发（nnMain 已进入过）——止步，避免倒流成环\n");
+            return NULL;
+        }
     }
     // 终站：游戏的真正入口 nnMain（模块符号表 #506：st_value 0x735330，size 1008，GLOBAL FUNC）
     // 依据：rtld 的符号表里列出它要为主模块解析的入口名 nnMain（启动约定，非猜测）。
     g_k_stage = "nnMain";
+    g_nnmain_entered = 1;   // np86：置位后，工厂分支就知道"别再 fall-through 了"
     klog("=== 终站：nnMain（0x735330）===\n");
     // 再挂一次影子堆：万一静态初始化里有构造器把它清零，这里补回来（代价极小）。
     k_fake_heap_install((uint8_t *)b);
@@ -3067,10 +3077,6 @@ static void *k_thread(void *arg) {
     g_gate_armed = 1; g_gate_fault_pc = 0;
     if (!g_fixup_page) g_fixup_page = calloc(1, 0x8000);   // 越障暂存区 32KB（64 块 × 0x100，见 gate_fault_handler）
     g_fixup_base = (uintptr_t)b;
-    // np84：消息处理调用点**推迟到静态初始化之后**再挂——np84 在安装期就挂，结果连续两次
-    //   死在 ctor #385（日志系统构造器），而 np83 同样本钩子不挂时正常 ⇒ 安装期多一个洞
-    //   就会扰动初始化（原因待查，先隔离）。
-    k_install_hook((uint8_t *)b, 0xa1e32c, (void *)hook_msg, "消息处理(延后)");
     if (sigsetjmp(g_gate_jmp, 1) == 0) {
         // 按"干净调用"准备寄存器：x21 = 模块基址（Switch SDK 约定），x0..x7 清零。
         register uint64_t r21 __asm__("x21") = b;
