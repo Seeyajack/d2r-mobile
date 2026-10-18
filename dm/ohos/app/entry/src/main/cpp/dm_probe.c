@@ -1676,17 +1676,6 @@ static uint64_t plt_stub(void) {
             if (!base_ns) base_ns = now;
             return (now - base_ns) * 19200ull / 1000000000ull;   // Switch 时基 ≈ 19.2MHz
         }
-        // np76：SleepThread(TimeSpan) —— TimeSpan 按值传（x0 = int64 纳秒）。
-        //   当前**不真睡**（保持行为不变），只把时长记下来：若出现离谱值（>1s），就是"帧循环停住"的头号嫌疑人。
-        if (!strcmp(nm, "_ZN2nn2os11SleepThreadENS_8TimeSpanE")) {
-            static int n;
-            long long ns = (long long)a0;
-            if (n < 12 || ns > 1000000000LL) {
-                if (n < 12) n++;
-                klog("[睡] SleepThread(%lld ns)%s\n", ns, ns > 1000000000LL ? " ← 超过 1 秒！" : "");
-            }
-            return 0;
-        }
         // C++ 纯虚调用兜底：落到这里就是"调了纯虚函数"，记名后返回（不无限循环，便于定位）
         if (!strcmp(nm, "__cxa_pure_virtual")) { klog("[服务] ⚠ __cxa_pure_virtual 被调用（游戏有纯虚误调）\n"); return 0; }
         // 通用 PLT 记名 + **全局截断**：init 段约一千行全是信息量；但游戏跑起来后
