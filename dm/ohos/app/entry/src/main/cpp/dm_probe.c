@@ -576,6 +576,7 @@ static volatile int g_gate_have_regs;
 // 崩点本质：worker 0xa051c4 用"解析结果"（我们给的全零替身）拼出 0 尺寸的命令编码，
 // 最后 `str x8,[x0]` 时 x0=0。正解是让解析拿到真数据（§37.5 方案 B），这里只是**诊断越障**：
 // 把写目标换成一块暂存页再放行，看下一层需求是什么。
+static uint64_t g_self_base;            // np82：本 .so 的装载基址（dladdr 取，用于识别"外"调用者）
 static volatile sig_atomic_t g_fixup_n;
 static volatile uint64_t g_fixup_last[8];     // 最近 8 次拦截的 PC 偏移（信号里不打印，崩后统一报）
 static uint8_t *g_fixup_page;                 // 安装期 calloc（不在信号上下文里分配——np58 教训）
@@ -1598,9 +1599,19 @@ static uint64_t plt_stub(void) {
             if (!q || !q->cap) return 0;               // 未初始化：别悬住（宁可空转）
             pthread_mutex_lock(&q->mu);
             if (q->n == 0) {
-                static int nw; if (++nw <= 20)
-                    klog("[队列] ReceiveMessageQueue(%#llx) 队列空 → 阻塞等（第 %d 次）\n",
-                         (unsigned long long)a1, nw);
+                static int nw;
+                if (++nw <= 20) {
+                    // np82：谁在等？x30 = 调用者返回地址（plt_stub 里可读）
+                    uint64_t lr; __asm__ volatile("mov %0, x30" : "=r"(lr));
+                    uint64_t b2 = (uint64_t)(uintptr_t)g_k_m.base;
+                    int in_self = g_self_base && lr >= g_self_base && lr < g_self_base + 0x400000ull;
+                    klog("[队列] Receive(%#llx) 队列空 → 阻塞等（第 %d 次）调用者=%s%#llx\n",
+                         (unsigned long long)a1, nw,
+                         (lr >= b2 && lr < b2 + DM_IMG_MAIN_END) ? "映像+" :
+                         (in_self ? "本so+" : "(外)"),
+                         (unsigned long long)((lr >= b2 && lr < b2 + DM_IMG_MAIN_END) ? lr - b2 :
+                                              (in_self ? lr - g_self_base : lr)));
+                }
                 while (q->n == 0) pthread_cond_wait(&q->cv_notempty, &q->mu);
             }
             uint64_t v = q->buf[q->head];
@@ -1622,9 +1633,18 @@ static uint64_t plt_stub(void) {
             pthread_cond_signal(&q->cv_notempty);
             pthread_mutex_unlock(&q->mu);
             {   // np77：找"谁该给空队列发消息"——发送方打点（与被阻塞的 Receive 对应）
-                static int ns; if (++ns <= 24)
-                    klog("[队列] TrySend(%#llx) 值=%#llx 送入后 n=%zu\n",
-                         (unsigned long long)a0, (unsigned long long)a1, q->n);
+                static int ns;
+                if (++ns <= 24) {
+                    uint64_t lr; __asm__ volatile("mov %0, x30" : "=r"(lr));
+                    uint64_t b2 = (uint64_t)(uintptr_t)g_k_m.base;
+                    int in_self = g_self_base && lr >= g_self_base && lr < g_self_base + 0x400000ull;
+                    klog("[队列] TrySend(%#llx) 值=%#llx 送入后 n=%zu 调用者=%s%#llx\n",
+                         (unsigned long long)a0, (unsigned long long)a1, q->n,
+                         (lr >= b2 && lr < b2 + DM_IMG_MAIN_END) ? "映像+" :
+                         (in_self ? "本so+" : "(外)"),
+                         (unsigned long long)((lr >= b2 && lr < b2 + DM_IMG_MAIN_END) ? lr - b2 :
+                                              (in_self ? lr - g_self_base : lr)));
+                }
             }
             return 1;                                   // bool 真 = 已送入
         }
@@ -2496,6 +2516,18 @@ static int g_n_boot;
 // 真机怪象：启动链钩子（同一入口）读到槽是对的（base+0x22d9260），两条指令后 `ldr` 却拿到 0。
 // 与其继续猜"谁在两指令间清零"，不如替它干活：槽正常就直接替它写，槽异常就记录并跳过。
 // 这样既能绕开，又能把"槽异常"这一事实打在日志里。
+// np84：线程消息处理的虚调用点（0xa1e32c：mov x0,x19 在 blr x9 之前，此时 x9=处理函数、x1=消息）。
+// 目的：看这条"唯一被处理的消息"到底调到哪里——若调进我们的零桩，就是"收了但什么都没做"。
+static int g_n_msg;
+static uint64_t hook_msg(uint64_t *f) {
+    uint64_t base = (uint64_t)(uintptr_t)g_k_m.base;
+    uint64_t fn = f[9], msg = f[1];
+    int in_img = fn >= base && fn < base + DM_IMG_MAIN_END;
+    if (++g_n_msg <= 12)
+        klog("[消息] 处理：函数=%s%#llx 消息=%#llx\n", in_img ? "+" : "(外)",
+             (unsigned long long)(in_img ? fn - base : fn), (unsigned long long)msg);
+    return 0;
+}
 static int g_n_setter;
 static uint64_t hook_setter(uint64_t *f) {
     uint64_t base = (uint64_t)(uintptr_t)g_k_m.base;
@@ -3035,6 +3067,10 @@ static void *k_thread(void *arg) {
     g_gate_armed = 1; g_gate_fault_pc = 0;
     if (!g_fixup_page) g_fixup_page = calloc(1, 0x8000);   // 越障暂存区 32KB（64 块 × 0x100，见 gate_fault_handler）
     g_fixup_base = (uintptr_t)b;
+    // np84：消息处理调用点**推迟到静态初始化之后**再挂——np84 在安装期就挂，结果连续两次
+    //   死在 ctor #385（日志系统构造器），而 np83 同样本钩子不挂时正常 ⇒ 安装期多一个洞
+    //   就会扰动初始化（原因待查，先隔离）。
+    k_install_hook((uint8_t *)b, 0xa1e32c, (void *)hook_msg, "消息处理(延后)");
     if (sigsetjmp(g_gate_jmp, 1) == 0) {
         // 按"干净调用"准备寄存器：x21 = 模块基址（Switch SDK 约定），x0..x7 清零。
         register uint64_t r21 __asm__("x21") = b;
@@ -3255,6 +3291,14 @@ static void exp_k(const char *files_dir, char *out, size_t cap, size_t *used) {
             if (impl) { g_nimpl++; if (g_nimpl <= 40) klog("[导入] 直连 %s\n", nm); }
             *(uint64_t *)(img + r_off) = impl ? (uint64_t)(uintptr_t)impl
                                               : (uint64_t)(uintptr_t)&plt_stub;
+        }
+        {   // np82：记下本 .so 的装载基址，队列/fs 日志里的"外"调用者才能对上号
+            Dl_info di;
+            if (dladdr((void *)&plt_stub, &di) && di.dli_fbase) {
+                g_self_base = (uint64_t)(uintptr_t)di.dli_fbase;
+                klog("[自检] 本 .so 基址 = %#llx（%s）\n",
+                     (unsigned long long)g_self_base, di.dli_fname ? di.dli_fname : "?");
+            }
         }
         dm_fs_set_log(klog);
         dm_fs_set_base(img);   // np80：让 fs 日志能把调用者 LR 换算成映像内偏移
