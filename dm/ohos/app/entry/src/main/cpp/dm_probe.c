@@ -2499,9 +2499,14 @@ static uint64_t fake_heap_alloc(void *self, uint64_t size, uint64_t count) {
     if (n <= 12) klog("[影子堆] 分配 → %p\n", p);
     return (uint64_t)(uintptr_t)p;
 }
-#define FAKE_VT_QWORDS   32
-static uint64_t g_fake_vt[FAKE_VT_QWORDS];        // 假虚表
-static uint64_t g_fake_heap[64];                  // 假堆对象（首字 = 虚表指针）
+#define FAKE_VT_QWORDS   64          // 虚表 64 槽（覆盖偏移 0..0x1f8，防 blr 到表外）
+#define FAKE_HEAP_QWORDS 512         // 堆对象 4KB：真实堆结构体字段可能很多，给足
+// ★ Task #4（2026-10-18 修）：这两个对象**必须放独立 calloc 的内存，不能放 .so 的 .bss**。
+//   原因：游戏会把"堆对象"当自己的结构体往里写字段；对象若在 .bss 里，越界写入会直接
+//   踩坏 .bss 的其它变量（g_n_e28 计数器输出垃圾值 -247789891 即此症状，§32.2 附注）。
+//   放 calloc 内存里，最坏也只是踩坏我们自己那一块，不波及仪器计数器。
+static uint64_t *g_fake_vt;          // 假虚表（运行期 calloc）
+static uint64_t *g_fake_heap;        // 假堆对象（首字 = 虚表指针；运行期 calloc）
 // 虚表[0x10]（下标 2）：返回"堆"本身。签名按 (self) → uint64_t。
 static uint64_t fake_heap_get(void *self) {
     return (uint64_t)(uintptr_t)self;
@@ -2519,6 +2524,10 @@ VT_STUB(0)  VT_STUB(1)  VT_STUB(2)  VT_STUB(3)  VT_STUB(4)  VT_STUB(5)  VT_STUB(
 VT_STUB(8)  VT_STUB(9)  VT_STUB(10) VT_STUB(11) VT_STUB(12) VT_STUB(13) VT_STUB(14) VT_STUB(15)
 VT_STUB(16) VT_STUB(17) VT_STUB(18) VT_STUB(19) VT_STUB(20) VT_STUB(21) VT_STUB(22) VT_STUB(23)
 VT_STUB(24) VT_STUB(25) VT_STUB(26) VT_STUB(27) VT_STUB(28) VT_STUB(29) VT_STUB(30) VT_STUB(31)
+VT_STUB(32) VT_STUB(33) VT_STUB(34) VT_STUB(35) VT_STUB(36) VT_STUB(37) VT_STUB(38) VT_STUB(39)
+VT_STUB(40) VT_STUB(41) VT_STUB(42) VT_STUB(43) VT_STUB(44) VT_STUB(45) VT_STUB(46) VT_STUB(47)
+VT_STUB(48) VT_STUB(49) VT_STUB(50) VT_STUB(51) VT_STUB(52) VT_STUB(53) VT_STUB(54) VT_STUB(55)
+VT_STUB(56) VT_STUB(57) VT_STUB(58) VT_STUB(59) VT_STUB(60) VT_STUB(61) VT_STUB(62) VT_STUB(63)
 static const uint64_t g_fake_vt_tab[FAKE_VT_QWORDS] = {
     (uint64_t)(uintptr_t)&vt_s_0,  (uint64_t)(uintptr_t)&vt_s_1,
     (uint64_t)(uintptr_t)&fake_heap_get,   // 下标 2 = 偏移 0x10：取堆（必须返非 0）
@@ -2536,16 +2545,49 @@ static const uint64_t g_fake_vt_tab[FAKE_VT_QWORDS] = {
     (uint64_t)(uintptr_t)&vt_s_25, (uint64_t)(uintptr_t)&vt_s_26,
     (uint64_t)(uintptr_t)&vt_s_27, (uint64_t)(uintptr_t)&vt_s_28,
     (uint64_t)(uintptr_t)&vt_s_29, (uint64_t)(uintptr_t)&vt_s_30,
-    (uint64_t)(uintptr_t)&vt_s_31,
+    (uint64_t)(uintptr_t)&vt_s_31, (uint64_t)(uintptr_t)&vt_s_32,
+    (uint64_t)(uintptr_t)&vt_s_33, (uint64_t)(uintptr_t)&vt_s_34,
+    (uint64_t)(uintptr_t)&vt_s_35, (uint64_t)(uintptr_t)&vt_s_36,
+    (uint64_t)(uintptr_t)&vt_s_37, (uint64_t)(uintptr_t)&vt_s_38,
+    (uint64_t)(uintptr_t)&vt_s_39, (uint64_t)(uintptr_t)&vt_s_40,
+    (uint64_t)(uintptr_t)&vt_s_41, (uint64_t)(uintptr_t)&vt_s_42,
+    (uint64_t)(uintptr_t)&vt_s_43, (uint64_t)(uintptr_t)&vt_s_44,
+    (uint64_t)(uintptr_t)&vt_s_45, (uint64_t)(uintptr_t)&vt_s_46,
+    (uint64_t)(uintptr_t)&vt_s_47, (uint64_t)(uintptr_t)&vt_s_48,
+    (uint64_t)(uintptr_t)&vt_s_49, (uint64_t)(uintptr_t)&vt_s_50,
+    (uint64_t)(uintptr_t)&vt_s_51, (uint64_t)(uintptr_t)&vt_s_52,
+    (uint64_t)(uintptr_t)&vt_s_53, (uint64_t)(uintptr_t)&vt_s_54,
+    (uint64_t)(uintptr_t)&vt_s_55, (uint64_t)(uintptr_t)&vt_s_56,
+    (uint64_t)(uintptr_t)&vt_s_57, (uint64_t)(uintptr_t)&vt_s_58,
+    (uint64_t)(uintptr_t)&vt_s_59, (uint64_t)(uintptr_t)&vt_s_60,
+    (uint64_t)(uintptr_t)&vt_s_61, (uint64_t)(uintptr_t)&vt_s_62,
+    (uint64_t)(uintptr_t)&vt_s_63,
 };
+// 指针合法性快查：np54 实证游戏侧越界写会把 .bss 指针槽污染成 94 一类的小值，
+// 用之前必须先验（否则解引用即崩）。合法区间：远大于 0、小于用户态上限。
+static int k_ptr_sane(const void *p) {
+    uintptr_t v = (uintptr_t)p;
+    return p && v > 0x10000ull && v < 0x800000000000ull;
+}
 static void k_fake_heap_install(uint8_t *img) {
-    memcpy(g_fake_vt, g_fake_vt_tab, sizeof g_fake_vt);
-    g_fake_heap[0] = (uint64_t)(uintptr_t)&g_fake_vt[0];
+    // 自愈：指针槽若被污染（np54：g_fake_parse_obj 被写成 0x5e），重新分配再挂。
+    if (!k_ptr_sane(g_fake_vt) || !k_ptr_sane(g_fake_heap)) {
+        klog("[影子堆] ⚠ 指针槽被污染（vt=%p heap=%p），重新分配\n",
+             (void *)g_fake_vt, (void *)g_fake_heap);
+        g_fake_vt   = calloc(FAKE_VT_QWORDS, sizeof(uint64_t));
+        g_fake_heap = calloc(FAKE_HEAP_QWORDS, sizeof(uint64_t));
+    }
+    if (!g_fake_vt) {
+        g_fake_vt   = calloc(FAKE_VT_QWORDS, sizeof(uint64_t));
+        g_fake_heap = calloc(FAKE_HEAP_QWORDS, sizeof(uint64_t));
+    }
+    memcpy(g_fake_vt, g_fake_vt_tab, FAKE_VT_QWORDS * sizeof(uint64_t));
+    g_fake_heap[0] = (uint64_t)(uintptr_t)g_fake_vt;
     // 两个"当前堆"变量（模块偏移，来自 RELA addend 反查：0x2289e60→0x232f9e8、0x2289e68→0x232f9f0）
-    *(uint64_t *)(img + 0x232f9e8) = (uint64_t)(uintptr_t)&g_fake_heap;
-    *(uint64_t *)(img + 0x232f9f0) = (uint64_t)(uintptr_t)&g_fake_heap;
-    klog("[影子堆] 已挂：堆=%p 虚表=%p（32 槽全填，槽[0x10]=取堆）\n",
-         (void *)&g_fake_heap, (void *)&g_fake_vt);
+    *(uint64_t *)(img + 0x232f9e8) = (uint64_t)(uintptr_t)g_fake_heap;
+    *(uint64_t *)(img + 0x232f9f0) = (uint64_t)(uintptr_t)g_fake_heap;
+    klog("[影子堆] 已挂：堆=%p（calloc %dKB）虚表=%p（%d 槽，槽[0x10]=取堆）\n",
+         (void *)g_fake_heap, FAKE_HEAP_QWORDS * 8 / 1024, (void *)g_fake_vt, FAKE_VT_QWORDS);
 }
 
 static int g_n_e28;
@@ -2566,6 +2608,96 @@ static uint64_t hook_e28(uint64_t *f) {
              (unsigned long long)lo);
     }
     return 0;
+}
+
+// 探针用：把一段客体内存打成十六进制（同进程同地址空间，可直接解引用）。
+// 用途：看清"游戏传进来的对象/字符串"到底是什么——键名、字符串、小结构体都靠它认。
+static void k_dump_hex(const char *tag, const void *p, size_t n) {
+    char line[200];
+    const unsigned char *b = (const unsigned char *)p;
+    if (!p) { klog("%s（空指针）\n", tag); return; }
+    size_t pos = (size_t)snprintf(line, sizeof line, "%s %p:", tag, p);
+    for (size_t i = 0; i < n && pos + 4 < sizeof line; i++)
+        pos += (size_t)snprintf(line + pos, sizeof line - pos, " %02x", b[i]);
+    klog("%s\n", line);
+}
+
+// 金丝雀 + 计数器快照：np49 实证 .so 的 .bss 会被**点状污染**——g_n_e28/e29 变成垃圾值
+//（-247770147），而 取尺寸/分配/虚表 等其它 .bss 计数器完全正常。后果很阴：
+//"if (++g_n <= N) 才打印" 的守卫在计数器被写成大正数后**静默吞掉日志**，
+// 伪装成"钩子没命中"（0x9fa4c8 探针 np49 零命中即此）。
+// 金丝雀紧挨着声明，用来看污染的形状（写哪个、写多大范围）。
+static int g_canary0, g_canary1, g_canary2, g_canary3;
+static int g_canary4, g_canary5, g_canary6, g_canary7;
+static int g_n_e29;
+static void k_log_counters(const char *tag) {
+    klog("[计数器%s] e28=%d e29=%d 金丝雀=%d %d %d %d %d %d %d %d\n",
+         tag, g_n_e28, g_n_e29,
+         g_canary0, g_canary1, g_canary2, g_canary3,
+         g_canary4, g_canary5, g_canary6, g_canary7);
+}
+
+// 0x9fa4c8：通用「键:值」解析器（全映像 8 处调用）。当前崩点链的**最上游**：
+//   0xa05fa4(经函数指针进来) 用它解析一个字符串 → 返回 0
+//   → worker 0xa051c4 的 x2 = 0 → 崩在 0xa05324（`ldr w8,[x23,#8]`）。
+// 静态追查到此断了（0xa05fa4 无直接调用者，只能经虚表/函数指针进来），
+// 所以运行时取证：把两个入参对象 dump 出来，看清"在解析哪个键、键从哪来"。
+// ★ 自 np50 起**无条件打印**：不再用 g_n_e29 计数抑制（.bss 计数器会被踩，见上方注释）。
+// np50 首战：对象布局已认清——x1+0x20 = 字符串数据指针、x1+0x28 = 尺寸（本回合 16 字节）。
+// 本轮把**串内容本身**打出来，直接回答"在解析哪个键"。
+static uint64_t hook_e29(uint64_t *f) {
+    const unsigned char *o = (const unsigned char *)(uintptr_t)f[FR_X1];
+    klog("[键解析] 0x9fa4c8：x0=%#llx x1=%#llx 金丝雀地址=%p\n",
+         (unsigned long long)f[FR_X0], (unsigned long long)f[FR_X1], (void *)&g_canary0);
+    k_dump_hex("[键解析] x0 对象", (const void *)(uintptr_t)f[FR_X0], 32);
+    k_dump_hex("[键解析] x1 对象", o, 64);
+    if (o) {
+        uint64_t data = *(const uint64_t *)(o + 0x20);
+        uint64_t sz   = *(const uint64_t *)(o + 0x28);
+        klog("[键解析] 疑似字符串：数据=%#llx 尺寸字段=%#llx（低32=cap 高32=len？）\n",
+             (unsigned long long)data, (unsigned long long)sz);
+        // +0x28 实际是 {cap=0x1000, len=0x10} 两半（np51 实证），别拿它当整体尺寸卡条件
+        if (data > 0x10000 && data < 0x800000000000ull)
+            k_dump_hex("[键解析] 串内容", (const void *)(uintptr_t)data, 48);
+    }
+    k_log_counters("解析时");
+    return 0;
+}
+
+// 0xa05fa4：解析派发 = worker 0xa051c4 的**调用者**（经函数指针进来，全映像无直接 bl）。
+// 它的 x2 会喂给构造函数 0xa112fc（`mov x1, x2`）⇒ 极可能就是"要解析的字符串"本体。
+// （np52 证实 0x9fa4c8 的 x1+0x20 只是二级指针：0x5b96a6d000 → {0x5b96a64600,…}，
+//   继续跟指针链不如回到上游看 x2。）
+static int g_n_e30;
+static uint64_t hook_e30(uint64_t *f) {
+    const unsigned char *s = (const unsigned char *)(uintptr_t)f[FR_X2];
+    klog("[派发] 0xa05fa4：x0=%#llx x1=%#llx x2=%#llx\n",
+         (unsigned long long)f[FR_X0], (unsigned long long)f[FR_X1],
+         (unsigned long long)f[FR_X2]);
+    k_dump_hex("[派发] x2 对象", s, 32);
+    if (s) {
+        uint64_t p0 = *(const uint64_t *)s;   // std::string 长形态首字 = 数据指针
+        if (p0 > 0x10000 && p0 < 0x800000000000ull)
+            k_dump_hex("[派发] x2[0] 指向", (const void *)(uintptr_t)p0, 48);
+    }
+    return 0;
+}
+
+// 0x9fa4c8 的**替身**（np54 起）：原实现是"建临时对象 → 按 ':' 切分 → 遍历已注册解析器"，
+// 在宿主上一路缺数据、恒返回 0 ⇒ worker 的 x2 = 0 ⇒ 崩在 0xa05324（`ldr w8,[x23,#8]`）。
+// 按 §八「影子对象」打法：宿主直接返回一个**合法的全零对象**（calloc 8KB），
+// 让流程越过"解析失败"这道坎——每越一坎，下一个真实需求就会暴露（与影子堆同一逻辑）。
+// ⚠ np54 教训：对象指针**不能存 .bss 静态变量**——np54 实证 `g_fake_parse_obj` 被游戏侧
+//   越界写污染成 94(0x5e)，`if (!ptr)` 检查被绕过 ⇒ 把 0x5e 当对象返回 ⇒ 原样崩在同一点。
+//   现在每次**局部变量现分配**（.bss 只留一份副本仅供比对，不参与判断）。
+static void *g_fake_parse_obj;
+static uint64_t hook_rep_parse(uint64_t *f) {
+    void *old = g_fake_parse_obj;                 // 旧值：0=从没写过；94=被污染（np54 实证）
+    void *obj = calloc(1, 0x2000);                // 局部现分配，不依赖 .bss
+    g_fake_parse_obj = obj;                       // 留档（便于事后比对），不用于判断
+    klog("[键解析·替身] 0x9fa4c8：旧值=%p 新对象=%p（x0=%#llx x1=%#llx）\n",
+         old, obj, (unsigned long long)f[FR_X0], (unsigned long long)f[FR_X1]);
+    return (uint64_t)(uintptr_t)obj;
 }
 
 // ===== 替换式安装器：宿主替函数干活（返回值经 x0 带回），**原实现一条都不执行** =====
@@ -2669,7 +2801,11 @@ static void k_inject_heap(uint8_t *img) {
 //         （2026-10-18：槽已在 k_fill_data_imports 补上 ⇒ 放出来重跑，静观是否真过）。
 //         旧注释"把 x20 当对象指针"是早前误判——反汇编显示它根本不碰 x20。
 //   #206 待查（0xb2a370，一个注册表构造器）。
-static int k_skip_ctor(size_t i) { return i == 206; }
+// 2026-10-18：#206（0xb2a370）**放行重试**。它此前"已知会崩"被跳过，但新的线索表明
+// 它可能在填某个注册表/全局对象（用了 0x2264288/0x2264448 等类型全局，且扫一个找 0x3c 的表）。
+// gate 会兜底：崩了自动跳过并打印 pc/si_addr，成功则可能顺带解开当前的解析失败。
+// 若确认无用可改回 return i == 206。
+static int k_skip_ctor(size_t i) { (void)i; return 0; }
 
 static void k_run_module_init(const module_t *m) {
     uint8_t *b = m->base;
@@ -2782,6 +2918,7 @@ static void *k_thread(void *arg) {
     } else {
         g_gate_armed = 0; g_k_faulted = 1;
         klog("=== nnMain 崩：pc %#llx sig %d ===\n", (unsigned long long)g_gate_fault_pc, g_gate_fault_sig);
+        k_log_counters("崩时");
         gate_dump_fault("nnMain");
     }
     return NULL;
@@ -2914,6 +3051,11 @@ static void exp_k(const char *files_dir, char *out, size_t cap, size_t *used) {
         k_install_hook(img, 0x73557c, (void *)hook_e26, "关键 x22 取值 0x73557c");
         k_install_hook(img, 0x7355a8, (void *)hook_e27, "对照 cbz 未跳则命中 0x7355a8");
         k_install_hook(img, 0xa051c4, (void *)hook_e28, "建对象 worker 0xa051c4（看 x2 是谁传的 0）");
+        // 崩点链最上游的解析器：原实现一路缺数据恒返 0 ⇒ worker 的 x2=0 ⇒ 崩 0xa05324。
+        // np54 起换成**替身**：宿主直接返全零对象，越过这道坎看下一层需求（§八影子对象打法）。
+        k_install_replace_hook(img, 0x9fa4c8, (void *)hook_rep_parse, "键解析·替身 0x9fa4c8（返全零对象）");
+        // 解析派发（worker 的调用者，函数指针进来）：直接看它喂给构造函数的 x2
+        k_install_hook(img, 0xa05fa4, (void *)hook_e30, "派发 0xa05fa4（看 x2）");
         g_nplt = 0; g_plt_calls = 0;
         for (uint64_t off = 0; off + 24 <= DT_PLTRELSZ; off += 24) {
             uint64_t r_off  = *(uint64_t *)(img + DT_JMPREL + off);
