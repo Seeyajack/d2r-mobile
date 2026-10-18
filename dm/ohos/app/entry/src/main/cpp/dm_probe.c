@@ -1661,6 +1661,41 @@ static uint64_t plt_stub(void) {
             static unsigned tick;
             if (++tick % 20 == 0) nvn_family_report("帧线程");
         }
+        // ═══ nn::vi：**输出指针**接口（不能"一律返 0"了事）═══
+        // 为什么必须补：这些接口返回 0 表示成功，但**输出指针也要回写**；桩不回写 ⇒
+        // 游戏手里的 Display/Layer/NativeWindow 恒为 0，后续"取尺寸 / 取窗口 / 等垂直同步"
+        // 全部踩空（真机依据：§37 的空单例崩点族 + [PLT] 清单显示 vi 这几件都真被调过）。
+        if (!strcmp(nm, "_ZN2nn2vi10InitializeEv")) return 0;
+        if (!strcmp(nm, "_ZN2nn2vi18OpenDefaultDisplayEPPNS0_7DisplayE")) {
+            static uint8_t disp[0x100];
+            *(void **)(uintptr_t)a0 = disp;
+            klog("[vi] OpenDefaultDisplay → 影子 Display %p\n", (void *)disp);
+            return 0;
+        }
+        if (!strcmp(nm, "_ZN2nn2vi11CreateLayerEPPNS0_5LayerEPNS0_7DisplayE")) {
+            static uint8_t layer[0x100];
+            *(void **)(uintptr_t)a0 = layer;
+            klog("[vi] CreateLayer(display=%p) → 影子 Layer %p\n", (void *)(uintptr_t)a1, (void *)layer);
+            return 0;
+        }
+        if (!strcmp(nm, "_ZN2nn2vi15GetNativeWindowEPPvPNS0_5LayerE")) {
+            static uint8_t win[0x100];
+            *(void **)(uintptr_t)a0 = win;
+            klog("[vi] GetNativeWindow(layer=%p) → 影子 NativeWindow %p\n", (void *)(uintptr_t)a1, (void *)win);
+            return 0;
+        }
+        if (!strcmp(nm, "_ZN2nn2vi19SetLayerScalingModeEPNS0_5LayerENS0_11ScalingModeE")) return 0;
+        if (!strcmp(nm, "_ZN2nn2vi20GetDisplayVsyncEventEPNS_2os15SystemEventTypeEPNS0_7DisplayE")) {
+            // 输出是游戏自己的 SystemEventType：清零＝"未触发"。
+            // 若以后游戏真去等它，会阻塞 ⇒ 届时换成宿主假事件（每次 Wait 立即返回）。
+            if (a0) memset((void *)(uintptr_t)a0, 0, 0x20);
+            klog("[vi] GetDisplayVsyncEvent → 零事件（暂不触发）\n");
+            return 0;
+        }
+        // nn::oe 的取值接口：给"掌机 / 普通性能 / 美式英语"这类合理缺省
+        if (!strcmp(nm, "_ZN2nn2oe16GetOperationModeEv")) return 0;      // 0 = Handheld
+        if (!strcmp(nm, "_ZN2nn2oe18GetPerformanceModeEv")) return 0;    // 0 = Normal
+        if (!strcmp(nm, "_ZN2nn2oe18GetDesiredLanguageEv")) return 0;    // 0 = AmericanEnglish
         if (g_plt_log_n < DM_PLT_LOG_CAP) {
             g_plt_log_n++;
             klog("[PLT] %s\n", nm);
