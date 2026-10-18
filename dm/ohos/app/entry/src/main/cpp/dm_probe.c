@@ -1612,6 +1612,11 @@ static uint64_t plt_stub(void) {
             q->n++;
             pthread_cond_signal(&q->cv_notempty);
             pthread_mutex_unlock(&q->mu);
+            {   // np77：找"谁该给空队列发消息"——发送方打点（与被阻塞的 Receive 对应）
+                static int ns; if (++ns <= 24)
+                    klog("[队列] TrySend(%#llx) 值=%#llx 送入后 n=%zu\n",
+                         (unsigned long long)a0, (unsigned long long)a1, q->n);
+            }
             return 1;                                   // bool 真 = 已送入
         }
         if (!strcmp(nm, "_ZN2nn2os16SendMessageQueueEPNS0_16MessageQueueTypeEm")) {
@@ -1624,6 +1629,11 @@ static uint64_t plt_stub(void) {
             q->n++;
             pthread_cond_signal(&q->cv_notempty);
             pthread_mutex_unlock(&q->mu);
+            {   // np77：同上，阻塞型发送方打点
+                static int ns; if (++ns <= 24)
+                    klog("[队列] Send(%#llx) 值=%#llx 送入后 n=%zu\n",
+                         (unsigned long long)a0, (unsigned long long)a1, q->n);
+            }
             return 0;
         }
         if (!strcmp(nm, "_ZN2nn2os22TryReceiveMessageQueueEPmPNS0_16MessageQueueTypeE")) {
