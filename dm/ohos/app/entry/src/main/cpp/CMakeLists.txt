@@ -39,6 +39,8 @@ add_library(dmprobe SHARED
     # 最小 nn::fs：客体 romfs 路径 → 宿主目录（DM_ROMFS，默认 /data/local/tmp/romfs）。
     # 只覆盖 main 导入的 23 个符号；按符号名在重定位时分流（dm_probe.c 的 PLT 循环）。
     ${DM_DIR}/ohos/dm_fs_ohos.c
+    # 通用 SDK 胶水层（L1）：vi/oe 等轻量语义按"符号名 → 实现"表组织，与游戏无关。
+    ${DM_DIR}/ohos/dm_sdk_ohos.c
     # romfs 启动子集的内嵌归档（段 dmromfs，.incbin 一份 .pack；打档工具 mk_romfs_pack.py）。
     # 为什么内嵌：鸿蒙沙箱看不到 /data/local/tmp，hdc 也写不进应用沙箱 ⇒ 只能放进 HAP。
     ${DM_DIR}/ohos/dm_romfs.S
