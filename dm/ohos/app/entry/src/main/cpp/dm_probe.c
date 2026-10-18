@@ -1840,6 +1840,16 @@ extern const char hook_stub_begin[], hook_stub_end[], hook_slot_orig[], hook_slo
 static int reloc_pc_rel(uint32_t w, uint8_t *from, uint8_t *to, uint32_t *out) {
     uint32_t op26 = w & 0xFC000000u;
     int32_t  imm; int64_t d;
+    // ★ 2026-10-18 真机根因：adrp / adr / ldr(字面量) 都是 **PC 相对取址**，而记录式桩的槽①
+    //   只有一条指令的位置（4 字节），搬进洞里执行会按**洞内 PC** 算地址 ⇒ 悄悄算到另一个页面，
+    //   上层再解引用就拿到垃圾（实测：+0xA246A4 崩，槽值其实是对的，是这条 adrp 被搬坏了）。
+    //   movz/movk 至少要两条才装得下绝对地址，槽①放不下 ⇒ **明确拒绝挂载**（返回 -1），
+    //   宁可不插桩，也不能插一个"改坏寄存器"的桩。
+    if ((w & 0x9F000000u) == 0x90000000u ||    // adrp
+        (w & 0x9F000000u) == 0x10000000u ||    // adr
+        (w & 0x3B000000u) == 0x18000000u) {    // ldr (literal)
+        return -1;
+    }
     if (op26 == 0x14000000u || op26 == 0x94000000u) {                            // b / bl
         imm = (int32_t)(w & 0x03FFFFFFu);
         if (imm & 0x02000000) imm -= 0x04000000;
@@ -1874,9 +1884,13 @@ static void k_install_hook(uint8_t *img, uint32_t site_off, void *host_fn, const
     // 否则会跳错地方——这是挂"调用点 / 尾调用点"绕不过的一步。
     {
         uint32_t w = *(uint32_t *)(img + site_off), nw = 0;
-        if (!reloc_pc_rel(w, img + site_off, dst + (hook_slot_orig - b0), &nw)) {
-            klog("[插桩] %s 站点指令 %08x 重定位超程，跳过\n", what, w); return;
+        int rr = reloc_pc_rel(w, img + site_off, dst + (hook_slot_orig - b0), &nw);
+        if (rr < 0) {
+            klog("[插桩] %s 站点首指令 %08x 是 PC 相对且一格里搬不动（adrp/adr/ldr 字面量），"
+                 "**拒绝挂载**（挂了会算错地址）\n", what, w);
+            return;
         }
+        if (rr == 0) { klog("[插桩] %s 站点指令 %08x 重定位超程，跳过\n", what, w); return; }
         *(uint32_t *)slot_of(dst, b0) = nw;
     }
     // 槽②：b site+4（相对编码）
@@ -2975,6 +2989,11 @@ static void *k_thread(void *arg) {
     klog("=== 终站：nnMain（0x735330）===\n");
     // 再挂一次影子堆：万一静态初始化里有构造器把它清零，这里补回来（代价极小）。
     k_fake_heap_install((uint8_t *)b);
+    // np72：**框架自证**——影子堆安装会写映像里的几个洞；这里确认它没有顺手清掉 0x2280eb8。
+    // 若这一行读到 0，说明"槽变 0"是我们自己的注入造成的（**通用框架 bug**，影响任何游戏）。
+    klog("[槽体检] 影子堆安装后：0x2280eb8=%#llx（应=%#llx）\n",
+         (unsigned long long)*(const uint64_t *)(b + 0x2280eb8),
+         (unsigned long long)((uintptr_t)b + 0x22d9260));
     g_gate_armed = 1; g_gate_fault_pc = 0;
     if (!g_fixup_page) g_fixup_page = calloc(1, 0x8000);   // 越障暂存区 32KB（64 块 × 0x100，见 gate_fault_handler）
     g_fixup_base = (uintptr_t)b;
@@ -2995,6 +3014,16 @@ static void *k_thread(void *arg) {
     } else {
         g_gate_armed = 0; g_k_faulted = 1;
         klog("=== nnMain 崩：pc %#llx sig %d ===\n", (unsigned long long)g_gate_fault_pc, g_gate_fault_sig);
+        // np73（§38.8 的决定性测试）：把 **pc 处的运行时指令字节**打出来，和文件对照。
+        // 文件里 0xa2469c..0xa246a8 = 9000c2e8 / f9475d08 / f9000100 / d65f03c0
+        //   （adrp / ldr x8,[x8,#0xeb8] / str x0,[x8] / ret）
+        // 若运行时前 1-2 条被改写 ⇒ 那里有钩子桩（语义已变，不能按原指令推断崩因）。
+        {
+            const uint32_t *c = (const uint32_t *)(uintptr_t)(g_gate_fault_pc - 8);
+            klog("[指令] pc-8..pc+8 运行时 = %08x %08x %08x %08x %08x\n",
+                 c[0], c[1], c[2], c[3], c[4]);
+            klog("[指令] 文件里同处应为   = d65f03c0 9000c2e8 f9475d08 f9000100 d65f03c0\n");
+        }
         // np64：槽体检——判"运行期槽是 0"到底是**游戏写回 0**还是**装载层 bss 清零洗掉了重定位**
         // （崩点 +0xA046A4 的存储目标 x9 = *(0x2280aa8) = 0；RELA 本该是 base+0x22d8790）
         {
