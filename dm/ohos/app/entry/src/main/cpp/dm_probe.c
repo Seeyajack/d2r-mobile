@@ -2467,15 +2467,36 @@ static const uint32_t g_boot_sites[] = {
     0xa003f0, 0x9fe240, 0xa1e5f0, 0xa9cc4c,
 };
 static int g_n_boot;
-static uint64_t hook_boot(uint64_t *f) {
+// np68：设值函数 0xa2469c 的**替身**。原实现两条指令：`x8 = *(0x2280eb8); *(u64*)x8 = x0`。
+// 真机怪象：启动链钩子（同一入口）读到槽是对的（base+0x22d9260），两条指令后 `ldr` 却拿到 0。
+// 与其继续猜"谁在两指令间清零"，不如替它干活：槽正常就直接替它写，槽异常就记录并跳过。
+// 这样既能绕开，又能把"槽异常"这一事实打在日志里。
+static int g_n_setter;
+static uint64_t hook_setter(uint64_t *f) {
     uint64_t base = (uint64_t)(uintptr_t)g_k_m.base;
+    uint64_t slot = *(const uint64_t *)(uintptr_t)(base + 0x2280eb8);
+    uint64_t val = f[FR_X0];
+    if (++g_n_setter <= 8)
+        klog("[设值] 0xa2469c 替身 #%d：槽=%#llx 值(x0)=%#llx\n",
+             g_n_setter, (unsigned long long)slot, (unsigned long long)val);
+    if (slot > 0x10000ull && slot < 0x800000000000ull)
+        *(uint64_t *)(uintptr_t)slot = val;      // 原函数干的就是这件事
+    return 0;
+}
+static uint64_t hook_boot(uint64_t *f) {    uint64_t base = (uint64_t)(uintptr_t)g_k_m.base;
     uint64_t site = f[FR_SITE];
     uint64_t so = (site >= base && site < base + DM_IMG_MAIN_END) ? site - base : site;
     uint64_t lr = f[FR_X30];
     uint64_t lo = (lr >= base && lr < base + DM_IMG_MAIN_END) ? lr - base : 0;
-    if (++g_n_boot <= 80)
-        klog("[启动链] #%d 进入 +%#llx（返回地址 +%#llx）\n",
-             g_n_boot, (unsigned long long)so, (unsigned long long)lo);
+    if (++g_n_boot <= 80) {
+        // np67：顺带盯 0x2280eb8——崩点 +0xA246A4 的间接目标。装载后/静态初始化后都正确，
+        // 崩时却是 0 ⇒ 是 nnMain 流程里被"覆盖写"清掉的（代码里没有 #0xeb8 的直接 store）。
+        // 逐站读它，看哪一段之后变 0。
+        uint64_t slot = *(const uint64_t *)(uintptr_t)(base + 0x2280eb8);
+        klog("[启动链] #%d 进入 +%#llx（返回地址 +%#llx）｜槽 0x2280eb8=%#llx\n",
+             g_n_boot, (unsigned long long)so, (unsigned long long)lo,
+             (unsigned long long)slot);
+    }
     return 0;
 }
 // ★ 决定性挂点（2026-10-18）：nnMain 0x73557c 是 `mov x22, x0`——x0 就是后面那个
@@ -2914,6 +2935,11 @@ static void k_run_module_init(const module_t *m) {
         }
     }
     klog("[静态初始化] 完成：成功 %zu 个，失败 %zu 个\n", ran, failed);
+    // np66：槽体检第二站——静态初始化之后。装载后该槽是对的（base+0x22d9260），
+    // 若这里变 0 ⇒ **某个构造器把它清零了**；若还是对的 ⇒ 是 nnMain 里的流程清零的。
+    klog("[槽体检] 静态初始化后：0x2280eb8=%#llx（装载后应=%#llx）\n",
+         (unsigned long long)*(const uint64_t *)(b + 0x2280eb8),
+         (unsigned long long)((uintptr_t)b + 0x22d9260));
 }
 
 static void *k_thread(void *arg) {
@@ -2996,6 +3022,21 @@ static void *k_thread(void *arg) {
     } else {
         g_gate_armed = 0; g_k_faulted = 1;
         klog("=== nnMain 崩：pc %#llx sig %d ===\n", (unsigned long long)g_gate_fault_pc, g_gate_fault_sig);
+        // np64：槽体检——判"运行期槽是 0"到底是**游戏写回 0**还是**装载层 bss 清零洗掉了重定位**
+        // （崩点 +0xA046A4 的存储目标 x9 = *(0x2280aa8) = 0；RELA 本该是 base+0x22d8790）
+        {
+            const uint8_t *im = (const uint8_t *)(uintptr_t)b;
+            uint64_t s98 = *(const uint64_t *)(im + 0x2280a98);
+            uint64_t sa0 = *(const uint64_t *)(im + 0x2280aa0);
+            uint64_t sa8 = *(const uint64_t *)(im + 0x2280aa8);
+            klog("[槽检] 0x2280a98=%#llx 0x2280aa0=%#llx 0x2280aa8=%#llx（基址=%#llx，应为 基址+0x22d8790=%#llx）\n",
+                 (unsigned long long)s98, (unsigned long long)sa0, (unsigned long long)sa8,
+                 (unsigned long long)(uintptr_t)b,
+                 (unsigned long long)((uintptr_t)b + 0x22d8790));
+            klog("[槽检] .bss 0x22d8790 内容=%#llx；0x22d8798 首字节=%#x（once 标志）\n",
+                 (unsigned long long)*(const uint64_t *)(im + 0x22d8790),
+                 (unsigned)*(const unsigned char *)(im + 0x22d8798));
+        }
         if (g_fixup_n)
             klog("[越障] 共拦截 %d 次；前 8 处 PC 偏移：%#llx %#llx %#llx %#llx %#llx %#llx %#llx %#llx\n",
                  (int)g_fixup_n,
@@ -3132,6 +3173,11 @@ static void exp_k(const char *files_dir, char *out, size_t cap, size_t *used) {
         //   目的：拿到"初始化走到第几步、在哪一步之后断掉"的完整顺序图。
         for (size_t bi = 0; bi < sizeof g_boot_sites / sizeof g_boot_sites[0]; bi++)
             k_install_hook(img, g_boot_sites[bi], (void *)hook_boot, "启动链");
+        // np68：设值函数换替身（覆盖上面那条记录式钩子——同一站点只能挂一个）。
+        // ⚠ 真机：装了替身之后**确定性卡死在静态初始化 ctor #385**（同 np58 的症状）——
+        //   说明 ctor #385 会调这个设值函数，而替身在那条路径上把它打断（也可能是同站点
+        //   二次挂接和记录钩子的洞冲突）。**暂不启用**，留作线索；恢复后 np67 行为可复现。
+        // k_install_replace_hook(img, 0xa2469c, (void *)hook_setter, "设值 0xa2469c 替身");
         // 决定性挂点：`mov x22, x0`（x22==0 ⇒ 跳过 7 个初始化直接进主循环）
         k_install_hook(img, 0x73557c, (void *)hook_e26, "关键 x22 取值 0x73557c");
         k_install_hook(img, 0x7355a8, (void *)hook_e27, "对照 cbz 未跳则命中 0x7355a8");
@@ -3157,6 +3203,15 @@ static void exp_k(const char *files_dir, char *out, size_t cap, size_t *used) {
         }
         dm_fs_set_log(klog);
         dm_fs_selftest();
+        // np65 槽体检（装载后、游戏跑之前）：崩点 +0xA246A4 的 `str x0,[*(0x2280eb8)]` 里那个槽
+        // 运行期是 0，但镜像里它有 RELA（addend 0x22d87e0）。这里在**游戏动手之前**读一次：
+        //   = base+0x22d87e0 ⇒ 重定位是对的，是游戏后来把它写成 0（应用层问题）
+        //   = 0            ⇒ 装载层漏了这条重定位（框架 bug，影响面大）
+        klog("[槽体检] 装载后：0x2280eb8=%#llx（应=%#llx）｜对照 0x2280a98=%#llx 0x227f900=%#llx\n",
+             (unsigned long long)*(const uint64_t *)(img + 0x2280eb8),
+             (unsigned long long)((uintptr_t)img + 0x22d87e0),
+             (unsigned long long)*(const uint64_t *)(img + 0x2280a98),
+             (unsigned long long)*(const uint64_t *)(img + 0x227f900));
         klog("[重定位诊断] mod0=%#x dyn=%#llx DT_RELA=%#llx RELASZ=%#llx JMPREL=%#llx PLTRELSZ=%#llx SYMTAB=%#llx STRTAB=%#llx\n",
              mod0, (unsigned long long)dyn, (unsigned long long)DT_RELA, (unsigned long long)DT_RELASZ,
              (unsigned long long)DT_JMPREL, (unsigned long long)DT_PLTRELSZ,
