@@ -1663,6 +1663,18 @@ static uint64_t plt_stub(void) {
                     klog("[变体表] *(0x22828b0)=%#llx%s 串对象虚表=%#llx 槽[+0x18]=%#llx\n",
                          (unsigned long long)g28, who28,
                          (unsigned long long)svt, (unsigned long long)m18);
+                    // np105：**启动包装载的门**（0xd5b670 附近那段：Pack/Bootup_Graphics.pack）：
+                    //   x8 = *(0x2276168); x8 = [x8]; if ([x8+0x419] != 0) ⇒ **跳过装载**
+                    //   实机读这个标志 + 那个全局指向谁。
+                    if (tick <= 400) {
+                        uint64_t g76 = *(const uint64_t *)(uintptr_t)(b2 + 0x2276168);
+                        uint8_t gate = 0xff;
+                        if (g76 > 0x10000ull && g76 < 0x800000000000ull)
+                            gate = *(const uint8_t *)(uintptr_t)(g76 + 0x419);
+                        klog("[启动包门] *(0x2276168)=%#llx [+0x419]=%#x %s\n",
+                             (unsigned long long)g76, gate,
+                             gate ? "⇒ 装载被跳过!" : "⇒ 允许装载");
+                    }
                 }
             }
         }
@@ -3008,6 +3020,17 @@ static void *k_thread(void *arg) {
             fclose(mp);
         }
     }
+    // np105b：启动包装载的门（0xd5b670：*(0x2276168) → 对象 → [+0x419] != 0 则跳过装载）。
+    //   在三个关键时刻读它，看这个 4 是什么时候写进去的。
+    #define GATE_LOG(tag) do { \
+        uint64_t _g = *(const uint64_t *)(uintptr_t)(b + 0x2276168); \
+        uint8_t _v = 0xff; \
+        if (_g > 0x10000ull && _g < 0x800000000000ull) \
+            _v = *(const uint8_t *)(uintptr_t)(_g + 0x419); \
+        klog("[启动包门] %s：*(0x2276168)=%#llx [+0x419]=%#x\n", tag, \
+             (unsigned long long)_g, _v); \
+    } while (0)
+    GATE_LOG("启动链前");
     g_k_stage = "启动链 0x1c8";
     klog("=== 起跑：入口 0x1c8（启动链）base %#llx ===\n", (unsigned long long)b);
     g_gate_armed = 1; g_gate_fault_pc = 0;
@@ -3021,6 +3044,7 @@ static void *k_thread(void *arg) {
         gate_dump_fault("启动链 0x1c8");
         return NULL;
     }
+    GATE_LOG("启动链后");
     // 更深一站：模块的第一个真实功能函数 0x1f8（C++ 对象工厂：读数据槽 → 分配 0xaa0 → 构造）
     g_k_stage = "工厂 0x1f8";
     klog("=== 深跑：0x1f8（对象工厂，x0 = 注入的管理器对象）===\n");
@@ -3044,6 +3068,7 @@ static void *k_thread(void *arg) {
     }
     // 终站：游戏的真正入口 nnMain（模块符号表 #506：st_value 0x735330，size 1008，GLOBAL FUNC）
     // 依据：rtld 的符号表里列出它要为主模块解析的入口名 nnMain（启动约定，非猜测）。
+    GATE_LOG("nnMain前");
     g_k_stage = "nnMain";
     g_nnmain_entered = 1;   // np86：置位后，工厂分支就知道"别再 fall-through 了"
     klog("=== 终站：nnMain（0x735330）===\n");
