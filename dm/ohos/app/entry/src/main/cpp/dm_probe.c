@@ -1707,6 +1707,20 @@ static uint64_t plt_stub(void) {
             if (a0) *(uint64_t *)(uintptr_t)a0 = v;
             return 1;
         }
+        // np131：**TryPeekMessageQueue** —— 看一眼有没有消息，**不取走**（取走是 TryReceive）。
+        // 真机实证：它此前没实现（落通用桩恒返 0 =「没有消息」）⇒ 游戏线程一直在 Peek 上空转
+        //   （日志尾部几千行 `[PLT] ...TryPeekMessageQueue`），而队列里的消息永远没人处理。
+        // 返回值语义与 nn 一致：非 0 = 看到了（消息仍在队列里）。
+        if (!strcmp(nm, "_ZN2nn2os19TryPeekMessageQueueEPmPKNS0_16MessageQueueTypeE")) {
+            dm_mq_t *qq = mq_get((void *)(uintptr_t)a1);
+            if (!qq || !qq->cap) return 0;
+            pthread_mutex_lock(&qq->mu);
+            int hit = qq->n != 0;
+            uint64_t vv = hit ? qq->buf[qq->head] : 0;
+            pthread_mutex_unlock(&qq->mu);
+            if (hit && a0) *(uint64_t *)(uintptr_t)a0 = vv;   // 只写回、不移动 head
+            return (uint64_t)hit;
+        }
         // 让出/等待类：真线程下 Yield 用 sched_yield
         if (!strcmp(nm, "_ZN2nn2os11YieldThreadEv")) { sched_yield(); return 0; }
         // nvnBootstrapLoader —— NVN 图形驱动引导（图形栈大门，2026-10-18 到达）
