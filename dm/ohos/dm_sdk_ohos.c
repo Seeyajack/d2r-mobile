@@ -50,6 +50,123 @@ static int oe_get_performance_mode(void) { return 0; }      // 0 = Normal
 static int oe_get_desired_language(void) { return 0; }      // 0 = AmericanEnglish
 static int oe_ok(uint64_t a0) { (void)a0; return 0; }       // Initialize / Set* 一律成功
 
+// ═══════════ nn::os 事件 / 轻量事件 / 信号量（2026-10-19 np130 补）═══════════
+// 真机实证：这三族**一个都没实现**（全落通用桩、返 0）——而"等事件"是任何 Horizon 程序的骨架：
+//   SignalLightEvent 被调 256 次却什么都没发生；Wait* 立刻返回"成功"，上层只能空转或判错。
+//   与 libc 空桩同性质、同样与游戏无关（换游戏照用），所以放这层。
+// 语义按 nnSdk：
+//   Event / LightEvent：有"已置位"标志；ClearMode 0=自动复位（被取走即清）、1=手动复位。
+//     Wait 阻塞到置位为止，TryWait 不阻塞，TimedWait 带超时。
+//   Semaphore：计数；Acquire 为 0 时阻塞，Release 加一（也可指定个数）。
+#include <pthread.h>
+#include <time.h>
+
+#define DM_EV_MAX 512
+typedef struct {
+    void            *key;
+    int32_t          val;        // 事件：1=已置位；信号量：当前计数
+    int32_t          manual;     // 1 = 手动复位
+    int32_t          is_sem;
+    pthread_mutex_t  mu;
+    pthread_cond_t   cv;
+} dm_ev_slot;
+static dm_ev_slot g_ev[DM_EV_MAX];
+static pthread_mutex_t g_ev_reg = PTHREAD_MUTEX_INITIALIZER;
+static int g_n_evfull;
+
+static dm_ev_slot *ev_get(void *k, int is_sem) {
+    pthread_mutex_lock(&g_ev_reg);
+    for (int i = 0; i < DM_EV_MAX; i++) if (g_ev[i].key == k) { pthread_mutex_unlock(&g_ev_reg); return &g_ev[i]; }
+    for (int i = 0; i < DM_EV_MAX; i++) if (!g_ev[i].key) {
+        g_ev[i].key = k; g_ev[i].val = 0; g_ev[i].manual = 1; g_ev[i].is_sem = is_sem;
+        pthread_mutex_init(&g_ev[i].mu, NULL);
+        pthread_condattr_t ca; pthread_condattr_init(&ca);
+        pthread_condattr_setclock(&ca, CLOCK_MONOTONIC);
+        pthread_cond_init(&g_ev[i].cv, &ca);
+        pthread_condattr_destroy(&ca);
+        pthread_mutex_unlock(&g_ev_reg);
+        return &g_ev[i];
+    }
+    pthread_mutex_unlock(&g_ev_reg);
+    if (++g_n_evfull <= 8) SDKLOG("【红】事件表满（%d 格）！%p 退化到槽 0\n", DM_EV_MAX, k);
+    return &g_ev[0];
+}
+
+static uint64_t os_init_event(uint64_t a0, uint64_t signalled, uint64_t mode) {
+    dm_ev_slot *e = ev_get((void *)(uintptr_t)a0, 0);
+    e->manual = (int32_t)mode;              // EventClearMode: 0=auto, 1=manual
+    e->val = (int32_t)(signalled & 1);
+    return 0;
+}
+static uint64_t os_signal_event(uint64_t a0) {
+    dm_ev_slot *e = ev_get((void *)(uintptr_t)a0, 0);
+    pthread_mutex_lock(&e->mu); e->val = 1; pthread_cond_broadcast(&e->cv); pthread_mutex_unlock(&e->mu);
+    return 0;
+}
+static uint64_t os_clear_event(uint64_t a0) {
+    dm_ev_slot *e = ev_get((void *)(uintptr_t)a0, 0);
+    pthread_mutex_lock(&e->mu); e->val = 0; pthread_mutex_unlock(&e->mu);
+    return 0;
+}
+static uint64_t os_try_wait_event(uint64_t a0) {
+    dm_ev_slot *e = ev_get((void *)(uintptr_t)a0, 0);
+    pthread_mutex_lock(&e->mu);
+    int hit = e->val != 0;
+    if (hit && !e->manual) e->val = 0;
+    pthread_mutex_unlock(&e->mu);
+    return (uint64_t)hit;
+}
+static uint64_t os_finalize_event(uint64_t a0) { (void)a0; return 0; }
+
+// 轻量事件：同一套语义，只是另一组类型名
+static uint64_t os_wait_light(uint64_t a0) {
+    dm_ev_slot *e = ev_get((void *)(uintptr_t)a0, 0);
+    pthread_mutex_lock(&e->mu);
+    while (!e->val) pthread_cond_wait(&e->cv, &e->mu);
+    if (!e->manual) e->val = 0;
+    pthread_mutex_unlock(&e->mu);
+    return 0;
+}
+static uint64_t os_timedwait_light(uint64_t a0, uint64_t ns) {   // TimeSpan 按值传在 x1
+    dm_ev_slot *e = ev_get((void *)(uintptr_t)a0, 0);
+    struct timespec dl;
+    clock_gettime(CLOCK_MONOTONIC, &dl);
+    int64_t n = (int64_t)ns;
+    if (n < 0) n = 0;
+    if (n == 0) return os_try_wait_event(a0);   // 0 超时 = 不阻塞
+    dl.tv_sec += n / 1000000000; dl.tv_nsec += n % 1000000000;
+    if (dl.tv_nsec >= 1000000000) { dl.tv_sec++; dl.tv_nsec -= 1000000000; }
+    pthread_mutex_lock(&e->mu);
+    while (!e->val) if (pthread_cond_timedwait(&e->cv, &e->mu, &dl) != 0) break;
+    int hit = e->val != 0;
+    if (hit && !e->manual) e->val = 0;
+    pthread_mutex_unlock(&e->mu);
+    return (uint64_t)hit;
+}
+
+// 信号量
+static uint64_t os_init_sem(uint64_t a0, uint64_t init, uint64_t maxv) {
+    dm_ev_slot *e = ev_get((void *)(uintptr_t)a0, 1);
+    (void)maxv;
+    e->val = (int32_t)init;
+    return 0;
+}
+static uint64_t os_acquire_sem(uint64_t a0) {
+    dm_ev_slot *e = ev_get((void *)(uintptr_t)a0, 1);
+    pthread_mutex_lock(&e->mu);
+    while (e->val <= 0) pthread_cond_wait(&e->cv, &e->mu);
+    e->val--;
+    pthread_mutex_unlock(&e->mu);
+    return 0;
+}
+static uint64_t os_release_sem(uint64_t a0, uint64_t n) {   // 单参重载时 x1 是脏值，按 ≥1 处理
+    dm_ev_slot *e = ev_get((void *)(uintptr_t)a0, 1);
+    int32_t add = (n >= 1 && n <= 0x1000) ? (int32_t)n : 1;
+    pthread_mutex_lock(&e->mu); e->val += add; pthread_cond_broadcast(&e->cv); pthread_mutex_unlock(&e->mu);
+    return 0;
+}
+static uint64_t os_finalize_sem(uint64_t a0) { (void)a0; return 0; }
+
 // ═══════════════ nn::settings：语言等价判定（2026-10-19 np129 补）═══════════════
 // 为什么补（真机实证的卡点）：`ResourceMgrTask` 建完之后，游戏在
 //   `nn::settings::eq(Language, LanguageCode)` 上打了无数个来回（PLT 日志刷满、进程 0% CPU 睡死）。
@@ -199,6 +316,23 @@ static const dm_sdk_ent g_tab[] = {
     E("_ZN2nn4util9VSNPrintfEPcmPKcSt9__va_list", util_vsnprintf),
     // ---- nn::settings ----
     E("_ZN2nn8settingseqERKNS0_8LanguageERKNS0_12LanguageCodeE", sdk_settings_eq),
+    // ---- nn::os：事件 / 轻量事件 / 信号量（np130）----
+    E("_ZN2nn2os15InitializeEventEPNS0_9EventTypeEbNS0_14EventClearModeE", os_init_event),
+    E("_ZN2nn2os11SignalEventEPNS0_9EventTypeE", os_signal_event),
+    E("_ZN2nn2os10ClearEventEPNS0_9EventTypeE", os_clear_event),
+    E("_ZN2nn2os12TryWaitEventEPNS0_9EventTypeE", os_try_wait_event),
+    E("_ZN2nn2os13FinalizeEventEPNS0_9EventTypeE", os_finalize_event),
+    E("_ZN2nn2os20InitializeLightEventEPNS0_14LightEventTypeEbNS0_14EventClearModeE", os_init_event),
+    E("_ZN2nn2os16SignalLightEventEPNS0_14LightEventTypeE", os_signal_event),
+    E("_ZN2nn2os15ClearLightEventEPNS0_14LightEventTypeE", os_clear_event),
+    E("_ZN2nn2os14WaitLightEventEPNS0_14LightEventTypeE", os_wait_light),
+    E("_ZN2nn2os19TimedWaitLightEventEPNS0_14LightEventTypeENS_8TimeSpanE", os_timedwait_light),
+    E("_ZN2nn2os18FinalizeLightEventEPNS0_14LightEventTypeE", os_finalize_event),
+    E("_ZN2nn2os19InitializeSemaphoreEPNS0_13SemaphoreTypeEii", os_init_sem),
+    E("_ZN2nn2os16AcquireSemaphoreEPNS0_13SemaphoreTypeE", os_acquire_sem),
+    E("_ZN2nn2os16ReleaseSemaphoreEPNS0_13SemaphoreTypeE", os_release_sem),
+    E("_ZN2nn2os16ReleaseSemaphoreEPNS0_13SemaphoreTypeEi", os_release_sem),
+    E("_ZN2nn2os17FinalizeSemaphoreEPNS0_13SemaphoreTypeE", os_finalize_sem),
     // ---- nn::os：时基与睡眠 ----
     E("_ZN2nn2os17ConvertToTimeSpanENS0_4TickE", os_convert_timespan),
     E("_ZN2nn2os11SleepThreadENS_8TimeSpanE", os_sleep),
