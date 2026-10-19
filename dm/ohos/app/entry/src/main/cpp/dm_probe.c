@@ -1059,6 +1059,53 @@ static size_t g_gate_ctor;       // np107：写入者的构造器序号
 static uint64_t g_gate_ctorentry;
 static uint64_t g_gate_obj;
 static unsigned g_gate_val;
+// ===== np111：RootTask::calc 的「启动阶段状态机」（P0-1 / P0-2）=====
+// 离线结论（2026-10-19 晚，main.patched.bin 定向反汇编 + 字符串核实，**不是猜**）：
+//   0x726838 = **RootTask::calc**：日志名串 0x1b788b4「RootTask::calc」；
+//     虚表 0x215a160 的槽 22（+0xb0）= 该函数；构造器 0x7277ec（alloc 0x3d0，置 phase=0）。
+//   阶段分发：`ldrb w8,[x19,#0x200]` → `cmp w8,#9` → `b.hi 返回` → 跳表 0x1c1f448（10 项）。
+//   各阶段（静态读出）：
+//     phase 0 → 建 "Error Viewer"、"Volante"、"KingSystem"（0x108 字节，存 [+0x358]）
+//               并起 "SoundCalcThread"，末尾置 phase=1
+//     phase 1 → 等 KingSystem 的 **[+0xd4] ∈ {3,4}**；满足才销毁它并置 phase=2
+//     phase 2 → 建管理器 "StarterPackMgr"（0xdb9284，站点 0x726f60）→ 置 phase=3
+//     phase 3 → 0xdb9af4 返 bit0 就继续等，否则置 4
+//     phase 4 → 装 AIDef_Game.product.byml → 0x726f60 再建管理器 → 3；或置 5
+//     phase 5 → 6 → 7（连跳）；phase 7 → 大块收尾 → 8；phase 8 → 等 0x731340 → 9
+//   ⇒ **只要 phase 停在 0/1，0x726f60 永远到不了**，管理器不建 ⇒ 包不读 ⇒ 一切空。
+// 本探针只读不改：抓 this、读 phase、读 phase1 的放行条件、数"建管理器"命中。
+static int g_rt_calls;        // calc 进入次数
+static uint64_t g_rt_this;    // RootTask 对象地址
+static int g_rt_phase = -1;   // 上一次读到的阶段
+static uint32_t g_rt_seen;    // 见过的阶段位图（bit n = phase n）
+static int g_rt_trans;        // 阶段转移次数
+static int g_rt_mgr;          // 0x726f60「建管理器」命中次数
+static int g_rt_ctor;         // 0x7277ec 构造命中次数
+
+static int rt_read_u32(uint64_t addr, uint32_t *out) {
+    if (addr < 0x10000ull || addr >= 0x800000000000ull) return 0;
+    *out = *(const uint32_t *)(uintptr_t)addr;
+    return 1;
+}
+static void rt_dump(const char *why) {
+    if (!g_rt_this) { klog("[RootTask] %s：还没拿到 this（calc 一次都没进）\n", why); return; }
+    uint64_t t = g_rt_this;
+    uint32_t ph = *(const uint8_t *)(uintptr_t)(t + 0x200);
+    uint64_t ks = *(const uint64_t *)(uintptr_t)(t + 0x358);
+    uint32_t st = 0;
+    int ok = rt_read_u32(ks + 0xd4, &st);
+    klog("[RootTask] %s：进入=%d phase=%u 见过=%#x 转移=%d 建管理器=%d 构造=%d\n",
+         why, g_rt_calls, ph, g_rt_seen, g_rt_trans, g_rt_mgr, g_rt_ctor);
+    klog("[RootTask] %s：+0x208=%#llx +0x210=%#llx +0x218=%#llx +0x220=%#llx +0x228=%#llx\n",
+         why,
+         (unsigned long long)*(const uint64_t *)(uintptr_t)(t + 0x208),
+         (unsigned long long)*(const uint64_t *)(uintptr_t)(t + 0x210),
+         (unsigned long long)*(const uint64_t *)(uintptr_t)(t + 0x218),
+         (unsigned long long)*(const uint64_t *)(uintptr_t)(t + 0x220),
+         (unsigned long long)*(const uint64_t *)(uintptr_t)(t + 0x228));
+    klog("[RootTask] %s：KingSystem([+0x358])=%#llx 其[+0xd4]=%s%d（phase1 放行条件：3 或 4）\n",
+         why, (unsigned long long)ks, ok ? "" : "读不到/", ok ? (int)st : 0);
+}
 static void *nvn_real_lookup(const char *name) {
     void *r = dm_nvn_vk_real(name);         // 通用 NVN 池/缓冲层（L1，UMA 直通）
     if (r) return r;
@@ -1644,6 +1691,9 @@ static uint64_t plt_stub(void) {
         if (!strcmp(nm, "_ZN2nn2os17ConvertToTimeSpanENS0_4TickE")) {
             static unsigned tick;
             if (++tick % 20 == 0) nvn_family_report("帧线程");
+            // np111：借游戏自己的帧线程定期 dump RootTask 的阶段（P0-2）。
+            //   第 20 帧一次（早看），之后每 200 帧一次（看是否卡住）。
+            if (tick == 20 || tick % 200 == 0) rt_dump("周期");
             // np103：定期读"变体表"（0x22dce70）的状态——#206 查它拿到空指针。
             //   看三样：+0x18 缓存指针、缓存内容前 16 字节、+0x48 计数。
             //   若计数=2（初始化器跑过）而缓存内容全 0 ⇒ "建了表但没人填内容"。
@@ -2463,6 +2513,47 @@ static uint64_t hook_e24(uint64_t *f) {
 static int g_n_e25;
 static uint64_t hook_e25(uint64_t *f) {   // 0x9ff3a0：7 棵树挂载段（纯 store，不喂寄存器）
     if (++g_n_e25 <= 4) klog("[框架] 0x9ff3a0：进入「挂 7 棵方法树」这一段\n");
+    return 0;
+}
+
+// ===== np111：RootTask::calc 阶段状态机（P0-1/P0-2，见文件上方 g_rt_* 的离线结论）=====
+static uint64_t hook_rt_calc(uint64_t *f) {   // 0x726838 入口：x0 = RootTask*
+    uint64_t th = f[FR_X0];
+    g_rt_calls++;
+    if (!g_rt_this && th > 0x10000ull && th < 0x800000000000ull) {
+        uint64_t b0 = (uint64_t)(uintptr_t)g_k_m.base;
+        int in = b0 && th >= b0 && th < b0 + DM_IMG_MAIN_END;
+        g_rt_this = th;
+        g_rt_phase = *(const uint8_t *)(uintptr_t)(th + 0x200);
+        g_rt_seen |= 1u << (g_rt_phase & 31);
+        klog("[RootTask] ★ 首次进入 calc：this=%#llx（映像内 %s%#llx）phase=%d x30=%#llx\n",
+             (unsigned long long)th, in ? "+" : "(外)",
+             (unsigned long long)(in ? th - b0 : th), g_rt_phase,
+             (unsigned long long)f[FR_X30]);
+        rt_dump("首帧");
+    }
+    if (th == g_rt_this) {   // 每帧读一次阶段，只在变化时记（不刷屏）
+        int ph = *(const uint8_t *)(uintptr_t)(th + 0x200);
+        if (ph != g_rt_phase) {
+            int from = g_rt_phase;
+            g_rt_phase = ph;
+            g_rt_seen |= 1u << (ph & 31);
+            if (++g_rt_trans <= 32)
+                klog("[RootTask] 阶段 %d → %d（第 %d 次进入 calc）\n", from, ph, g_rt_calls);
+        }
+    }
+    return 0;
+}
+static uint64_t hook_rt_mgr(uint64_t *f) {   // 0x726f60：phase2/phase4 的「建管理器」站点
+    (void)f;
+    if (++g_rt_mgr <= 4)
+        klog("[RootTask] ★ 走到「建管理器」分支（站点 0x726f60，bl 0xdb9284）第 %d 次\n", g_rt_mgr);
+    return 0;
+}
+static uint64_t hook_rt_ctor(uint64_t *f) {  // 0x7277ec：RootTask 构造（alloc 0x3d0）
+    if (++g_rt_ctor <= 4)
+        klog("[RootTask] 构造 0x7277ec 被调（第 %d 次）owner=%#llx x30=%#llx\n",
+             g_rt_ctor, (unsigned long long)f[FR_X0], (unsigned long long)f[FR_X30]);
     return 0;
 }
 
@@ -3319,6 +3410,10 @@ static void exp_k(const char *files_dir, char *out, size_t cap, size_t *used) {
         k_install_replace_hook(img, 0x9f34d8, (void *)host_alloc_replace, "分配器 0x9f34d8");
         k_install_replace_hook(img, 0x9f3464, (void *)host_alloc_replace, "分配器 0x9f3464");
         k_install_replace_hook(img, 0x9f33f0, (void *)host_alloc_replace, "分配器 0x9f33f0");
+        // ★ np111：RootTask::calc 的阶段状态机（P0-1/P0-2）。放在最前面，保证一定装得上。
+        k_install_hook(img, 0x726838, (void *)hook_rt_calc, "RootTask::calc 入口（阶段状态机）");
+        k_install_hook(img, 0x726f60, (void *)hook_rt_mgr, "RootTask 建管理器站点 0x726f60");
+        k_install_hook(img, 0x7277ec, (void *)hook_rt_ctor, "RootTask 构造 0x7277ec");
         // 崩链上的两个构造器入口（记录 this）
         k_install_hook(img, 0xa08ef4, (void *)hook_ctor_log, "构造器 0xa08ef4 入口");
         k_install_hook(img, 0xa08e94, (void *)hook_ctor2_log, "构造器 0xa08e94 入口");
