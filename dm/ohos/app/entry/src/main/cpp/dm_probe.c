@@ -1049,6 +1049,11 @@ static void nvn_host_thread_probe_start(void) {
     else klog("[NVN] 宿主线程起不来（不影响主线）\n");
 }
 
+static int g_gate_caught;        // np107：门字节是否已变非零（抓住写入者用）
+static size_t g_gate_ctor;       // np107：写入者的构造器序号
+static uint64_t g_gate_ctorentry;
+static uint64_t g_gate_obj;
+static unsigned g_gate_val;
 static void *nvn_real_lookup(const char *name) {
     void *r = dm_nvn_vk_real(name);         // 通用 NVN 池/缓冲层（L1，UMA 直通）
     if (r) return r;
@@ -1671,9 +1676,8 @@ static uint64_t plt_stub(void) {
                         uint8_t gate = 0xff;
                         if (g76 > 0x10000ull && g76 < 0x800000000000ull)
                             gate = *(const uint8_t *)(uintptr_t)(g76 + 0x419);
-                        klog("[启动包门] *(0x2276168)=%#llx [+0x419]=%#x %s\n",
-                             (unsigned long long)g76, gate,
-                             gate ? "⇒ 装载被跳过!" : "⇒ 允许装载");
+                        klog("[启动包门](旧单层读，仅参考) 外层=%#llx [+0x419]=%#x\n",
+                             (unsigned long long)g76, gate);
                     }
                 }
             }
@@ -2870,6 +2874,10 @@ static void k_install_replace_hook(uint8_t *img, uint32_t site_off, void *host_f
 }
 // 宿主替分配器干活：x0 = 请求大小，返回真实内存（calloc 清零）
 static uint64_t g_rep_n;
+static int g_n_big;      // np106/np106b：大块分配计数（≥0x400，含管理器对象级别的）
+static uint64_t g_big_sz[24];
+static uint64_t g_big_lr[24];
+static unsigned g_big_seq[24];
 static uint64_t host_alloc_replace(uint64_t *f) {
     uint64_t size = f[FR_X0];
     void *p = calloc(1, (size_t)size);
@@ -2877,7 +2885,31 @@ static uint64_t host_alloc_replace(uint64_t *f) {
         klog("[替换] 分配 %llu 字节 → %p（站点 %#llx 上下文 %#llx）\n",
              (unsigned long long)size, p,
              (unsigned long long)f[FR_SITE], (unsigned long long)f[FR_X1]);
+    // np106：**启动包装载门**（[*(0x2276168)+0x419]）所在的管理器对象由这里分配；
+    //   它在启动链前就已带 [+0x419]=4 ⇒ 分配后某段代码写了 4。记录所有 ≥0x400 的分配
+    //   与站点，据尺寸（≥0x41c）与构造现场定位写入者。
+    // np106b：**只记录、不打印**（np58 教训：分配器钩子里在构造器期打日志 ⇒ 卡死 ctor #385）。
+    //   构造器跑完后由 dump_big_allocs() 统一输出。
+    if (size >= 0x400 && g_n_big < 24) {
+        uint64_t lr = f[FR_X30];
+        g_big_sz[g_n_big] = size;
+        g_big_lr[g_n_big] = lr;
+        g_big_seq[g_n_big] = g_rep_n;      // 第几次分配（便于和日志行号对齐）
+        g_n_big++;
+    }
     return (uint64_t)(uintptr_t)p;
+}
+
+// np106b：大分配记录落地（构造器期之后调用，此时打日志才安全）
+static void dump_big_allocs(void) {
+    uint64_t b2 = (uint64_t)(uintptr_t)g_k_m.base;
+    for (int i = 0; i < g_n_big; i++) {
+        int in = g_big_lr[i] >= b2 && g_big_lr[i] < b2 + DM_IMG_MAIN_END;
+        klog("[大分配] #%d %#llx 字节（第 %d 次分配）；站点=%s%#llx\n", i,
+             (unsigned long long)g_big_sz[i], (int)g_big_seq[i],
+             in ? "+" : "(外)",
+             (unsigned long long)(in ? g_big_lr[i] - b2 : g_big_lr[i]));
+    }
 }
 // 批量挂点：扫全映像，找出所有指向 target 的 **bl（调用）与 b（尾调用）** 站点并全部挂上。
 // 为什么连 b 也要挂：崩链上的调用可能是尾调用（不更新 x30），只扫 bl 会把它们漏掉。
@@ -2975,6 +3007,23 @@ static void k_run_module_init(const module_t *m) {
             arr[i](0, NULL, NULL);
             g_gate_armed = 0;
             ran++;
+            // np107：**逐个查宅基地**——门字节 [*(0x2276168)+0x419] 一旦变非零，
+            //   刚才那个构造器就是写入者。只记录不打印（np58 教训），循环后统一输出。
+            if (!g_gate_caught) {
+                // np109：装载器是 **x8=[0x2276168]; x8=[x8]; ldrb [x8+0x419]**（二次解引用！）
+                //   真正的门对象 = [[0x2276168]]。np108 实测 [0x2276168]→0x22fc760 的首字为 0
+                //   ⇒ 内层指针还没建立。这里改判"内层指针首次非零"。
+                uint64_t g = *(const uint64_t *)(uintptr_t)((uint8_t *)b + 0x2276168);
+                uint64_t obj = (g > 0x10000ull && g < 0x800000000000ull)
+                             ? *(const uint64_t *)(uintptr_t)g : 0;
+                if (obj > 0x10000ull && obj < 0x800000000000ull) {
+                    g_gate_caught = 1;
+                    g_gate_ctor = i;
+                    g_gate_ctorentry = (uint64_t)(uintptr_t)arr[i];
+                    g_gate_obj = obj;
+                    g_gate_val = *(const uint8_t *)(uintptr_t)(obj + 0x419);
+                }
+            }
         } else {
             g_gate_armed = 0;
             failed++;
@@ -2987,6 +3036,35 @@ static void k_run_module_init(const module_t *m) {
     klog("[静态初始化] 完成：成功 %zu 个，失败 %zu 个\n", ran, failed);
     // np66：槽体检第二站——静态初始化之后。装载后该槽是对的（base+0x22d9260），
     // 若这里变 0 ⇒ **某个构造器把它清零了**；若还是对的 ⇒ 是 nnMain 里的流程清零的。
+    dump_big_allocs();   // np106b：大分配记录落地（此刻打日志才安全）
+    // np107：门字节写入者（构造器序号 + 入口）
+    if (g_gate_caught) {
+        uint64_t b3 = (uint64_t)(uintptr_t)b;
+        uint64_t e = g_gate_ctorentry;
+        int in = e >= b3 && e < b3 + DM_IMG_MAIN_END;
+        klog("[启动包门] 写入者 = 构造器 #%zu（入口 %s%#llx）；对象=%#llx 当时值=%#x\n",
+             g_gate_ctor, in ? "+" : "(外)",
+             (unsigned long long)(in ? e - b3 : e),
+             (unsigned long long)g_gate_obj, g_gate_val);
+        // np108：dump 门对象的内存，弄清它是什么（对象地址换算成映像内偏移）
+        {
+            const uint8_t *o = (const uint8_t *)(uintptr_t)g_gate_obj;
+            int ino = g_gate_obj >= b3 && g_gate_obj < b3 + DM_IMG_MAIN_END;
+            klog("[启动包门] 对象映像内偏移 = %s%#llx\n",
+                 ino ? "+" : "(外)",
+                 (unsigned long long)(ino ? g_gate_obj - b3 : g_gate_obj));
+            char hx[96]; size_t u = 0;
+            for (int k = 0; k < 24 && u + 3 < sizeof hx; k++)
+                u += (size_t)snprintf(hx + u, sizeof hx - u, "%02x", o[k]);
+            hx[u] = 0; klog("[启动包门] 头 24 字节：%s\n", hx);
+            u = 0;
+            for (int k = 0x410; k < 0x428 && u + 3 < sizeof hx; k++)
+                u += (size_t)snprintf(hx + u, sizeof hx - u, "%02x", o[k]);
+            hx[u] = 0; klog("[启动包门] +0x410..+0x428：%s\n", hx);
+        }
+    } else {
+        klog("[启动包门] 构造器跑完时门仍为 0 ⇒ 4 是启动链/nnMain 阶段写的\n");
+    }
     klog("[槽体检] 静态初始化后：0x2280eb8=%#llx（装载后应=%#llx）\n",
          (unsigned long long)*(const uint64_t *)(b + 0x2280eb8),
          (unsigned long long)((uintptr_t)b + 0x22d9260));
@@ -3024,11 +3102,13 @@ static void *k_thread(void *arg) {
     //   在三个关键时刻读它，看这个 4 是什么时候写进去的。
     #define GATE_LOG(tag) do { \
         uint64_t _g = *(const uint64_t *)(uintptr_t)(b + 0x2276168); \
+        uint64_t _o = (_g > 0x10000ull && _g < 0x800000000000ull) \
+                   ? *(const uint64_t *)(uintptr_t)_g : 0; \
         uint8_t _v = 0xff; \
-        if (_g > 0x10000ull && _g < 0x800000000000ull) \
-            _v = *(const uint8_t *)(uintptr_t)(_g + 0x419); \
-        klog("[启动包门] %s：*(0x2276168)=%#llx [+0x419]=%#x\n", tag, \
-             (unsigned long long)_g, _v); \
+        if (_o > 0x10000ull && _o < 0x800000000000ull) \
+            _v = *(const uint8_t *)(uintptr_t)(_o + 0x419); \
+        klog("[启动包门] %s：外层=%#llx 内层(真门对象)=%#llx [+0x419]=%#x\n", tag, \
+             (unsigned long long)_g, (unsigned long long)_o, _v); \
     } while (0)
     GATE_LOG("启动链前");
     g_k_stage = "启动链 0x1c8";
