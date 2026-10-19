@@ -1275,6 +1275,7 @@ static dm_mq_t *mq_get(void *q) {
 // 前置声明：TLS 的每线程影子要把 [+0xb0] 填成注入的分配器对象（定义在后面，C 的试探性定义合法）
 static uint64_t g_alloc_obj[2];
 
+static uint64_t *g_fake_heap;       // np103b 前置声明（定义在后）
 static uint64_t plt_stub(void) {
     uint64_t x16v, a0, a1, a2, a3;
     __asm__ volatile("mov %0, x16" : "=r"(x16v));
@@ -1633,6 +1634,37 @@ static uint64_t plt_stub(void) {
         if (!strcmp(nm, "_ZN2nn2os17ConvertToTimeSpanENS0_4TickE")) {
             static unsigned tick;
             if (++tick % 20 == 0) nvn_family_report("帧线程");
+            // np103：定期读"变体表"（0x22dce70）的状态——#206 查它拿到空指针。
+            //   看三样：+0x18 缓存指针、缓存内容前 16 字节、+0x48 计数。
+            //   若计数=2（初始化器跑过）而缓存内容全 0 ⇒ "建了表但没人填内容"。
+            if (tick % 400 == 100) {
+                uint64_t b2 = (uint64_t)(uintptr_t)g_k_m.base;
+                if (b2) {
+                    const uint8_t *tbl = (const uint8_t *)(uintptr_t)(b2 + 0x22dce70);
+                    uint64_t cache = *(const uint64_t *)(uintptr_t)(tbl + 0x18);
+                    uint32_t cnt = *(const uint32_t *)(uintptr_t)(tbl + 0x48);
+                    char hex[80]; size_t u = 0;
+                    if (cache > 0x10000ull && cache < 0x800000000000ull) {
+                        const uint8_t *c = (const uint8_t *)(uintptr_t)cache;
+                        for (int i = 0; i < 16 && u + 3 < sizeof hex; i++)
+                            u += (size_t)snprintf(hex + u, sizeof hex - u, "%02x", c[i]);
+                    }
+                    hex[u] = 0;
+                    klog("[变体表] tick=%u 计数=%u 缓存=%#llx 内容[%s]\n",
+                         tick, cnt, (unsigned long long)cache, hex);
+                    // np103b：字符串对象(0x22dcdf0)的虚表来自 *(0x22828b0)+0x10——
+                    //   若那又是我们的假堆/替身虚表 ⇒ 虚调用全返 0 ⇒ 字符串永远空（根因实锤）。
+                    uint64_t g28 = *(const uint64_t *)(uintptr_t)(b2 + 0x22828b0);
+                    uint64_t svt = *(const uint64_t *)(uintptr_t)(b2 + 0x22dcdf0);
+                    uint64_t m18 = (svt > 0x10000ull && svt < 0x800000000000ull)
+                                 ? *(const uint64_t *)(uintptr_t)(svt + 0x18) : 0;
+                    const char *who28 = "(?)";
+                    if (g28 >= (uint64_t)(uintptr_t)g_fake_heap && g28 < (uint64_t)(uintptr_t)g_fake_heap + 0x4000) who28 = "假堆!";
+                    klog("[变体表] *(0x22828b0)=%#llx%s 串对象虚表=%#llx 槽[+0x18]=%#llx\n",
+                         (unsigned long long)g28, who28,
+                         (unsigned long long)svt, (unsigned long long)m18);
+                }
+            }
         }
         // ═══ 通用 SDK 胶水层（L1，dm_sdk_ohos.c）═══
         // vi/oe 这类"轻量语义"已搬到独立模块：与游戏无关、换游戏一行不改。
