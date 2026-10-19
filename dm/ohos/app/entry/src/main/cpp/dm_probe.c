@@ -1124,13 +1124,37 @@ static void rt_dump(const char *why) {
     klog("[RootTask] %s：KingSystem([+0x358])=%#llx 其[+0xd4]=%s%d（phase1 放行条件：3 或 4）\n",
          why, (unsigned long long)ks, ok ? "" : "读不到/", ok ? (int)st : 0);
 }
+// np122：这两个"元函数"必须是 static 的前置声明——bootstrap 的补充表要用它们。
+//   教训（真机实证）：np118 只把它们挂进 nvnDeviceGetProcAddress 的分支里，bootstrap 查不到，
+//   Volante 初始化仍然在 0x9fc59c 早退（NvnDeviceInitialize 拿到 0），NVN 函数表一整个没注册
+//   ⇒ 建对象 worker 调 *(0x22d7428) 空指针崩。
+static uint64_t nvn_dev_init(void *dev, const void *builder);
+static uint64_t nvn_dev_gpa(void *dev, const char *name);
+
 static void *nvn_real_lookup(const char *name) {
+    if (!name) return NULL;
+    if (!strcmp(name, "nvnDeviceInitialize"))     return (void *)(uintptr_t)&nvn_dev_init;
+    if (!strcmp(name, "nvnDeviceGetProcAddress")) return (void *)(uintptr_t)&nvn_dev_gpa;
     void *r = dm_nvn_vk_real(name);         // 通用 NVN 池/缓冲层（L1，UMA 直通）
     if (r) return r;
     r = dm_nvn_real(name);                  // 通用 NVN 设备族胶水层（L1）
     // np101：池/缓冲族的 23 个真实现已搬去 dm_nvn_vk.c（上面的 dm_nvn_vk_real），
     //   探针里不再保留自己的表。设备初始化/GetProcAddress 两个仍在本文件（下面）。
     return r;
+}
+
+// np122：nvnBootstrapLoader 的宿主入口——**永远不返回 0**。
+//   语义：框架层（dm_nvn_bootstrap）认识就给它，不认识就给记账桩。
+//   为什么必须兜底：真机实证 np118 直接绑 dm_nvn_bootstrap，它查不到时返回 0，
+//   于是 Volante 初始化在 0x9fc59c 早退（以为驱动没有驱动初始化），NVN 函数表整个没注册，
+//   建对象 worker 随后 blr 空指针（pc=0）。原 plt_stub 的语义就是"取不到也给桩"，这里保持一致。
+static uint64_t host_nvn_bootstrap(const char *name) {
+    void *p = dm_nvn_bootstrap(name);
+    if (p) return (uint64_t)(uintptr_t)p;
+    static int n_un;
+    if (++n_un <= 40)
+        klog("[NVN] BootstrapLoader(「%s」) → 兜底桩\n", name ? name : "(null)");
+    return (uint64_t)(uintptr_t)&nvn_stub;
 }
 
 static uint64_t nvn_dev_init(void *dev, const void *builder) {
@@ -2669,6 +2693,51 @@ static uint64_t hook_gfx_flush(uint64_t *f) {  // 0xa041d0：崩点函数本体
     return 0;
 }
 
+// ===== np121：NVN 函数表为什么是空的（0x22d7428 = 0 ⇒ worker blr 空指针）=====
+// 离线（本轮）：0x9b2938 = **NVN 函数表注册**（Volante 初始化里 `bl 0x9b2938(0, nvnDeviceGetProcAddress)`），
+//   里面是一长串 `x0=dev; x1="nvnProgramInitialize"; blr x19(解析器); [槽]=x0`，
+//   把解析结果存进 0x22d7410 一族全局槽。我们的崩点槽 0x22d7428（经 0x227f7a0 访问）
+//   **唯一的写者就是 0x9b3030 这条 `str x0,[x8]`**。
+//   ⇒ 三个互斥可能，一次跑测就能分辨：
+//     ① 0x9b2938 没跑（表初始化根本没被调）
+//     ② 跑了但半路 bail（0x9b3030 不命中）
+//     ③ 跑了且写进 0，即 GPA 返回了 0（0x9b3030 命中但 x0=0）
+static int g_nvn_tab_init;   // 0x9b2938 命中
+static int g_nvn_tab_store;  // 0x9b3030 命中
+static uint64_t hook_nvn_tab_init(uint64_t *f) {
+    if (++g_nvn_tab_init <= 4)
+        klog("[NVN表] 注册函数 0x9b2938 被调（第 %d 次）dev=%#llx 解析器=%#llx x30=%#llx\n",
+             g_nvn_tab_init, (unsigned long long)f[FR_X0],
+             (unsigned long long)f[FR_X1], (unsigned long long)f[FR_X30]);
+    return 0;
+}
+static uint64_t hook_nvn_tab_store(uint64_t *f) {   // 0x9b3030：str x0,[x8]
+    if (++g_nvn_tab_store <= 8 || (g_nvn_tab_store % 64) == 0)
+        klog("[NVN表] 写入第 %d 次：值=%#llx → 槽=%#llx\n",
+             g_nvn_tab_store, (unsigned long long)f[FR_X0], (unsigned long long)f[8]);
+    return 0;
+}
+
+// np123：确认"显示对象 [+0x128] 到底有没有建起来 + 谁在用它"。
+//   0x9fc8c4 = `str x23,[x19,#0x128]`（Volante 初始化里建显示对象那一条，唯一正常的写法）
+//   0x9fd490 = 帧循环入口（虚表槽 34），它用 [this+0x128]
+static int g_gfx_set128, g_gfx_frame;
+static uint64_t hook_gfx_set128(uint64_t *f) {   // 0x9fc8c4：str x23,[x19,#0x128]
+    // ⚠ 桩只保存 x0–x17/nzcv/x29/x30，**x19/x23 读不到** ⇒ 这里只记"这条存不存在"。
+    (void)f;
+    if (++g_gfx_set128 <= 4)
+        klog("[Volante] 显示对象建立点 0x9fc8c4 命中（第 %d 次）\n", g_gfx_set128);
+    return 0;
+}
+static uint64_t hook_gfx_frame(uint64_t *f) {    // 帧循环入口
+    uint64_t t = f[FR_X0], d = 0;
+    if (t > 0x10000ull && t < 0x800000000000ull) d = *(const uint64_t *)(uintptr_t)(t + 0x128);
+    if (++g_gfx_frame <= 4)
+        klog("[Volante] 帧循环 #%d：this=%#llx [this+0x128]=%#llx\n",
+             g_gfx_frame, (unsigned long long)t, (unsigned long long)d);
+    return 0;
+}
+
 // ===== np113：查"RootTask 建出来就立刻被销毁"的那条路径 =====
 // 离线（本轮）：0x726768 = RootTask 虚表槽 13（+0x68）= 收尾/退出：
 //   先 0x728088(**(0x227aaa0)+0x180) 拆掉某个子系统，再 0x1072adc 清单例，再关一串子系统。
@@ -3596,6 +3665,12 @@ static void exp_k(const char *files_dir, char *out, size_t cap, size_t *used) {
         //   （np117 真机实证：日志停在工厂分支 + 红色护栏）。要看它，只能挂它的**调用者**。
         k_install_hook(img, 0x9fc450, (void *)hook_vol_init, "Volante 初始化 0x9fc450");
         k_install_hook(img, 0xa041d0, (void *)hook_gfx_flush, "Volante 收尾 0xa041d0");
+        // np121：NVN 函数表注册（见 hook_nvn_tab_init 注释）
+        k_install_hook(img, 0x9b2938, (void *)hook_nvn_tab_init, "NVN 函数表 0x9b2938");
+        k_install_hook(img, 0x9b3030, (void *)hook_nvn_tab_store, "NVN 函数表 写入 0x9b3030");
+        // np123：显示对象有没有建起来 / 帧循环拿谁去用
+        k_install_hook(img, 0x9fc8c4, (void *)hook_gfx_set128, "Volante 显示对象 0x9fc8c4");
+        k_install_hook(img, 0x9fd490, (void *)hook_gfx_frame, "Volante 帧循环 0x9fd490");
         // 崩链上的两个构造器入口（记录 this）
         k_install_hook(img, 0xa08ef4, (void *)hook_ctor_log, "构造器 0xa08ef4 入口");
         k_install_hook(img, 0xa08e94, (void *)hook_ctor2_log, "构造器 0xa08e94 入口");
@@ -3692,9 +3767,10 @@ static void exp_k(const char *files_dir, char *out, size_t cap, size_t *used) {
             void *impl = dm_fs_impl(nm);
             const char *src = "fs";
             if (!impl) { impl = dm_libc_impl(nm); src = "libc"; }
-            // np118：NVN 的"前门"。游戏图形初始化第一步就是 nvnBootstrapLoader(名字) 拿函数指针；
-            //   它返回 0 ⇒ Volante 初始化早退 ⇒ 帧循环读显示对象崩（0xa041e0，真机实证）。
-            if (!impl && !strcmp(nm, "nvnBootstrapLoader")) { impl = (void *)dm_nvn_bootstrap; src = "nvn"; }
+            // np118/np122：NVN 的"前门"。游戏图形初始化第一步就是 nvnBootstrapLoader(名字) 拿函数指针；
+            //   返回 0 ⇒ Volante 初始化早退 ⇒ NVN 函数表整个没注册 ⇒ 建对象 worker 空指针崩。
+            //   ⚠ 必须走 host_nvn_bootstrap（查不到也给兜底桩），不能直接绑框架层（它查不到返回 0）。
+            if (!impl && !strcmp(nm, "nvnBootstrapLoader")) { impl = (void *)host_nvn_bootstrap; src = "nvn"; }
             if (impl) { g_nimpl++; if (g_nimpl <= 80) klog("[导入] 直连 %s（%s）\n", nm, src); }
             *(uint64_t *)(img + r_off) = impl ? (uint64_t)(uintptr_t)impl
                                               : (uint64_t)(uintptr_t)&plt_stub;
