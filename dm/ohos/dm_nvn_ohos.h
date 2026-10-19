@@ -22,6 +22,16 @@ void dm_nvn_set_log(void (*fn)(const char *, ...));
 // 按 NVN 函数名取真实现；不是本模块管的返回 NULL（调用方回落记账桩）。
 void *dm_nvn_real(const char *name);
 
+// ⭐ NVN 的"前门"：nvnBootstrapLoader(名字) → 函数指针。
+//   游戏的图形初始化第一件事就是 `nvnBootstrapLoader("nvnDeviceInitialize")` /
+//   `("nvnDeviceGetProcAddress")`，拿到这俩才继续；拿不到 ⇒ 初始化直接放弃
+//   （2026-10-19 真机实证：Volante 初始化在 0x9fc59c 处空指针早退 ⇒ 帧循环读 +0x128 崩）。
+//   查找顺序：本模块设备族表 → 注入的补充表（探针把池/缓冲/设备特殊两个挂进来）→ NULL。
+void *dm_nvn_bootstrap(const char *name);
+
+// 注入"补充查找表"（探针把 dm_nvn_vk 一侧与设备初始化两个特殊符号挂进来）。
+void dm_nvn_set_extra(void *(*fn)(const char *name));
+
 #ifdef __cplusplus
 }
 #endif

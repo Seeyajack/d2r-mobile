@@ -2636,6 +2636,39 @@ static uint64_t hook_game_log(uint64_t *f) {   // 0xf35374：参数 = 消息串�
     return 0;
 }
 
+// ===== np116：阶段 0 的崩点 +0xa041e0（x19=0，读 [x19+0x4a]）=====
+// 离线（本轮）：
+//   崩点函数 0xa041d0 很小：`if (this->[0x4a]) { cb=*(0x22d7420); cb([this+0x10], w1..w4); [0x4a]=0 }`
+//   它的唯一调用者 0x9fd604：`x0=[x19+0x128]; bl 0xa041d0` ⇒ **x19+0x128 是 0**。
+//   x19 = 帧循环对象（构造器 0x9fc328，vtable 0x21b5a00，槽 34 = 0x9fd490 的帧循环）。
+//   [x19+0x128] 只有两个人写：
+//     ① 0x9fc8c4（在 0x9fc450 里）：alloc 0x60 + 0xa040b0 构造 ⇒ 存进去。
+//        0x9fc450 内部调 nv::SetGraphicsAllocator / nv::InitializeGraphics / nn::vi::GetNativeWindow
+//        —— 是 **Volante 的图形初始化**。但它没有任何 bl/adr/静态指针引用 ⇒ 经 blr 间接调用。
+//     ② 0x9fdaf8（在 0x9fd9c4 里，0x9fc314 的尾调）：[x20+0x128] = *(0x2280990)+0x10。
+//   ⇒ 两条路谁该先跑、跑没跑，用钩子一测便知。
+static int g_vol_init;     // 0x9fc450 命中
+static int g_gfx_post;     // 0x9fd9c4 命中
+static int g_gfx_flush;    // 0xa041d0 命中
+static uint64_t hook_vol_init(uint64_t *f) {   // 0x9fc450：Volante 图形初始化
+    if (++g_vol_init <= 4)
+        klog("[Volante] 初始化 0x9fc450 被调（第 %d 次）this=%#llx x30=%#llx\n",
+             g_vol_init, (unsigned long long)f[FR_X0], (unsigned long long)f[FR_X30]);
+    return 0;
+}
+static uint64_t hook_gfx_post(uint64_t *f) {   // 0x9fd9c4：另一条写 +0x128 的路
+    if (++g_gfx_post <= 4)
+        klog("[Volante] 后置 0x9fd9c4 被调（第 %d 次）this=%#llx x30=%#llx\n",
+             g_gfx_post, (unsigned long long)f[FR_X0], (unsigned long long)f[FR_X30]);
+    return 0;
+}
+static uint64_t hook_gfx_flush(uint64_t *f) {  // 0xa041d0：崩点函数本体
+    if (++g_gfx_flush <= 4)
+        klog("[Volante] ★ 收尾 0xa041d0：this=%#llx x30=%#llx（0 ⇒ 就是崩因）\n",
+             (unsigned long long)f[FR_X0], (unsigned long long)f[FR_X30]);
+    return 0;
+}
+
 // ===== np113：查"RootTask 建出来就立刻被销毁"的那条路径 =====
 // 离线（本轮）：0x726768 = RootTask 虚表槽 13（+0x68）= 收尾/退出：
 //   先 0x728088(**(0x227aaa0)+0x180) 拆掉某个子系统，再 0x1072adc 清单例，再关一串子系统。
@@ -3430,11 +3463,18 @@ static void *k_thread(void *arg) {
         // 文件里 0xa2469c..0xa246a8 = 9000c2e8 / f9475d08 / f9000100 / d65f03c0
         //   （adrp / ldr x8,[x8,#0xeb8] / str x0,[x8] / ret）
         // 若运行时前 1-2 条被改写 ⇒ 那里有钩子桩（语义已变，不能按原指令推断崩因）。
-        {
+        // np73（§38.8 的决定性测试）：把 **pc 处的运行时指令字节**打出来，和文件对照。
+        //   ⚠ np119：pc 可能是 0（`blr` 了空函数指针）——读 pc-8 就是读 0xfffffff8，
+        //   处理器里再崩一次 ⇒ 进程直接死、寄存器现场全丢（本轮实证：日志停在"pc 0"那一行）。
+        //   只在 pc 落在模块映像内才读。
+        if (g_gate_fault_pc >= b && g_gate_fault_pc < b + DM_IMG_MAIN_END) {
             const uint32_t *c = (const uint32_t *)(uintptr_t)(g_gate_fault_pc - 8);
             klog("[指令] pc-8..pc+8 运行时 = %08x %08x %08x %08x %08x\n",
                  c[0], c[1], c[2], c[3], c[4]);
             klog("[指令] 文件里同处应为   = d65f03c0 9000c2e8 f9475d08 f9000100 d65f03c0\n");
+        } else {
+            klog("[指令] pc=%#llx 不在模块映像内（多半是 blr 了空/野指针），不读指令\n",
+                 (unsigned long long)g_gate_fault_pc);
         }
         // np64：槽体检——判"运行期槽是 0"到底是**游戏写回 0**还是**装载层 bss 清零洗掉了重定位**
         // （崩点 +0xA046A4 的存储目标 x9 = *(0x2280aa8) = 0；RELA 本该是 base+0x22d8790）
@@ -3480,6 +3520,11 @@ static void *k_thread(void *arg) {
 }
 static void exp_k(const char *files_dir, char *out, size_t cap, size_t *used) {
     app(out, cap, used, "【实验 K】真实流程首跑：从模块启动链（0x1c8）起跑\n");
+    // np120：**每轮起跑前把跨轮状态清零**。这些是 .so 的全局，同一进程里跑第二轮时
+    // 若不清零，"迟到防护"会用上一轮的 nnMain 标记把本轮直接掐死在工厂分支
+    // （真机实证：日志只有"工厂崩 + 红色护栏"，nnMain 一行都没有）。
+    g_nnmain_entered = 0;
+    g_k_faulted = 0;
     if (files_dir && *files_dir) {
         char pth[512]; snprintf(pth, sizeof pth, "%s/dm_run_test.log", files_dir);
         g_k_log = fopen(pth, "w");
@@ -3545,6 +3590,12 @@ static void exp_k(const char *files_dir, char *out, size_t cap, size_t *used) {
         k_install_hook(img, 0xa01aec, (void *)hook_list_ins, "任务链 链表插入 0xa01aec");
         k_install_hook(img, 0x726768, (void *)hook_task_exit, "RootTask 退出 0x726768（槽 13）");
         k_install_hook(img, 0x7265b8, (void *)hook_rt_prepare, "RootTask::prepare 0x7265b8");
+        // np116：阶段 0 内部崩点（见 hook_vol_init 注释）
+        // ⚠ 0x9fd9c4 **不能挂**：它的首指令是 `b 0x16321a0`（尾调），不是函数入口——
+        //   挂上去后桩"执行原指令 → 回站点+4"会把尾调变成"返回后继续跑函数体"，流程全乱
+        //   （np117 真机实证：日志停在工厂分支 + 红色护栏）。要看它，只能挂它的**调用者**。
+        k_install_hook(img, 0x9fc450, (void *)hook_vol_init, "Volante 初始化 0x9fc450");
+        k_install_hook(img, 0xa041d0, (void *)hook_gfx_flush, "Volante 收尾 0xa041d0");
         // 崩链上的两个构造器入口（记录 this）
         k_install_hook(img, 0xa08ef4, (void *)hook_ctor_log, "构造器 0xa08ef4 入口");
         k_install_hook(img, 0xa08e94, (void *)hook_ctor2_log, "构造器 0xa08e94 入口");
@@ -3641,6 +3692,9 @@ static void exp_k(const char *files_dir, char *out, size_t cap, size_t *used) {
             void *impl = dm_fs_impl(nm);
             const char *src = "fs";
             if (!impl) { impl = dm_libc_impl(nm); src = "libc"; }
+            // np118：NVN 的"前门"。游戏图形初始化第一步就是 nvnBootstrapLoader(名字) 拿函数指针；
+            //   它返回 0 ⇒ Volante 初始化早退 ⇒ 帧循环读显示对象崩（0xa041e0，真机实证）。
+            if (!impl && !strcmp(nm, "nvnBootstrapLoader")) { impl = (void *)dm_nvn_bootstrap; src = "nvn"; }
             if (impl) { g_nimpl++; if (g_nimpl <= 80) klog("[导入] 直连 %s（%s）\n", nm, src); }
             *(uint64_t *)(img + r_off) = impl ? (uint64_t)(uintptr_t)impl
                                               : (uint64_t)(uintptr_t)&plt_stub;
@@ -3658,6 +3712,7 @@ static void exp_k(const char *files_dir, char *out, size_t cap, size_t *used) {
         dm_libc_set_log(klog);  // np112：libc 胶水层同此
         dm_sdk_set_log(klog);   // 通用 SDK 胶水层也用同一份日志
         dm_nvn_set_log(klog);   // 通用 NVN 胶水层同此
+        dm_nvn_set_extra(nvn_real_lookup);   // np118：把池/缓冲与设备两个特殊符号挂进 bootstrap
         dm_nvn_vk_set_log(klog);   // 池/缓冲层同此
         dm_fs_selftest();
         // np65 槽体检（装载后、游戏跑之前）：崩点 +0xA246A4 的 `str x0,[*(0x2280eb8)]` 里那个槽

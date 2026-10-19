@@ -86,3 +86,18 @@ void *dm_nvn_real(const char *name) {
         if (!strcmp(g_tab[i].name, name)) return g_tab[i].fn;
     return NULL;
 }
+
+// ⭐ nvnBootstrapLoader 的宿主实现（语义见 dm_nvn_ohos.h）。
+//   真机实证（2026-10-19）：它是 Volante 图形初始化的第一步——
+//   `nvnBootstrapLoader("nvnDeviceInitialize")` / `("nvnDeviceGetProcAddress")`，
+//   任一返回 0 ⇒ 初始化在 0x9fc59c 早退 ⇒ 帧循环读 [对象+0x128]（显示对象）崩在 0xa041e0。
+static void *(*g_extra_lookup)(const char *name);
+void dm_nvn_set_extra(void *(*fn)(const char *name)) { g_extra_lookup = fn; }
+
+void *dm_nvn_bootstrap(const char *name) {
+    if (!name || !*name) return NULL;
+    void *fn = dm_nvn_real(name);
+    if (fn) return fn;
+    if (g_extra_lookup) return g_extra_lookup(name);
+    return NULL;
+}
