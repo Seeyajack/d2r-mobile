@@ -2926,6 +2926,8 @@ static void k_run_module_init(const module_t *m) {
         klog("[静态初始化] #%zu/%zu → %#llx\n", i, n, (unsigned long long)(uintptr_t)arr[i]);
         if (sigsetjmp(g_gate_jmp, 1) == 0) {
             g_gate_armed = 1;
+            // np102 实验（给 argv 传零缓冲）已撤销：无效——#206 的崩点不在约定上，
+            //   而在"查表拿到空指针"（见文档 §49：根因是内容没加载，表计数为 0）。
             arr[i](0, NULL, NULL);
             g_gate_armed = 0;
             ran++;
