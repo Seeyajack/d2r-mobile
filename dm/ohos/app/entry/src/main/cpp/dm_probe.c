@@ -1643,6 +1643,48 @@ static uint64_t plt_stub(void) {
             pthread_cond_signal(&q->cv_notfull);
             pthread_mutex_unlock(&q->mu);
             if (a0) *(uint64_t *)(uintptr_t)a0 = v;
+            // np98：消息要交给线程体处理了——线程体 0xa1e30c 的循环是
+            //   `x19 = 线程对象; x9 = [x19]; x9 = [x9+0x80]; blr x9`。
+            //   队列在对象里的偏移是 +0x38 ⇒ **线程对象 = 队列地址 - 0x38**，
+            //   于是 [对象+0]=虚表、[虚表+0x80]=消息处理函数。客体内存可直接读，不挂钩子。
+            {
+                uint64_t obj = (uint64_t)(uintptr_t)a1 - 0x38;
+                static int nm2;
+                if (++nm2 <= 6 && obj > 0x10000ull && obj < 0x800000000000ull) {
+                    uint64_t vt = *(const uint64_t *)(uintptr_t)obj;
+                    uint64_t h = (vt > 0x10000ull && vt < 0x800000000000ull)
+                               ? *(const uint64_t *)(uintptr_t)(vt + 0x80) : 0;
+                    uint64_t b2 = (uint64_t)(uintptr_t)g_k_m.base;
+                    int in = h >= b2 && h < b2 + DM_IMG_MAIN_END;
+                    klog("[队列] 收到消息=%#llx；线程对象=%#llx 虚表=%#llx 处理函数=%s%#llx\n",
+                         (unsigned long long)v, (unsigned long long)obj,
+                         (unsigned long long)vt, in ? "+" : "(外)",
+                         (unsigned long long)(in ? h - b2 : h));
+                    // np99：第二跳——0xa1df50 是 x0=[x9+0x100]; x10=[x0]; x3=[x10]; br x3
+                    uint64_t tbl = *(const uint64_t *)(uintptr_t)(obj + 0x100);
+                    uint64_t real = (tbl > 0x10000ull && tbl < 0x800000000000ull)
+                                  ? *(const uint64_t *)(uintptr_t)tbl : 0;
+                    real = (real > 0x10000ull && real < 0x800000000000ull)
+                           ? *(const uint64_t *)(uintptr_t)real : 0;
+                    {
+                        int in2 = real >= b2 && real < b2 + DM_IMG_MAIN_END;
+                        klog("[队列] 第二跳：表=%#llx 真正处理函数=%s%#llx\n",
+                             (unsigned long long)tbl, in2 ? "+" : "(外)",
+                             (unsigned long long)(in2 ? real - b2 : real));
+                    {   // 第三跳：0xa02478 是 std::function 调用器——[对象+8] 才是真回调，
+                        // 为 0 就"收到消息但什么都不做"（= 回调没被注册）
+                        uint64_t fobj = *(const uint64_t *)(uintptr_t)tbl;
+                        uint64_t cb = (fobj > 0x10000ull && fobj < 0x800000000000ull)
+                                      ? *(const uint64_t *)(uintptr_t)(fobj + 8) : 0;
+                        int in3 = cb >= b2 && cb < b2 + DM_IMG_MAIN_END;
+                        klog("[队列] 第三跳：回调对象=%#llx 真回调=%s%#llx%s\n",
+                             (unsigned long long)fobj, in3 ? "+" : "(外)",
+                             (unsigned long long)(in3 ? cb - b2 : cb),
+                             cb ? "" : "（空 ⇒ 消息白收）");
+                    }
+                    }
+                }
+            }
             return 0;
         }
         if (!strcmp(nm, "_ZN2nn2os19TrySendMessageQueueEPNS0_16MessageQueueTypeEm")) {
