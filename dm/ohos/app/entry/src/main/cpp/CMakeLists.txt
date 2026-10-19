@@ -45,6 +45,9 @@ add_library(dmprobe SHARED
     # 为什么必须有：这些符号此前全落记录型存根（返回 0）⇒ memcpy 空操作 ⇒ 所有结构体拷贝丢失
     # ⇒ 任务记录全 0 ⇒ RootTask 建不出来（2026-10-19 真机实证）。
     ${DM_DIR}/ohos/dm_libc_ohos.c
+    # 通用 svc 同步原语（L1）：事件/仲裁锁/进程级 key/多对象等待。
+    # 为什么要有：sdk 自带的 nn::os 站在这些 svc 上；不补这层，M1 切过去第一把锁就挂（2026-10-20）。
+    ${DM_DIR}/ohos/dm_svc_sync.c
     # 通用 NVN 胶水层（L1）：设备属性表/原点深度模式/句柄换算等平台中立语义。
     ${DM_DIR}/ohos/dm_nvn_ohos.c
     # 通用 NVN 内存池/缓冲胶水层（L1，UMA 直通；从探针搬出）。

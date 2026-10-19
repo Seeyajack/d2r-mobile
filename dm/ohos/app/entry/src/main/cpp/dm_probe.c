@@ -24,6 +24,7 @@
 #include "dm_fs_ohos.h"         // 最小 nn::fs（romfs → 宿主目录；导入按符号名分流到这里）
 #include "dm_sdk_ohos.h"        // 通用 SDK 胶水层（vi/oe 等轻量语义；与游戏无关）
 #include "dm_libc_ohos.h"       // 通用 libc 胶水层（memcpy/str*/math 按符号名直连宿主）
+#include "dm_svc_sync.h"        // 通用 svc 同步原语（事件/仲裁锁/进程级 key/多对象等待）
 #include "dm_nvn_ohos.h"        // 通用 NVN 胶水层（设备族等平台中立语义）
 #include "dm_nvn_vk.h"         // 通用 NVN 内存池/缓冲胶水层（UMA 直通）
 #include "dm_main_layout.h"     // 旷野之息 main 的布局常数（fixups 表头生成）
@@ -3961,6 +3962,8 @@ static void exp_k(const char *files_dir, char *out, size_t cap, size_t *used) {
         dm_fs_set_log(klog);
         dm_fs_set_base(img);   // np80：让 fs 日志能把调用者 LR 换算成映像内偏移
         dm_libc_set_log(klog);  // np112：libc 胶水层同此
+        dm_svc_sync_set_log(klog);   // np132：svc 同步层（事件/仲裁锁/条件变量）
+        dm_svc_sync_init();          // 每轮初始化本线程的等待条件变量
         dm_sdk_set_log(klog);   // 通用 SDK 胶水层也用同一份日志
         dm_nvn_set_log(klog);   // 通用 NVN 胶水层同此
         dm_nvn_set_extra(nvn_real_lookup);   // np118：把池/缓冲与设备两个特殊符号挂进 bootstrap

@@ -4,6 +4,11 @@
 // Register convention: inputs w1.. / outputs w0=Result, x1=value (GetInfo / SetHeapSize), consistent with the public Horizon ABI.
 #include "dm.h"
 #include "hle.h"
+#if defined(__OHOS__)
+// 鸿蒙侧：svc 同步原语（事件/仲裁锁/进程级 key/多对象等待）。见 dm/ohos/dm_svc_sync.c。
+// On HarmonyOS: svc synchronisation primitives; see dm/ohos/dm_svc_sync.c.
+#include "dm_svc_sync.h"
+#endif
 #include <stdatomic.h>
 #include <sys/mman.h>
 #include <errno.h>
@@ -166,6 +171,11 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
     LOG("svc_dispatch：mem_init 完成 num=%#x", num);   // 诊断：门回路死点定位
     if (svc_thread(num, regs)) return regs[0];
     if (svc_thread(num, regs)) return regs[0];
+#if defined(__OHOS__)
+    // 同步原语优先（0x11/0x12/0x17/0x18/0x19/0x1A/0x1B/0x1C/0x1D）。
+    // 现在没人调它们（main 的 nn::os 仍走宿主实现）⇒ 零行为变化；切到 sdk 的 nn::os 后才生效。
+    { uint64_t r = 0; if (dm_svc_sync_dispatch(num, regs, &r)) { regs[0] = r; return r; } }
+#endif
     { uint64_t svc_host_call(int, uint64_t *); if (num >= 0x80 && svc_host_call(num, regs)) return regs[0]; }   // 0x80 起：剪口约定的宿主调用（hle_tact.c） | from 0x80: host calls by cut convention (hle_tact.c)
     switch (num) {
     case 0x01: {  // SetHeapSize(out_addr*, size)  → x1 = heap base
