@@ -17,8 +17,14 @@
 #define CSYM(x) _##x
 #endif
 
-#define FRAME_SIZE 0x2E0          // x0–x17 + nzcv + x29/x30 + 站点 + 512 字节向量
-#define VEC_OFF    0xC0           // 向量寄存器的起始偏移（32×16 = 0x200，到 0x2C0）
+#define FRAME_SIZE 0x320          // x0–x30 全部 + nzcv + 站点 + 512 字节向量
+// 帧布局（偏移 / 8 = 下标，dm_probe.c 的 FR_* 枚举必须与此一致）：
+//   0x00..0x8F  x0..x17        0x90 nzcv        0xA0 x29,x30     0xB0 站点
+//   0xB8..0x110 x18..x28       0x120..0x31F 向量 q0..q31
+// 为什么把 x18..x28 放在**后面**：x19/x23 这些"对象指针"最常要看，而原来的桩只存 x0–x17，
+//   想看 x19 只能重编重跑（2026-10-19 至少白跑三轮）。现在全存，代价是步长从 0x120 涨到 0x1A0、
+//   洞容量从 227 格降到 157 格——够用。
+#define VEC_OFF    0x120           // 向量寄存器的起始偏移（32×16 = 0x200，到 0x320）
 
     .text
     .p2align 3
@@ -39,6 +45,12 @@ CSYM(hook_stub_begin):
     stp x29, x30, [sp, #0xA0]
     ldr x9, 4f                      // 槽④：本站点地址（安装器填入，供日志识别）
     str x9, [sp, #0xB0]
+    stp x18, x19, [sp, #0xB8]       // ★ x18–x28：对象指针/循环变量都在这里（以前看不到）
+    stp x20, x21, [sp, #0xC8]
+    stp x22, x23, [sp, #0xD8]
+    stp x24, x25, [sp, #0xE8]
+    stp x26, x27, [sp, #0xF8]
+    stp x28, xzr, [sp, #0x108]
     stp q0, q1, [sp, #VEC_OFF + 0x000]     // ★ 向量寄存器 32 个（512 字节）
     stp q2, q3, [sp, #VEC_OFF + 0x020]
     stp q4, q5, [sp, #VEC_OFF + 0x040]
@@ -78,6 +90,12 @@ CSYM(hook_stub_begin):
     ldp q4, q5, [sp, #VEC_OFF + 0x040]
     ldp q2, q3, [sp, #VEC_OFF + 0x020]
     ldp q0, q1, [sp, #VEC_OFF + 0x000]
+    ldp x28, xzr, [sp, #0x108]
+    ldp x26, x27, [sp, #0xF8]
+    ldp x24, x25, [sp, #0xE8]
+    ldp x22, x23, [sp, #0xD8]
+    ldp x20, x21, [sp, #0xC8]
+    ldp x18, x19, [sp, #0xB8]
     ldp x29, x30, [sp, #0xA0]
     ldp x16, x17, [sp, #0x80]
     ldp x14, x15, [sp, #0x70]
@@ -130,6 +148,12 @@ CSYM(hook_rep_begin):
     str x9, [sp, #0x90]
     ldr x9, 5f                       // 槽⑤：站点地址（日志识别用）
     str x9, [sp, #0xB0]
+    stp x18, x19, [sp, #0xB8]       // ★ 与记录式桩一致：x18–x28 也存
+    stp x20, x21, [sp, #0xC8]
+    stp x22, x23, [sp, #0xD8]
+    stp x24, x25, [sp, #0xE8]
+    stp x26, x27, [sp, #0xF8]
+    stp x28, xzr, [sp, #0x108]
     stp q0, q1, [sp, #VEC_OFF + 0x000]     // ★ 同记录式桩：向量寄存器也要存
     stp q2, q3, [sp, #VEC_OFF + 0x020]
     stp q4, q5, [sp, #VEC_OFF + 0x040]
@@ -169,6 +193,12 @@ CSYM(hook_rep_begin):
     ldp q4, q5, [sp, #VEC_OFF + 0x040]
     ldp q2, q3, [sp, #VEC_OFF + 0x020]
     ldp q0, q1, [sp, #VEC_OFF + 0x000]
+    ldp x28, xzr, [sp, #0x108]
+    ldp x26, x27, [sp, #0xF8]
+    ldp x24, x25, [sp, #0xE8]
+    ldp x22, x23, [sp, #0xD8]
+    ldp x20, x21, [sp, #0xC8]
+    ldp x18, x19, [sp, #0xB8]
     ldp x29, x30, [sp, #0xA0]
     ldp x16, x17, [sp, #0x80]
     ldp x14, x15, [sp, #0x70]

@@ -931,6 +931,7 @@ static void exp_j(char *out, size_t cap, size_t *used) {
 // 实验 K：真实流程首跑——从模块的启动链（映像里第一个函数 0x1c8）起跑，跑到哪里出事就记哪里。
 // KGATE 槽指向记录型服务（记命中与返回点），所有日志落盘（崩溃也保得住）。
 static FILE *g_k_log;
+static char g_files_dir[512];   // np125：探针线程里也要落盘（trace），存一份目录
 // 阶段标签：实验 K 连跑三站（启动链 → 对象工厂 → nnMain），同一批插桩在三站都会响。
 // 每条日志带上"当前在哪一站"，读日志时才分得清"这次命中属于哪一站"。
 static const char *g_k_stage = "准备";
@@ -1375,6 +1376,9 @@ static dm_mq_t *mq_get(void *q) {
 static uint64_t g_alloc_obj[2];
 
 static uint64_t *g_fake_heap;       // np103b 前置声明（定义在后）
+// np125：全量调用时间线（环缓冲，见后面 ktrace_rec 的注释）。前置声明——plt_stub 比它早。
+static void ktrace_plt(int idx, uint64_t a0, uint64_t a1);
+
 static uint64_t plt_stub(void) {
     uint64_t x16v, a0, a1, a2, a3;
     __asm__ volatile("mov %0, x16" : "=r"(x16v));
@@ -1383,8 +1387,10 @@ static uint64_t plt_stub(void) {
     __asm__ volatile("mov %0, x2" : "=r"(a2));
     __asm__ volatile("mov %0, x3" : "=r"(a3));   // np96：第 4 参（VSNPrintf 的 va_list 在这里）
     const char *nm = NULL;
-    for (int i = 0; i < g_nplt; i++) if (g_plt[i].slot == x16v) { nm = g_plt[i].name; break; }
+    int nidx = -1;
+    for (int i = 0; i < g_nplt; i++) if (g_plt[i].slot == x16v) { nm = g_plt[i].name; nidx = i; break; }
     g_plt_calls++;
+    ktrace_plt(nidx, a0, a1);   // np125：先记账（无日志开销），分析在离线做
     if (nm) {
         // nn::os::AllocateMemoryBlock(size_t* out_size, size_t size) —— 真给内存
         if (!strcmp(nm, "_ZN2nn2os19AllocateMemoryBlockEPmm")) {
@@ -1947,10 +1953,101 @@ static void k_fill_data_imports(uint8_t *img) {
 //     0xA0 = x29 → f[20]   0xA8 = x30 → f[21]   0xB0 = 站点地址 → f[22]
 //   实测方式：clang -D__OHOS__ -c hook_stub.S + llvm-objdump -d（2026-10-16 实证；
 //   此前按 "f[20]=x30" 读是错的——f[20] 是 x29，f[19] 根本没写）。
-enum { FR_X0 = 0, FR_X1 = 1, FR_X2 = 2, FR_NZCV = 18, FR_X29 = 20, FR_X30 = 21, FR_SITE = 22 };
-#define HOOK_STRIDE 0x120u   // 桩长实测 0x118（存了 v0-v31 后变大；objdump 量过），步长取 0x120 对齐
-#define HOOK_MAX    (DM_IMG_MAIN_CAVE_SIZE / HOOK_STRIDE)   // 洞容量 **227 格**（0x10000/0x120）
+// 帧下标（= 偏移/8，布局见 hook_stub.S 顶部注释）。
+// np125 起 x18–x28 也存了：想看"这个对象是谁"（x19/x23）不用再重编重跑。
+enum { FR_X0 = 0, FR_X1 = 1, FR_X2 = 2, FR_X3 = 3, FR_X8 = 8,
+       FR_NZCV = 18, FR_X29 = 20, FR_X30 = 21, FR_SITE = 22,
+       FR_X18 = 23, FR_X19 = 24, FR_X20 = 25, FR_X21 = 26, FR_X22 = 27,
+       FR_X23 = 28, FR_X24 = 29, FR_X25 = 30, FR_X26 = 31, FR_X27 = 32, FR_X28 = 33 };
+// 桩长实测约 0x1A0（加了 x18–x28 的存档/恢复后；objdump 量），步长取 0x1C0 对齐。
+// 洞容量：0x10000 / 0x1C0 = **146 格**（原来 227）。够用：当前记录式钩子约 80 个。
+#define HOOK_STRIDE 0x1C0u
+#define HOOK_MAX    (DM_IMG_MAIN_CAVE_SIZE / HOOK_STRIDE)
 extern const char hook_stub_begin[], hook_stub_end[], hook_slot_orig[], hook_slot_back[], hook_slot_host[], hook_slot_site[];
+
+// ───────────────────────── trace 环缓冲（np125） ─────────────────────────
+// 为什么：一次上机只回答一个是非题，是今天最大的时间浪费（15 轮 / 111 分钟）。
+// 做法：在几十个关键点挂"只写内存、不打日志"的钩子（复用同一个桩，宿主函数换成 ktrace_rec），
+//   一次跑测带回**完整调用时间线**；跑完把环缓冲落成 dm_trace.bin，离线用 trace_view.py 分析。
+// 为什么快：klog 每条 ~10 µs（格式化 + 文件锁 + 写盘），环缓冲一条 ~50 ns（一条原子加 + 三次写）。
+//   同样的点位密度，日志方式会把游戏拖慢几个数量级，环缓冲几乎无感。
+#define KTRACE_N   (1u << 16)     // 6.5 万条 ≈ 1.5 MB
+typedef struct { uint32_t off; uint32_t tid; uint64_t a0; uint64_t a1; } ktrace_ent;
+
+static ktrace_ent *g_tr;                 // 首次用时 calloc（不进信号上下文）
+static unsigned g_tr_n;                  // 已写条数（原子递增；超容量后丢）
+static unsigned g_tr_lost;
+static void ktrace_maybe_snapshot(void); // 前置：水位落盘（定义在下面，ktrace_rec 先用到）
+
+static uint64_t ktrace_rec(uint64_t *f) {
+    unsigned i = __atomic_fetch_add(&g_tr_n, 1u, __ATOMIC_RELAXED);
+    if (i < KTRACE_N && g_tr) {
+        uint64_t base = (uint64_t)(uintptr_t)g_k_m.base;
+        g_tr[i].off = (uint32_t)(f[FR_SITE] - base);
+        g_tr[i].tid = (uint32_t)(uintptr_t)pthread_self();
+        g_tr[i].a0  = f[FR_X0];
+        g_tr[i].a1  = f[FR_X1];
+    } else {
+        __atomic_fetch_add(&g_tr_lost, 1u, __ATOMIC_RELAXED);
+    }
+    ktrace_maybe_snapshot();
+    return 0;
+}
+
+// np125b：**中途落盘**。原设计只在 nnMain 返回/崩溃时落盘，但本轮的卡点是"阻塞"——
+//   游戏既不返回也不崩，数据永远拿不到（真机实证：脚本报"轨迹没抓到"）。
+//   改成按水位落盘：到 2000 / 8000 / 32000 条各落一次（后面的覆盖前面的）。
+//   这样无论跑多久、是否阻塞，总能拿到"到目前最大"的那份。
+static void ktrace_dump(const char *files_dir);
+static void ktrace_maybe_snapshot(void) {
+    static unsigned next = 2000u;
+    if (!g_files_dir[0]) return;
+    unsigned n = __atomic_load_n(&g_tr_n, __ATOMIC_RELAXED);
+    if (n < next || next > KTRACE_N) return;
+    klog("[TRACE] 水位快照：已记录 %u 条（下一水位 %u）\n", n, next * 4u);
+    next *= 4u;
+    ktrace_dump(g_files_dir);
+}
+
+// PLT 调用记一条：off 的高位置 1 表示"这是一次导入调用"，低 24 位是符号表下标
+// （映像内偏移 < 0x2600000，不会撞）。离线用 dm_plt_names.txt 还原名字。
+#define KTRACE_PLT_MARK 0x10000000u
+static void ktrace_plt(int idx, uint64_t a0, uint64_t a1) {
+    if (!g_tr) return;
+    unsigned i = __atomic_fetch_add(&g_tr_n, 1u, __ATOMIC_RELAXED);
+    if (i < KTRACE_N) {
+        g_tr[i].off = KTRACE_PLT_MARK | (uint32_t)(idx < 0 ? 0xFFFFFF : (idx & 0xFFFFFF));
+        g_tr[i].tid = (uint32_t)(uintptr_t)pthread_self();
+        g_tr[i].a0  = a0;
+        g_tr[i].a1  = a1;
+    } else {
+        __atomic_fetch_add(&g_tr_lost, 1u, __ATOMIC_RELAXED);
+    }
+    ktrace_maybe_snapshot();
+}
+
+static void ktrace_reset(void) {
+    if (!g_tr) g_tr = (ktrace_ent *)calloc(KTRACE_N, sizeof *g_tr);
+    __atomic_store_n(&g_tr_n, 0u, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_tr_lost, 0u, __ATOMIC_RELAXED);
+}
+
+// 落盘：头部 32 字节（魔数/条数/丢失数/基址），随后是原始条目。离线用 tools/trace_view.py 读。
+static void ktrace_dump(const char *files_dir) {
+    unsigned n = __atomic_load_n(&g_tr_n, __ATOMIC_RELAXED);
+    unsigned lost = __atomic_load_n(&g_tr_lost, __ATOMIC_RELAXED);
+    if (n > KTRACE_N) n = KTRACE_N;
+    klog("[TRACE] 落盘：%u 条（环容量 %u，丢弃 %u）\n", n, KTRACE_N, lost);
+    char p[512];
+    snprintf(p, sizeof p, "%s/dm_trace.bin", files_dir);
+    FILE *fp = fopen(p, "wb");
+    if (!fp) { klog("[TRACE] 打开 %s 失败\n", p); return; }
+    uint64_t hdr[4] = { 0x45434152544B4441ull /* "ADKT RACE" */, n, lost,
+                        (uint64_t)(uintptr_t)g_k_m.base };
+    fwrite(hdr, sizeof hdr, 1, fp);
+    if (n) fwrite(g_tr, sizeof *g_tr, n, fp);
+    fclose(fp);
+}
 
 // 站点指令搬进洞要重算 PC 相对位移：b / bl 是 imm26，b.cond / cbz / cbnz 是 imm19；
 // 其余指令原样搬。返回 0 = 超程或形态未知（调用方跳过该站点，宁可少挂不可挂错）。
@@ -3525,6 +3622,7 @@ static void *k_thread(void *arg) {
         g_gate_armed = 0;
         klog("=== nnMain 返回：rv=%#llx ===\n", (unsigned long long)r3);
         nvn_api_summary("nnMain 返回");
+        ktrace_dump(g_files_dir);   // np125：把 trace 环缓冲落盘（离线分析）
     } else {
         g_gate_armed = 0; g_k_faulted = 1;
         klog("=== nnMain 崩：pc %#llx sig %d ===\n", (unsigned long long)g_gate_fault_pc, g_gate_fault_sig);
@@ -3584,6 +3682,7 @@ static void *k_thread(void *arg) {
                  (unsigned long long)g_fixup_last[6], (unsigned long long)g_fixup_last[7]);
         k_log_counters("崩时");
         gate_dump_fault("nnMain");
+        ktrace_dump(g_files_dir);   // np125：崩了也要把 trace 落盘——最后几十条往往就是崩因
     }
     return NULL;
 }
@@ -3594,6 +3693,8 @@ static void exp_k(const char *files_dir, char *out, size_t cap, size_t *used) {
     // （真机实证：日志只有"工厂崩 + 红色护栏"，nnMain 一行都没有）。
     g_nnmain_entered = 0;
     g_k_faulted = 0;
+    // np125：探针线程（k_thread）里也要用文件目录（trace 落盘），存一份全局
+    snprintf(g_files_dir, sizeof g_files_dir, "%s", files_dir ? files_dir : "");
     if (files_dir && *files_dir) {
         char pth[512]; snprintf(pth, sizeof pth, "%s/dm_run_test.log", files_dir);
         g_k_log = fopen(pth, "w");
@@ -3774,6 +3875,18 @@ static void exp_k(const char *files_dir, char *out, size_t cap, size_t *used) {
             if (impl) { g_nimpl++; if (g_nimpl <= 80) klog("[导入] 直连 %s（%s）\n", nm, src); }
             *(uint64_t *)(img + r_off) = impl ? (uint64_t)(uintptr_t)impl
                                               : (uint64_t)(uintptr_t)&plt_stub;
+        }
+        // np125：trace 开局（清环）+ 落一份"符号下标 → 名字"表，供离线把 trace 里的调用还原成名字
+        ktrace_reset();
+        {
+            char p[512];
+            snprintf(p, sizeof p, "%s/dm_plt_names.txt", files_dir);
+            FILE *fp = fopen(p, "w");
+            if (fp) {
+                for (int i = 0; i < g_nplt; i++) fprintf(fp, "%d\t%s\n", i, g_plt[i].name);
+                fclose(fp);
+                klog("[TRACE] 符号表已落盘：%s（%d 条）\n", p, g_nplt);
+            }
         }
         {   // np82：记下本 .so 的装载基址，队列/fs 日志里的"外"调用者才能对上号
             Dl_info di;
