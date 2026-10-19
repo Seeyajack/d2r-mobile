@@ -29,6 +29,12 @@
 #include "dm_main_layout.h"     // 旷野之息 main 的布局常数（fixups 表头生成）
 #include "dm_main_gates.h"      // 旷野之息 main 的门表（93 个 svc 门，实验 H 登记）
 
+// np113：旧的"任务状态 1→2 补推"开关。默认 0（关闭）——它是"记录全零时代"的拐杖，
+// libc 修好后真机证明它会把任务直接送进销毁流程（详见 hook_e8 里的注释）。
+#ifndef NP_STATE_HACK
+#define NP_STATE_HACK 0
+#endif
+
 // 旷野之息 main 的嵌入段（dm_images.S）：装载验证要把「映射区」与「嵌入段」逐字节对拍
 extern const unsigned char __start_dmmainx0[];
 extern const unsigned char __stop_dmmainx0[];
@@ -584,6 +590,8 @@ static volatile sig_atomic_t g_fixup_n;
 static volatile uint64_t g_fixup_last[8];     // 最近 8 次拦截的 PC 偏移（信号里不打印，崩后统一报）
 static uint8_t *g_fixup_page;                 // 安装期 calloc（不在信号上下文里分配——np58 教训）
 static uintptr_t g_fixup_base;                // 模块基址（处理器里不能用 g_k_m，它在文件后面才声明）
+static pthread_t g_probe_thr;                 // np115：探针线程的 id（setjmp 上下文只属于它）
+static int g_probe_thr_set;
 static void gate_fault_handler(int sig, siginfo_t *si, void *uc_) {
     // 字段写法与 dm/host/crash.c 的鸿蒙分支一致：mcontext_t = { regs[31], sp, pc, pstate }
     ucontext_t *uc = (ucontext_t *)uc_;
@@ -614,6 +622,15 @@ static void gate_fault_handler(int sig, siginfo_t *si, void *uc_) {
     for (int i = 0; i < GATE_REG_N; i++) g_gate_regs[i] = (uint64_t)uc->uc_mcontext.regs[i];
     g_gate_sp = (uint64_t)uc->uc_mcontext.sp;
     g_gate_have_regs = 1;
+    // ★ np115：**故障处理必须线程感知**。setjmp 的上下文只属于探针线程；
+    //   客人自己的线程（Prepare / Vibration 等）出错时若也 siglongjmp，就是**跨线程跳栈**，
+    //   会把探针线程的栈恢复出来、现场全乱（本轮真机：日志停在"止步"、nnMain 一行都没打出来）。
+    //   对非探针线程只记现场然后退出（退出码 140），保证日志里留下真正的崩点。
+    if (g_probe_thr_set && !pthread_equal(pthread_self(), g_probe_thr)) {
+        LOG("【红】客人线程出错：pc=%#llx sig=%d si_addr=%#llx —— 不跨线程 longjmp，退出判读",
+            (unsigned long long)g_gate_fault_pc, sig, (unsigned long long)g_gate_fault_addr);
+        _exit(140);
+    }
     if (!g_gate_armed) {
         // 未武装段（尾跳补丁循环等）出段错误：先打日志再退出——PC 落在 hilog 里供定位
         LOG("【红】门回路：未武装段 SIGSEGV/SIGBUS pc=%#llx sig=%llx（退出码 139）", (unsigned long long)g_gate_fault_pc, (unsigned long long)sig);
@@ -2085,6 +2102,8 @@ static uint64_t hook_dbD(uint64_t *f) {   // 指令 0xa1d57c（sead 助手入口
 //   调用（e1 实测 0 命中）。任务身份铁证 = sead::ControllerMgr：标签 2 工厂 *(0x22809c0)
 //   = 0x9fe910（alloc 0x198 + 0xa1f07c 构造，基类 0x9fd9fc 名字串 0x1ba6eab 且不读 pair）。
 static int g_n_e1, g_n_e2, g_n_e3, g_n_e4, g_n_e5;
+static uint64_t g_obs_task;   // np113：状态迁移观察者——上次看到的任务
+static uint32_t g_obs_state;  // np113：该任务上次的状态
 static int g_n_e2fix;      // 影子补丁触发次数（标签 0 ⇒ 补 {2, ControllerMgr 工厂}）
 static int g_n_e6, g_n_e7, g_n_e8;   // 同轮探针：工厂/池注册/G 三点运行时状态
 static int g_n_e8fix;                // 状态 1→2 补推次数（G 激活路径的放行条件）
@@ -2228,14 +2247,28 @@ static uint64_t hook_e8(uint64_t *f) {   // G 入口 0xa01d70：x0 = mgr（读�
                  (unsigned long long)a[3], (unsigned long long)a[4], (unsigned long long)a[5]);
         }
     }
+    // np113：**状态迁移观察者**（只读）——不管是谁写的，任务状态一变就记一行。
+    //   目的：拐杖摘掉后，看游戏自己会不会把 1 推走（谁来推、推到几）。
+    if (task8) {
+        uint32_t st = *(const uint32_t *)(uintptr_t)(task8 + 0xb8);
+        if (task8 != g_obs_task) {
+            g_obs_task = task8;
+            g_obs_state = st;
+            klog("[任务链] 首次看到任务 %#llx：状态=%u\n", (unsigned long long)task8, st);
+        } else if (st != g_obs_state) {
+            klog("[任务链] 任务 %#llx 状态 %u → %u（第 %d 次进入 G）\n",
+                 (unsigned long long)task8, g_obs_state, st, g_n_e8);
+            g_obs_state = st;
+        }
+    }
     // ★ 钉子 #8 续修：状态 1→2 补推（2026-10-18，根因见进度文档 14.5）。
-    //   池节点寿命：注册 → 惰性建任务（状态 1）→ **状态 2** → G 激活（2→4、插 mgr+0x90 链表、
-    //   task 虚表[0x58]、*记录[0xa0]=task、**节点释放回空闲链**）→ 池空。状态 1→2 在鸿蒙上
-    //   没人推：唯一写入者是直创路径后置序列（0xa015a4，从未运行），G 惰性路径里的 notify
-    //   （mgr[0x50] → 虚表[0x18]）也被跳过（mgr[0x50]=0）⇒ 任务线程的 G 永远在
-    //   "状态既非 0 也非 2" 分支空转，物理线程的任务图也跟着停摆。
-    //   宿主补推：任务存在且状态==1 ⇒ 置 2（自限制：置完后不再触发；状态字段是 32 位对齐写，
-    //   与游戏自己的 ldr w8,[x+0xb8] 读法一致）。下一个 G 调用就会走激活路径。
+    //   ⚠ 2026-10-19 晚 **默认关闭**（np113 真机实证）：这条补丁是"记录全零时代"的拐杖。
+    //   实测链路：我们把它推到 2 → 框架的 prepare 通道把 2 当"待销毁"→ 置 4 →
+    //   下一拍 TaskMgr::calc 里置 6 并调用任务虚表槽 17/18（析构两张表）→ 销毁 →
+    //   销毁里 `blr [task]+0x68`（槽 13 = 收尾）→ 收尾要 RootTask::calc 阶段 7 才建的单例
+    //   ⇒ 单例为 0 ⇒ `si_addr=0x180` 崩。
+    //   也就是说：**这条补丁直接导致了"任务建出来就死"**。libc 修好后先摘掉它，看游戏自己怎么走。
+#if NP_STATE_HACK
     if (task8 && *(const uint32_t *)(uintptr_t)(task8 + 0xb8) == 1) {
         *(uint32_t *)(uintptr_t)(task8 + 0xb8) = 2;
         // ★ flags 补位（2026-10-18，用户批准）：runner 的外层检查（ldrb [task+0x60]; tbz bit1）
@@ -2247,6 +2280,7 @@ static uint64_t hook_e8(uint64_t *f) {   // G 入口 0xa01d70：x0 = mgr（读�
             klog("[钉子8] 状态提升：任务 %#llx 状态 1 ⇒ 2，flags [0x60] |= 6（runner 放行条件）\n",
                  (unsigned long long)task8);
     }
+#endif
     return 0;
 }
 // ===== 钉子 #8 续修探针（runner 链，只读）：激活之后游戏仍自旋 ⇒ runner（0xa02320 →
@@ -2281,10 +2315,19 @@ static uint64_t hook_e10(uint64_t *f) {  // 运行转发器 0x9fdccc 入口：x0
 //   然后查 [task+0x60] bit1 —— 我们的任务 flags=0，在 0xa01cf0 之前就被跳过。
 //   这个钩子在 runner 入口用 C 沿链表走一遍，运行时坐实：链表里有没有任务、flags 多少。
 static uint64_t hook_e11(uint64_t *f) {  // runner 0xa01fe0 入口：x0 = mgr
-    if (++g_n_e11 <= 8) {
-        uint64_t m = f[FR_X0];
+    // np113：加"第几次"与 [+0xe0] 表——判"收尾只跑一次"还是"每帧都跑"。
+    uint64_t m0 = f[FR_X0];
+    int n = ++g_n_e11;
+    if (n > 8 && (n % 200) != 0) return 0;
+    {
+        uint64_t m = m0;
         uint64_t head = m ? m + 0x90 : 0;
         uint64_t cur = m ? *(const uint64_t *)(uintptr_t)(m + 0x98) : 0;
+        uint64_t e0 = (m > 0x10000ull && m < 0x800000000000ull)
+                    ? *(const uint64_t *)(uintptr_t)(m + 0xe0) : 0;
+        klog("[钉子8] runner 第 %d 次：mgr=%#llx [+0xe0]=%#llx（mgr+%#llx）\n",
+             n, (unsigned long long)m0, (unsigned long long)e0,
+             (unsigned long long)((m0 && e0 > m0) ? e0 - m0 : 0));
         int i = 0;
         while (cur && cur != head && i < 8) {
             uint64_t task = *(const uint64_t *)(uintptr_t)(cur + 0x10);   // 载荷指针
@@ -2555,6 +2598,86 @@ static uint64_t hook_rt_ctor(uint64_t *f) {  // 0x7277ec：RootTask 构造（all
     if (++g_rt_ctor <= 4)
         klog("[RootTask] 构造 0x7277ec 被调（第 %d 次）owner=%#llx x30=%#llx\n",
              g_rt_ctor, (unsigned long long)f[FR_X0], (unsigned long long)f[FR_X30]);
+    return 0;
+}
+
+static int g_rt_prepare;      // np113：RootTask::prepare 命中次数
+static uint64_t hook_rt_prepare(uint64_t *f) {   // 0x7265b8 = RootTask::prepare（名串 0x1b78894）
+    if (++g_rt_prepare <= 4)
+        klog("[RootTask] prepare 0x7265b8 被调（第 %d 次）this=%#llx x30=%#llx\n",
+             g_rt_prepare, (unsigned long long)f[FR_X0], (unsigned long long)f[FR_X30]);
+    return 0;
+}
+
+// ===== np114：把客体的日志函数（0xf35374）换成宿主实现 =====
+// 真机实证（本轮）：prepare 在 **Prepare 线程** 上跑起来后，它与主线程同时调 0xf35374，
+// 两边都从**同一个空闲节点链表**（日志对象 +0x18）里摘节点：
+//   节点空闲时 [0] = next；在用时 [0] = 字符串指针。
+//   两个线程同时摘同一个节点 ⇒ 后一个把 [0]（已是字符串指针）当成 next 写回链表头
+//   ⇒ 链表头变成垃圾 ⇒ 下一次 `ldr x8,[x21]` 崩在 0xf353a8（si_addr 是垃圾串地址）。
+// 换成宿主实现后：① 天然串行（klog 自带锁）；② 客体的日志原文转进我们的日志文件，调试更有用。
+static int g_gamelog_n;
+static uint64_t hook_game_log(uint64_t *f) {   // 0xf35374：参数 = 消息串指针
+    const char *s = (const char *)(uintptr_t)f[FR_X0];
+    uint64_t p = f[FR_X0];
+    uint64_t base = (uint64_t)(uintptr_t)g_k_m.base;
+    int in_img = base && p >= base && p < base + DM_IMG_MAIN_END;
+    int in_host = p >= 0x10000ull && p < 0x800000000000ull && !in_img;
+    if (s && (in_img || in_host) && g_gamelog_n < 400) {
+        char buf[192];
+        size_t i = 0;
+        for (; i + 1 < sizeof buf; i++) { char c = s[i]; if (!c) break; buf[i] = c; }
+        buf[i] = 0;
+        if (i > 0) {
+            g_gamelog_n++;
+            klog("[游戏日志] %s\n", buf);
+        }
+    }
+    return 0;
+}
+
+// ===== np113：查"RootTask 建出来就立刻被销毁"的那条路径 =====
+// 离线（本轮）：0x726768 = RootTask 虚表槽 13（+0x68）= 收尾/退出：
+//   先 0x728088(**(0x227aaa0)+0x180) 拆掉某个子系统，再 0x1072adc 清单例，再关一串子系统。
+//   它由 0xa01be8（任务销毁）里 `blr [task]+0x68` 调用 ⇒ 只要任务被销毁，它就必然跑。
+// 而那个"单例"正是 **RootTask::calc 阶段 7** 用工厂 0x1072abc 建出来的（0x72722c 处读槽）
+//   ⇒ 阶段 7 没跑过，单例就是 0 ⇒ 退出路径拿 0+0x180 当对象 ⇒ si_addr=0x180。
+// 所以真正要回答的是：**任务为什么刚建好就被销毁？** 三个点足够定性：
+//   ① 0xa01fe0（TaskMgr 的每帧处理）被调几次 —— 一次=收尾流程，多次=帧循环
+//   ② 0xa01aec（链表插入）把任务插进哪张表 —— mgr+0xd8 还是别处
+//   ③ 0x726768（退出）的调用者 x30 —— 谁在拆
+static int g_list_ins;     // 0xa01aec 插入次数
+static int g_task_exit;    // 0x726768 进入次数
+
+static uint64_t hook_list_ins(uint64_t *f) {   // 0xa01aec：把任务插进某张有序表
+    uint64_t m = f[FR_X0], lst = f[FR_X1], t = f[FR_X2];
+    if (++g_list_ins <= 12) {
+        uint32_t st = 0;
+        if (t > 0x10000ull && t < 0x800000000000ull)
+            st = *(const uint32_t *)(uintptr_t)(t + 0xb8);
+        klog("[任务链] 链表插入 0xa01aec：mgr=%#llx 目标表=%#llx（mgr+%#llx） 任务=%#llx 状态=%u\n",
+             (unsigned long long)m, (unsigned long long)lst,
+             (unsigned long long)((m && lst > m) ? lst - m : 0),
+             (unsigned long long)t, st);
+    }
+    return 0;
+}
+static uint64_t hook_task_exit(uint64_t *f) {  // 0x726768：RootTask 槽 13（退出/收尾）
+    uint64_t t = f[FR_X0];
+    if (++g_task_exit <= 6) {
+        uint64_t base = (uint64_t)(uintptr_t)g_k_m.base;
+        uint64_t lr = f[FR_X30];
+        int in = lr >= base && lr < base + DM_IMG_MAIN_END;
+        uint64_t holder = *(const uint64_t *)(uintptr_t)(base + 0x227aaa0);
+        uint64_t inst = (holder > 0x10000ull && holder < 0x800000000000ull)
+                      ? *(const uint64_t *)(uintptr_t)holder : 0;
+        uint32_t st = 0;
+        if (t > 0x10000ull && t < 0x800000000000ull)
+            st = *(const uint32_t *)(uintptr_t)(t + 0xb8);
+        klog("[任务链] ★ 任务退出 0x726768：this=%#llx 状态=%u 调用者=%s%#llx 单例=%#llx\n",
+             (unsigned long long)t, st, in ? "+" : "(外)",
+             (unsigned long long)(in ? lr - base : lr), (unsigned long long)inst);
+    }
     return 0;
 }
 
@@ -3194,6 +3317,8 @@ static void k_run_module_init(const module_t *m) {
 
 static void *k_thread(void *arg) {
     (void)arg;
+    g_probe_thr = pthread_self();   // np115：先记下"谁拥有 setjmp 上下文"
+    g_probe_thr_set = 1;
     uint64_t b = (uint64_t)g_k_m.base;
     uint64_t tp = 0; __asm__ volatile("mrs %0, tpidr_el0" : "=r"(tp));
     uint64_t tsd = *(uint64_t *)(tp - 272);
@@ -3415,6 +3540,11 @@ static void exp_k(const char *files_dir, char *out, size_t cap, size_t *used) {
         k_install_hook(img, 0x726838, (void *)hook_rt_calc, "RootTask::calc 入口（阶段状态机）");
         k_install_hook(img, 0x726f60, (void *)hook_rt_mgr, "RootTask 建管理器站点 0x726f60");
         k_install_hook(img, 0x7277ec, (void *)hook_rt_ctor, "RootTask 构造 0x7277ec");
+        // np113：查"建出来就被销毁"（见 hook_list_ins/hook_task_exit 的注释）
+        //   ⚠ 0xa01fe0 已由 hook_e11 挂着（同一站点不能挂两次），那边加了调用计数与 [+0xe0] 表。
+        k_install_hook(img, 0xa01aec, (void *)hook_list_ins, "任务链 链表插入 0xa01aec");
+        k_install_hook(img, 0x726768, (void *)hook_task_exit, "RootTask 退出 0x726768（槽 13）");
+        k_install_hook(img, 0x7265b8, (void *)hook_rt_prepare, "RootTask::prepare 0x7265b8");
         // 崩链上的两个构造器入口（记录 this）
         k_install_hook(img, 0xa08ef4, (void *)hook_ctor_log, "构造器 0xa08ef4 入口");
         k_install_hook(img, 0xa08e94, (void *)hook_ctor2_log, "构造器 0xa08e94 入口");
@@ -3446,7 +3576,9 @@ static void exp_k(const char *files_dir, char *out, size_t cap, size_t *used) {
         k_install_hook(img, 0xa01928, (void *)hook_e13, "钉子8 注册体 0xa01928");
         k_install_hook(img, 0xa00d4c, (void *)hook_e14, "钉子8 构造尾 0xa00d4c");
         // ★ 日志系统探针（见 hook_e15/e16 注释）
-        k_install_hook(img, 0xf35374, (void *)hook_e15, "日志 添加 0xf35374");
+        // ⚠ np114：0xf35374 改成**替换式**（宿主实现 + 串行化 + 转写），不再用记录式——
+        //   记录式只是旁观，救不了"两线程争同一空闲链表"的竞态（真机已崩在 0xf353a8）。
+        k_install_replace_hook(img, 0xf35374, (void *)hook_game_log, "客体日志 0xf35374 → 宿主（串行）");
         k_install_hook(img, 0xf35400, (void *)hook_e16, "日志 遍历 0xf35400");
         k_install_hook(img, 0xa01924, (void *)hook_e17, "钉子8 注册体上锁前 0xa01924");
         // ★ Task #16：第一个任务由谁创建（见 hook_e18/e19 注释；离线结论见进度文档 §20）
