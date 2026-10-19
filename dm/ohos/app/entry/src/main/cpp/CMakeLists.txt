@@ -41,6 +41,10 @@ add_library(dmprobe SHARED
     ${DM_DIR}/ohos/dm_fs_ohos.c
     # 通用 SDK 胶水层（L1）：vi/oe 等轻量语义按"符号名 → 实现"表组织，与游戏无关。
     ${DM_DIR}/ohos/dm_sdk_ohos.c
+    # 通用 libc 胶水层（L1）：memcpy/memset/str*/math/time 按符号名直连宿主。
+    # 为什么必须有：这些符号此前全落记录型存根（返回 0）⇒ memcpy 空操作 ⇒ 所有结构体拷贝丢失
+    # ⇒ 任务记录全 0 ⇒ RootTask 建不出来（2026-10-19 真机实证）。
+    ${DM_DIR}/ohos/dm_libc_ohos.c
     # 通用 NVN 胶水层（L1）：设备属性表/原点深度模式/句柄换算等平台中立语义。
     ${DM_DIR}/ohos/dm_nvn_ohos.c
     # 通用 NVN 内存池/缓冲胶水层（L1，UMA 直通；从探针搬出）。

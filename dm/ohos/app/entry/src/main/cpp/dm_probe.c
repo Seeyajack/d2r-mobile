@@ -23,6 +23,7 @@
 #include "map_image_ohos.h"     // 鸿蒙版 map_image —— 实验 D 的被测对象
 #include "dm_fs_ohos.h"         // 最小 nn::fs（romfs → 宿主目录；导入按符号名分流到这里）
 #include "dm_sdk_ohos.h"        // 通用 SDK 胶水层（vi/oe 等轻量语义；与游戏无关）
+#include "dm_libc_ohos.h"       // 通用 libc 胶水层（memcpy/str*/math 按符号名直连宿主）
 #include "dm_nvn_ohos.h"        // 通用 NVN 胶水层（设备族等平台中立语义）
 #include "dm_nvn_vk.h"         // 通用 NVN 内存池/缓冲胶水层（UMA 直通）
 #include "dm_main_layout.h"     // 旷野之息 main 的布局常数（fixups 表头生成）
@@ -3501,10 +3502,14 @@ static void exp_k(const char *files_dir, char *out, size_t cap, size_t *used) {
             uint32_t symi   = (uint32_t)(r_info >> 32);
             const char *nm  = (const char *)(img + DT_STRTAB + *(uint32_t *)(img + DT_SYMTAB + (uint64_t)symi * 24));
             if (g_nplt < 512) { g_plt[g_nplt].slot = (uint64_t)(img + r_off); g_plt[g_nplt].name = nm; g_nplt++; }
-            // ★ 已实现的导入直连宿主函数（目前 = nn::fs 23 个）；其余仍落记录型存根。
+            // ★ 已实现的导入直连宿主函数（目前 = nn::fs 23 个 + libc 一族）；其余仍落记录型存根。
             //   分流按**符号名**，换游戏不用改表（只要 ABI 同名）。
+            //   ⚠ np112：libc 一族（memcpy/memset/str*/math）此前全部落到存根 ⇒ memcpy 空操作
+            //   ⇒ 所有结构体拷贝为 0 ⇒ 任务记录 tag=0 ⇒ RootTask 建不出来（2026-10-19 真机实证）。
             void *impl = dm_fs_impl(nm);
-            if (impl) { g_nimpl++; if (g_nimpl <= 40) klog("[导入] 直连 %s\n", nm); }
+            const char *src = "fs";
+            if (!impl) { impl = dm_libc_impl(nm); src = "libc"; }
+            if (impl) { g_nimpl++; if (g_nimpl <= 80) klog("[导入] 直连 %s（%s）\n", nm, src); }
             *(uint64_t *)(img + r_off) = impl ? (uint64_t)(uintptr_t)impl
                                               : (uint64_t)(uintptr_t)&plt_stub;
         }
@@ -3518,6 +3523,7 @@ static void exp_k(const char *files_dir, char *out, size_t cap, size_t *used) {
         }
         dm_fs_set_log(klog);
         dm_fs_set_base(img);   // np80：让 fs 日志能把调用者 LR 换算成映像内偏移
+        dm_libc_set_log(klog);  // np112：libc 胶水层同此
         dm_sdk_set_log(klog);   // 通用 SDK 胶水层也用同一份日志
         dm_nvn_set_log(klog);   // 通用 NVN 胶水层同此
         dm_nvn_vk_set_log(klog);   // 池/缓冲层同此
