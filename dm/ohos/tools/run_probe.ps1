@@ -60,10 +60,16 @@ if (-not $NoBuild) {
     Write-Host "       构建成功（HAP $b）" -ForegroundColor Green
 }
 
-# ---- 2) 装机 ----
+# ---- 2) 装机（连一次、装一次；失败再连一次重试——真机实测过"传到一半连接掉了"）----
 Write-Host "[2/6] 装机…" -ForegroundColor Cyan
-hdc tconn $Device | Out-Null
-$inst = (hdc install -r $hap 2>&1 | Out-String)
+$inst = ""
+for ($try = 1; $try -le 2; $try++) {
+    hdc tconn $Device | Out-Null
+    $inst = (hdc install -r $hap 2>&1 | Out-String)
+    if ($inst -match "successfully") { break }
+    Write-Host "       第 $try 次装机没成功，重连后重试…" -ForegroundColor DarkYellow
+    hdc kill 2>&1 | Out-Null; Start-Sleep -Seconds 2; hdc start 2>&1 | Out-Null
+}
 if ($inst -notmatch "successfully") {
     Write-Host "[失败] 装机没有成功：" -ForegroundColor Red
     Write-Host $inst

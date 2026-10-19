@@ -1316,7 +1316,11 @@ static void *thr_trampoline(void *p) {
 //   `add x0,#0x20; b nn::os::LockMutex/UnlockMutex`（PLT 槽 0x22636f0/0x22636f8）。
 //   **nn::os::Mutex 是递归语义**（同一线程可重复加锁、靠计数解锁），于是同一线程先由
 //   mgr 构造器加锁、再由池注册函数加锁是正常路径。非递归 pthread_mutex 在这里必死锁。
-#define DM_MUTEX_MAX 64
+// ⚠ np128（真机实证的重大教训）：这张表原来是 **64 格**，而游戏在启动阶段就初始化了 **297 个互斥量**。
+//   表满后 mtx_get 退化成"所有新锁都返回 &g_mtx_impl[0]"⇒ 两个"不同"的锁其实是同一把：
+//   同一个线程先后锁两把（都很常见）就**自死锁**，而且是 CPU 0%、所有线程 state=S 的死法，
+//   看起来像"卡在某个未知地方"，极难定位。现在放到 2048 格，并在满表时打红日志（绝不静默退化）。
+#define DM_MUTEX_MAX 2048
 static void *g_mtx_key[DM_MUTEX_MAX];
 static pthread_mutex_t g_mtx_impl[DM_MUTEX_MAX];
 static pthread_mutex_t g_mtx_reg = PTHREAD_MUTEX_INITIALIZER;   // 登记表自身的锁
@@ -1337,6 +1341,11 @@ static pthread_mutex_t *mtx_get(void *m) {
         return &g_mtx_impl[i];
     }
     pthread_mutex_unlock(&g_mtx_reg);
+    // np128：**绝不静默退化**。表满 = 多把锁变成同一把 = 迟早自死锁，必须立刻看得见。
+    static int n_full;
+    if (++n_full <= 8)
+        klog("【红】互斥量表满（%d 格）！新锁 %p 退化为 impl[0] ⇒ 会自死锁（调大 DM_MUTEX_MAX）\n",
+             DM_MUTEX_MAX, m);
     return &g_mtx_impl[0];      // 表满：退化（不该发生）
 }
 
@@ -2004,8 +2013,8 @@ static void ktrace_maybe_snapshot(void) {
     if (!g_files_dir[0]) return;
     unsigned n = __atomic_load_n(&g_tr_n, __ATOMIC_RELAXED);
     if (n < next || next > KTRACE_N) return;
-    klog("[TRACE] 水位快照：已记录 %u 条（下一水位 %u）\n", n, next * 4u);
-    next *= 4u;
+    klog("[TRACE] 水位快照：已记录 %u 条（下一水位 %u）\n", n, next + 2000u);
+    next += 2000u;   // np126：粒度从"×4"改成"+2000"——阻塞时要的是"最后到过哪"，粗水位拿不到
     ktrace_dump(g_files_dir);
 }
 
@@ -2030,6 +2039,37 @@ static void ktrace_reset(void) {
     if (!g_tr) g_tr = (ktrace_ent *)calloc(KTRACE_N, sizeof *g_tr);
     __atomic_store_n(&g_tr_n, 0u, __ATOMIC_RELAXED);
     __atomic_store_n(&g_tr_lost, 0u, __ATOMIC_RELAXED);
+}
+
+// np126：**guest 侧标记**。有些关键函数已经挂了记录式钩子（日志有上限、会静默），
+//   在那些钩子里顺手记一条轨迹 ⇒ 同一个钩子既保留原日志，又能在离线时间线上看见"到过没、来几次"。
+//   注意：不能再挂第二个钩子（同一站点会互相顶掉），所以走"钩子内部追加记一笔"这条路。
+static void ktrace_mark(uint32_t off, uint64_t a0, uint64_t a1) {
+    if (!g_tr) return;
+    unsigned i = __atomic_fetch_add(&g_tr_n, 1u, __ATOMIC_RELAXED);
+    if (i < KTRACE_N) {
+        g_tr[i].off = off;
+        g_tr[i].tid = (uint32_t)(uintptr_t)pthread_self();
+        g_tr[i].a0  = a0;
+        g_tr[i].a1  = a1;
+    } else {
+        __atomic_fetch_add(&g_tr_lost, 1u, __ATOMIC_RELAXED);
+    }
+}
+
+// np127：**定时落盘**（宿主线程，每 10 秒一次，共 4 次）。
+//   为什么需要：按"条数水位"落盘有个死角——游戏卡住后不再产生新记录，最后一个水位之前
+//   那几百条恰好是"卡死前的最后动作"，却永远落不下来（本轮真机：文件停在 2000 条，
+//   而实际卡在 2000~4000 之间）。定时落盘按**时间**取样，卡住也能拿到最新的一份。
+//   宿主 pthread 能被调度（探针线程本身就是），这里只做文件写，不碰客体状态。
+static void *ktrace_timer(void *arg) {
+    (void)arg;
+    for (int i = 0; i < 4; i++) {
+        struct timespec ts = { 10, 0 };
+        nanosleep(&ts, NULL);
+        if (g_files_dir[0]) ktrace_dump(g_files_dir);
+    }
+    return NULL;
 }
 
 // 落盘：头部 32 字节（魔数/条数/丢失数/基址），随后是原始条目。离线用 tools/trace_view.py 读。
@@ -2331,6 +2371,7 @@ static uint64_t hook_e7(uint64_t *f) {   // 池注册入口 0xa018f8：x0 = mgr�
     return 0;
 }
 static uint64_t hook_e8(uint64_t *f) {   // G 入口 0xa01d70：x0 = mgr（读法与 G 自己逐条一致）
+    ktrace_mark(0xa01d70u, f[FR_X0], 0);   // np126：轨迹标记（日志会静默，轨迹不会）
     // 先取池状态一次，日志与补推共用。**必须先查计数**（与 G 自己的 cmp w9,#1 判据一致）：
     // 激活路径会把节点释放回空闲链（计数--），此后再读 pool[8] 可能拿到野值。
     uint64_t m8 = f[FR_X0];
@@ -2436,6 +2477,7 @@ static uint64_t hook_e10(uint64_t *f) {  // 运行转发器 0x9fdccc 入口：x0
 //   然后查 [task+0x60] bit1 —— 我们的任务 flags=0，在 0xa01cf0 之前就被跳过。
 //   这个钩子在 runner 入口用 C 沿链表走一遍，运行时坐实：链表里有没有任务、flags 多少。
 static uint64_t hook_e11(uint64_t *f) {  // runner 0xa01fe0 入口：x0 = mgr
+    ktrace_mark(0xa01fe0u, f[FR_X0], 0);   // np126
     // np113：加"第几次"与 [+0xe0] 表——判"收尾只跑一次"还是"每帧都跑"。
     uint64_t m0 = f[FR_X0];
     int n = ++g_n_e11;
@@ -2684,6 +2726,7 @@ static uint64_t hook_e25(uint64_t *f) {   // 0x9ff3a0：7 棵树挂载段（纯 
 // ===== np111：RootTask::calc 阶段状态机（P0-1/P0-2，见文件上方 g_rt_* 的离线结论）=====
 static uint64_t hook_rt_calc(uint64_t *f) {   // 0x726838 入口：x0 = RootTask*
     uint64_t th = f[FR_X0];
+    ktrace_mark(0x726838u, th, 0);   // np126：轨迹标记——"calc 到没到"在时间线上一眼可见
     g_rt_calls++;
     if (!g_rt_this && th > 0x10000ull && th < 0x800000000000ull) {
         uint64_t b0 = (uint64_t)(uintptr_t)g_k_m.base;
@@ -2828,6 +2871,7 @@ static uint64_t hook_gfx_set128(uint64_t *f) {   // 0x9fc8c4：str x23,[x19,#0x1
 }
 static uint64_t hook_gfx_frame(uint64_t *f) {    // 帧循环入口
     uint64_t t = f[FR_X0], d = 0;
+    ktrace_mark(0x9fd490u, t, 0);   // np126
     if (t > 0x10000ull && t < 0x800000000000ull) d = *(const uint64_t *)(uintptr_t)(t + 0x128);
     if (++g_gfx_frame <= 4)
         klog("[Volante] 帧循环 #%d：this=%#llx [this+0x128]=%#llx\n",
@@ -3878,6 +3922,10 @@ static void exp_k(const char *files_dir, char *out, size_t cap, size_t *used) {
         }
         // np125：trace 开局（清环）+ 落一份"符号下标 → 名字"表，供离线把 trace 里的调用还原成名字
         ktrace_reset();
+        {   // np127：定时落盘线程（卡死时也能拿到最新轨迹）
+            pthread_t t;
+            if (pthread_create(&t, NULL, ktrace_timer, NULL) == 0) pthread_detach(t);
+        }
         {
             char p[512];
             snprintf(p, sizeof p, "%s/dm_plt_names.txt", files_dir);

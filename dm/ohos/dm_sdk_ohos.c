@@ -50,6 +50,52 @@ static int oe_get_performance_mode(void) { return 0; }      // 0 = Normal
 static int oe_get_desired_language(void) { return 0; }      // 0 = AmericanEnglish
 static int oe_ok(uint64_t a0) { (void)a0; return 0; }       // Initialize / Set* 一律成功
 
+// ═══════════════ nn::settings：语言等价判定（2026-10-19 np129 补）═══════════════
+// 为什么补（真机实证的卡点）：`ResourceMgrTask` 建完之后，游戏在
+//   `nn::settings::eq(Language, LanguageCode)` 上打了无数个来回（PLT 日志刷满、进程 0% CPU 睡死）。
+//   它拿到的一直是 0 =「不相等」⇒ 语言表轮询到底也匹配不到 ⇒ 原地死等。
+// ABI：eq(const Language&, const LanguageCode&) -> bool
+//   Language     = 枚举（4 字节，按 const& 传指针）
+//   LanguageCode = char[8]（"en-US"/"ja" 这类，NUL 结尾）
+// 表按 nnSdk 的 Language 枚举顺序（与 oe::GetDesiredLanguage 的返回值同一套）——**与游戏无关**，
+// 换游戏照用；只有"我们上报哪种语言"是可配的（见 oe_get_desired_language，目前 0 = 美式英语）。
+static const char *sdk_lang_code(int32_t lang) {
+    switch (lang) {
+    case 0:  return "en-US";
+    case 1:  return "en-GB";
+    case 2:  return "ja";
+    case 3:  return "fr";
+    case 4:  return "de";
+    case 5:  return "es-419";
+    case 6:  return "es";
+    case 7:  return "it";
+    case 8:  return "nl";
+    case 9:  return "fr-CA";
+    case 10: return "pt";
+    case 11: return "ru";
+    case 12: return "ko";
+    case 13: return "zh-TW";
+    case 14: return "zh-CN";
+    case 15: return "pt-BR";
+    default: return NULL;
+    }
+}
+static int g_n_seteq;
+static uint64_t sdk_settings_eq(uint64_t a0, uint64_t a1) {
+    if (a0 < 0x10000ull || a1 < 0x10000ull) return 0;
+    int32_t lang = *(const int32_t *)(uintptr_t)a0;
+    const char *code = (const char *)(uintptr_t)a1;
+    const char *mine = sdk_lang_code(lang);
+    char cb[9]; size_t i = 0;
+    for (; i < 8 && code[i]; i++) cb[i] = code[i];
+    cb[i] = 0;
+    int hit = (mine && !strcmp(mine, cb)) ? 1 : 0;
+    if (++g_n_seteq <= 16)
+        SDKLOG("[settings] eq(lang=%d「%s」, code=\"%s\") → %d\n",
+               (int)lang, mine ? mine : "?", cb, hit);
+    return (uint64_t)hit;
+}
+
 // ═══════════════ nn::os：时基换算与睡眠（2026-10-19 np78 补）═══════════════
 // 为什么补这两个：`ConvertToTimeSpan` 此前是"一律返 0"的桩 ⇒ 游戏算出的睡眠时长恒为 0
 //   ⇒ 主循环**全速空转**（真机实测 18578 帧、日志刷 3 万行，把诊断信号全淹掉）。
@@ -151,6 +197,8 @@ static const dm_sdk_ent g_tab[] = {
     E("_ZN2nn2oe17FinishStartupLogoEv", oe_ok),
     // ---- nn::util ----
     E("_ZN2nn4util9VSNPrintfEPcmPKcSt9__va_list", util_vsnprintf),
+    // ---- nn::settings ----
+    E("_ZN2nn8settingseqERKNS0_8LanguageERKNS0_12LanguageCodeE", sdk_settings_eq),
     // ---- nn::os：时基与睡眠 ----
     E("_ZN2nn2os17ConvertToTimeSpanENS0_4TickE", os_convert_timespan),
     E("_ZN2nn2os11SleepThreadENS_8TimeSpanE", os_sleep),
