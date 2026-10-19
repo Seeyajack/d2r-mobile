@@ -1427,11 +1427,12 @@ static dm_mq_t *mq_get(void *q) {
 static uint64_t g_alloc_obj[2];
 
 static uint64_t plt_stub(void) {
-    uint64_t x16v, a0, a1, a2;
+    uint64_t x16v, a0, a1, a2, a3;
     __asm__ volatile("mov %0, x16" : "=r"(x16v));
     __asm__ volatile("mov %0, x0" : "=r"(a0));
     __asm__ volatile("mov %0, x1" : "=r"(a1));
     __asm__ volatile("mov %0, x2" : "=r"(a2));
+    __asm__ volatile("mov %0, x3" : "=r"(a3));   // np96：第 4 参（VSNPrintf 的 va_list 在这里）
     const char *nm = NULL;
     for (int i = 0; i < g_nplt; i++) if (g_plt[i].slot == x16v) { nm = g_plt[i].name; break; }
     g_plt_calls++;
@@ -1451,7 +1452,13 @@ static uint64_t plt_stub(void) {
         if (!strcmp(nm, "_ZN2nn2os11GetHostArgcEv")) { klog("[服务] GetHostArgc → 1\n"); return 1; }
         if (!strcmp(nm, "_ZN2nn2os11GetHostArgvEv")) {
             g_host_argv[0] = g_host_arg0; g_host_argv[1] = NULL;
-            klog("[服务] GetHostArgv → argv[0]=main\n");
+            {   // np94：谁在问启动参数？（x30 = 调用者返回地址）
+                uint64_t lr; __asm__ volatile("mov %0, x30" : "=r"(lr));
+                uint64_t b2 = (uint64_t)(uintptr_t)g_k_m.base;
+                int in = lr >= b2 && lr < b2 + DM_IMG_MAIN_END;
+                klog("[服务] GetHostArgv → argv[0]=main（调用者=%s%#llx）\n", in ? "+" : "(外)",
+                     (unsigned long long)(in ? lr - b2 : lr));
+            }
             return (uint64_t)(uintptr_t)g_host_argv;
         }
         // ═══ 线程 / TLS / 互斥（2026-10-18 改造：真 pthread）═══
@@ -1473,6 +1480,21 @@ static uint64_t plt_stub(void) {
             klog("[线程] CreateThread：类型=%#llx 入口=%#llx 参数=%#llx → 槽 %d\n",
                  (unsigned long long)a0, (unsigned long long)a1,
                  (unsigned long long)a2, slot);
+            // np92：把**入口参数对象**的虚表与消息处理槽读出来——线程体 0xa1e30c 的消息循环是
+            //   `x19 = 入口参数; x9 = [x19]; x9 = [x9+0x80]; blr x9`，所以
+            //   **[参数+0] = 虚表，[虚表+0x80] = "收到消息后干什么"**。
+            //   客体内存同地址空间可直接读，不用挂钩子（np84 的教训：挂钩子会扰动初始化）。
+            if (a2 > 0x10000ull && a2 < 0x800000000000ull) {
+                uint64_t vt = *(const uint64_t *)(uintptr_t)a2;
+                if (vt > 0x10000ull && vt < 0x800000000000ull) {
+                    uint64_t b2 = (uint64_t)(uintptr_t)g_k_m.base;
+                    uint64_t h = *(const uint64_t *)(uintptr_t)(vt + 0x80);
+                    int in = h >= b2 && h < b2 + DM_IMG_MAIN_END;
+                    klog("[线程] 参数=%#llx 虚表=%#llx 消息处理槽[+0x80]=%s%#llx\n",
+                         (unsigned long long)a2, (unsigned long long)vt, in ? "+" : "(外)",
+                         (unsigned long long)(in ? h - b2 : h));
+                }
+            }
             return slot >= 0 ? 0 : 1;      // 0 = 成功
         }
         // nn::os::StartThread(ThreadType*) —— 真建宿主线程，蹦床调 entry(arg)
@@ -1726,7 +1748,7 @@ static uint64_t plt_stub(void) {
         // 探针只做分派；表里没有的仍落下面的通用记名 + 返 0 路径。
         {
             uint64_t r = 0;
-            if (dm_sdk_call(nm, a0, a1, a2, &r)) return r;
+            if (dm_sdk_call(nm, a0, a1, a2, a3, &r)) return r;
         }
         if (g_plt_log_n < DM_PLT_LOG_CAP) {
             g_plt_log_n++;

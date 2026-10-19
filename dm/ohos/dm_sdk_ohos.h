@@ -27,7 +27,9 @@ void dm_sdk_set_log(void (*fn)(const char *, ...));
 // 按导入符号名分派。返回 1 = 已处理（*ret 为返回值），0 = 不归本层管（调用方回落记录型存根）。
 // Dispatch by imported symbol name. Returns 1 when handled (*ret holds the return value),
 // 0 when the symbol is not ours (the caller falls back to the recording stub).
-int dm_sdk_call(const char *sym, uint64_t a0, uint64_t a1, uint64_t a2, uint64_t *ret);
+// np96：第 4 个参数（x3）也转发——VSNPrintf 的 va_list 指针在 x3，丢掉它 = 格式化必崩。
+int dm_sdk_call(const char *sym, uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3,
+                uint64_t *ret);
 
 #ifdef __cplusplus
 }

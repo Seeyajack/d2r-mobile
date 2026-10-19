@@ -60,6 +60,41 @@ static int oe_ok(uint64_t a0) { (void)a0; return 0; }       // Initialize / Set*
 
 #define DM_TICK_HZ 19200000ull    // 19.2 MHz
 
+// ═══ nn::util：VSNPrintf（2026-10-19 np95 补）═══
+// **这是"假消息串"的根因**：游戏第一步就调它格式化日志/字符串，而它此前是"一律返 0"的桩
+//   ⇒ 缓冲区一个字都没写 ⇒ 游戏手里所有字符串都是垃圾（解析的键、日志消息全是野指针）。
+// ABI：VSNPrintf(char *buf, size_t size, const char *fmt, va_list ap) —— ap 是指针，
+//   与宿主 vsnprintf 的 va_list 同为 AAPCS 布局，可直接转发。
+#include <stdarg.h>
+#include <stdio.h>
+static int g_n_vsn;
+static uint64_t util_vsnprintf(uint64_t buf, uint64_t size, uint64_t fmt, uint64_t ap) {
+    if (!buf || !fmt || !ap) return 0;
+    if (ap == 0x5f000000000000ull || (ap >> 48) == 0x5f) {
+        // np96：分派器此前只转发 3 个参数，x3（va_list 指针）被丢 ⇒ 这里读到的是垃圾
+        //   （实测 va=0x5f000000000000）。现在分派器已转发 x3，这个分支仅作防御。
+        SDKLOG("[util] VSNPrintf 收到可疑 va=%#llx，跳过\n", (unsigned long long)ap);
+        return 0;
+    }
+    if (++g_n_vsn <= 6) {
+        char fb[40]; size_t i = 0;
+        const char *f = (const char *)(uintptr_t)fmt;
+        if (fmt > 0x10000ull && fmt < 0x800000000000ull)
+            for (; i < sizeof fb - 1 && f[i]; i++) fb[i] = f[i];
+        fb[i] = 0;
+        SDKLOG("[util] VSNPrintf#%d fmt=\"%s\" va=%#llx\n", g_n_vsn, fb,
+               (unsigned long long)ap);
+    }
+    // np97：分派器已正确转发 x3（va_list 指针在客体堆，np96 实测 va=0x5b98… 合法），
+    //   可以真格式化了。之前"假消息串"（解析键/日志消息全是垃圾）的根因正是这里。
+    va_list apc;
+    __builtin_va_copy(apc, *(va_list *)(uintptr_t)ap);
+    int n = vsnprintf((char *)(uintptr_t)buf, (size_t)size,
+                      (const char *)(uintptr_t)fmt, apc);
+    __builtin_va_end(apc);
+    return (uint64_t)(n > 0 ? n : 0);
+}
+
 static uint64_t os_convert_timespan(uint64_t tick) {
     // nn::os::ConvertToTimeSpan(Tick) -> TimeSpan（{int64 ns}，按值返回 ⇒ x0）
     return (uint64_t)tick * 625u / 12u;
@@ -91,10 +126,10 @@ static uint64_t os_sleep(uint64_t ns) {
 // 需要更多入参的（如 CreateLayer 的第二参）已在调用点取出；返回 64 位的接口另开分支。
 typedef struct {
     const char *sym;
-    int (*fn)(uint64_t, uint64_t, uint64_t);
+    int (*fn)(uint64_t, uint64_t, uint64_t, uint64_t);
 } dm_sdk_ent;
 
-#define E(name, f) { name, (int (*)(uint64_t, uint64_t, uint64_t))(f) }
+#define E(name, f) { name, (int (*)(uint64_t, uint64_t, uint64_t, uint64_t))(f) }
 
 static const dm_sdk_ent g_tab[] = {
     // ---- nn::vi ----
@@ -114,16 +149,19 @@ static const dm_sdk_ent g_tab[] = {
     E("_ZN2nn2oe42SetOperationModeChangedNotificationEnabledEb", oe_ok),
     E("_ZN2nn2oe44SetPerformanceModeChangedNotificationEnabledEb", oe_ok),
     E("_ZN2nn2oe17FinishStartupLogoEv", oe_ok),
+    // ---- nn::util ----
+    E("_ZN2nn4util9VSNPrintfEPcmPKcSt9__va_list", util_vsnprintf),
     // ---- nn::os：时基与睡眠 ----
     E("_ZN2nn2os17ConvertToTimeSpanENS0_4TickE", os_convert_timespan),
     E("_ZN2nn2os11SleepThreadENS_8TimeSpanE", os_sleep),
 };
 
-int dm_sdk_call(const char *sym, uint64_t a0, uint64_t a1, uint64_t a2, uint64_t *ret) {
+int dm_sdk_call(const char *sym, uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3,
+                uint64_t *ret) {
     if (!sym) return 0;
     for (size_t i = 0; i < sizeof g_tab / sizeof g_tab[0]; i++)
         if (!strcmp(g_tab[i].sym, sym)) {
-            int r = g_tab[i].fn(a0, a1, a2);
+            int r = g_tab[i].fn(a0, a1, a2, a3);
             if (ret) *ret = (uint64_t)(uint32_t)r;   // Result / 枚举都是 32 位
             return 1;
         }
