@@ -1049,6 +1049,11 @@ static void nvn_host_thread_probe_start(void) {
     else klog("[NVN] 宿主线程起不来（不影响主线）\n");
 }
 
+static int g_inner_caught;      // np110：内层指针是否被写过
+static size_t g_inner_ctor;
+static uint64_t g_inner_ctorentry;
+static uint64_t g_inner_val;
+static uint64_t g_inner_init;
 static int g_gate_caught;        // np107：门字节是否已变非零（抓住写入者用）
 static size_t g_gate_ctor;       // np107：写入者的构造器序号
 static uint64_t g_gate_ctorentry;
@@ -2996,6 +3001,7 @@ static void k_run_module_init(const module_t *m) {
     // 逐个武装 + 逐个编号：崩了记现场并**跳过继续跑**（先看整体能走多远，再逐个收拾）。
     // 真机实证：#184 崩在 `ldr x9,[x10]`（x10=0 ⇒ si_addr=0）；注意报告的 pc 常比真正访存的
     // 指令多 4，判读时 pc 与 pc-4 都要看。
+    g_inner_init = *(const uint64_t *)(uintptr_t)((uint8_t *)b + 0x22fc760);
     for (size_t i = 0; i < n; i++) {
         if (!arr[i]) continue;
         if (k_skip_ctor(i)) { klog("[静态初始化] #%zu 跳过（已知会崩）\n", i); continue; }
@@ -3007,6 +3013,18 @@ static void k_run_module_init(const module_t *m) {
             arr[i](0, NULL, NULL);
             g_gate_armed = 0;
             ran++;
+            // np110：盯**内层指针** [(0x22fc760)]——真门对象 = [[0x2276168]]，
+            //   而 [0x2276168] 恒指向 +0x22fc760 的描述符表、其首字恒 0 ⇒ 该由某个
+            //   构造器写这个双字。逐个检查，抓住"它本该被写"的那个构造器。
+            if (!g_inner_caught) {
+                uint64_t iv = *(const uint64_t *)(uintptr_t)((uint8_t *)b + 0x22fc760);
+                if (iv) {
+                    g_inner_caught = 1;
+                    g_inner_ctor = i;
+                    g_inner_ctorentry = (uint64_t)(uintptr_t)arr[i];
+                    g_inner_val = iv;
+                }
+            }
             // np107：**逐个查宅基地**——门字节 [*(0x2276168)+0x419] 一旦变非零，
             //   刚才那个构造器就是写入者。只记录不打印（np58 教训），循环后统一输出。
             if (!g_gate_caught) {
@@ -3064,6 +3082,18 @@ static void k_run_module_init(const module_t *m) {
         }
     } else {
         klog("[启动包门] 构造器跑完时门仍为 0 ⇒ 4 是启动链/nnMain 阶段写的\n");
+    }
+    // np110：内层指针（+0x22fc760 的双字）
+    if (g_inner_caught) {
+        uint64_t b3 = (uint64_t)(uintptr_t)b;
+        uint64_t e = g_inner_ctorentry;
+        int in = e >= b3 && e < b3 + DM_IMG_MAIN_END;
+        klog("[内层指针] 被构造器 #%zu（入口 %s%#llx）写成 %#llx\n", g_inner_ctor,
+             in ? "+" : "(外)", (unsigned long long)(in ? e - b3 : e),
+             (unsigned long long)g_inner_val);
+    } else {
+        klog("[内层指针] 构造器期始终未被写（初值 %#llx）⇒ 写在启动链/nnMain 阶段，或根本没有写\n",
+             (unsigned long long)g_inner_init);
     }
     klog("[槽体检] 静态初始化后：0x2280eb8=%#llx（装载后应=%#llx）\n",
          (unsigned long long)*(const uint64_t *)(b + 0x2280eb8),
