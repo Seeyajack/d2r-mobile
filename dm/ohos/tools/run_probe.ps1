@@ -113,8 +113,8 @@ if ($crash -gt 0) {
     $log | Select-String -Pattern "\[指令\] pc=" | ForEach-Object { Write-Host "        $($_.Line.Trim())" }
 }
 
-# 关键标记：可按本轮关心的事改这一行
-$marks = "Volante\] 初始化|Volante\] 显示对象|Volante\] 帧循环|NVN表\]|任务链\]|RootTask\] ★|游戏日志|TRACE\]"
+# 关键标记：可按本轮关心的事改这一行（np143：单例 A/B 创建时机观测）
+$marks = "mgr-契约|工厂 0x1f8|管理器\] 虚方法|启动包门|AB观测|0x1f8 崩|nnMain|Volante\] 帧循环|TRACE\]"
 ($log | Select-String -Pattern $marks | Select-Object -First 12) | ForEach-Object {
     Write-Host "  · $($_.Line.Trim())"
 }
