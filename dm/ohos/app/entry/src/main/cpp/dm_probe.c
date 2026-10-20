@@ -1645,6 +1645,8 @@ static uint64_t g_tls_shadow[0x40];             // 0x200 字节，覆盖到 [+0x
 //    这里用 pthread 真建线程：ThreadType* ↔ 线程槽 映射表，StartThread 用蹦床调 entry(arg)。
 //    ⚠ 副作用：真线程后，互斥量必须是真的、TLS 必须按线程分开、日志必须串行化。
 #define DM_THREAD_MAX 16
+// np180：线程体返回记账要用（定义在后面）
+static void note_append(const char *name, const char *line);
 typedef struct {
     uint64_t game;              // 游戏侧 ThreadType*（0 = 空槽）
     pthread_t tid;              // 宿主线程
@@ -1713,7 +1715,18 @@ static void *thr_trampoline(void *p) {
         // np135：K18/KTLR 换真影子（TSD 影子块 / TLR 影子区 + NN 线程对象 + 唯一名牌）
         k_sdk_tls_shadow_install();
     }
-    t->entry(t->arg);           // 游戏的线程体
+    t->entry(t->arg);                         // 游戏的线程体（void 返回）
+    uint64_t rv = 0;
+    // ⭐ np180：**线程体返回**要记账。死锁形态可能是"主线程等某个线程/任务完成，而那个线程体
+    //   一启动就返回了"（例如它拿到 0 参数直接 exit）。原先没有任何地方记这件事。
+    {
+        char line[160];
+        snprintf(line, sizeof line, "threxit name=%s entry=img+%#llx arg=%#llx rv=%#llx\n",
+                 t->name[0] ? t->name : "?",
+                 (unsigned long long)((uintptr_t)t->entry - (uintptr_t)g_k_m.base),
+                 (unsigned long long)(uintptr_t)t->arg, (unsigned long long)rv);
+        note_append("dm_gate.txt", line);
+    }
     return NULL;
 }
 
@@ -1789,6 +1802,13 @@ typedef struct {
     pthread_mutex_t mu;
     pthread_cond_t cv_notempty;    // 收方等"有消息"
     pthread_cond_t cv_notfull;     // 发方等"有空位"
+    // ⭐ np180：**配对记录**（谁在等 / 谁发过），用来抓"本该发出却失踪的 Send"。
+    //   死的形态：主等工人完成、工人等消息、消息没人发 ⇒ 必须把"谁等哪个队列"与
+    //   "谁给哪个队列发过"并排看，才能判断是"没发"还是"发到别的队列"。
+    uint32_t wait_n, send_n;       // 等待次数 / 发送次数
+    uint32_t wait_tid, send_tid;   // 最后等待者 / 最后发送者
+    uint64_t wait_lr, send_lr;     // 对应客体调用点（映像内偏移或外部地址）
+    uint64_t send_val;             // 最后发送的值
 } dm_mq_t;
 static void *g_mq_key[DM_MQ_MAX];
 static dm_mq_t g_mq[DM_MQ_MAX];
@@ -1811,6 +1831,36 @@ static dm_mq_t *mq_get(void *q) {
     }
     pthread_mutex_unlock(&g_mq_reg);
     return NULL;
+}
+
+// ⭐ np180：队列配对记录落盘（绕过日志预算）。判读三句话：
+//   · 某队列 wait_n 很大而 send_n = 0 ⇒ **没人发**（就是"在等消息、消息不会来"）；
+//   · send_n > 0 但 wait 的队列不是它  ⇒ **发到别的队列去了**（绑定/偏移错）；
+//   · 两边都有但值不匹配 ⇒ 语义错（发的是控制字，收方当任务指针）。
+static void mq_pair_dump(const char *tag) {
+    if (!g_files_dir[0]) return;
+    char p[600], buf[1200];
+    snprintf(p, sizeof p, "%s/dm_gate.txt", g_files_dir);
+    int fd = open(p, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fd < 0) return;
+    uint64_t b = (uint64_t)(uintptr_t)g_k_m.base;
+    int len = snprintf(buf, sizeof buf, "mq[%s]\n", tag);
+    for (int i = 0; i < DM_MQ_MAX; i++) {
+        if (!g_mq_key[i]) continue;
+        if (len > (int)sizeof buf - 260) break;
+        len += snprintf(buf + len, sizeof buf - (size_t)len,
+                        "  #%d key=%#llx cap=%zu n=%zu wait=%u(tid=%#x lr=%#llx) send=%u(tid=%#x lr=%#llx val=%#llx)\n",
+                        i, (unsigned long long)(uintptr_t)g_mq_key[i], g_mq[i].cap, g_mq[i].n,
+                        g_mq[i].wait_n, g_mq[i].wait_tid,
+                        (unsigned long long)(g_mq[i].wait_lr >= b && g_mq[i].wait_lr < b + DM_IMG_MAIN_END
+                                             ? g_mq[i].wait_lr - b : g_mq[i].wait_lr),
+                        g_mq[i].send_n, g_mq[i].send_tid,
+                        (unsigned long long)(g_mq[i].send_lr >= b && g_mq[i].send_lr < b + DM_IMG_MAIN_END
+                                             ? g_mq[i].send_lr - b : g_mq[i].send_lr),
+                        (unsigned long long)g_mq[i].send_val);
+    }
+    (void)!write(fd, buf, (size_t)len);
+    close(fd);
 }
 
 // 前置声明：TLS 的每线程影子要把 [+0xb0] 填成注入的分配器对象（定义在后面，C 的试探性定义合法）
@@ -2098,6 +2148,26 @@ static uint64_t plt_stub(void) {
                 q->head = q->tail = q->n = 0;
                 klog("[队列] 初始化：%#llx buf=%#llx 容量=%llu\n",
                      (unsigned long long)a0, (unsigned long long)a1, (unsigned long long)a2);
+                // ⭐ np181：**客体队列对象布局 dump**。假设：主线程等待环读的是"客体队列对象"
+                //   里的字段（如 [queue+0x128]），而我们把队列状态只存在自己的 dm_mq_t 里、
+                //   从没回写客体对象 ⇒ 客体检视者永远看到"空队列"。dump 出布局以便定位该字段
+                //   （已知量：buf=a1、cap=a2 一定在对象里，靠它们当锚点）。
+                {
+                    static int nq;
+                    if (++nq <= 4 && a0 > 0x10000ull) {
+                        char d[520];
+                        for (int r = 0; r < 3; r++) {
+                            int len = snprintf(d, sizeof d, "qobj#%d[%02x]:", nq, r * 0x40);
+                            for (int k = 0; k < 8; k++) {
+                                uint64_t v = ((const uint64_t *)(uintptr_t)a0)[r * 8 + k];
+                                len += snprintf(d + len, sizeof d - (size_t)len, " %#llx",
+                                                (unsigned long long)v);
+                            }
+                            snprintf(d + len, sizeof d - (size_t)len, "\n");
+                            note_append("dm_gate.txt", d);
+                        }
+                    }
+                }
             }
             return 0;
         }
@@ -2106,6 +2176,13 @@ static uint64_t plt_stub(void) {
             if (!q || !q->cap) return 0;               // 未初始化：别悬住（宁可空转）
             pthread_mutex_lock(&q->mu);
             if (q->n == 0) {
+                // np180：记"谁在等哪个队列"（配对记录，用来找失踪的 Send）
+                {
+                    uint64_t lr; __asm__ volatile("mov %0, x30" : "=r"(lr));
+                    q->wait_n++;
+                    q->wait_tid = (uint32_t)(uintptr_t)pthread_self();
+                    q->wait_lr = lr;
+                }
                 static int nw;
                 if (++nw <= 20) {
                     // np82：谁在等？x30 = 调用者返回地址（plt_stub 里可读）
@@ -2195,6 +2272,8 @@ static uint64_t plt_stub(void) {
             q->n++;
             pthread_cond_signal(&q->cv_notempty);
             pthread_mutex_unlock(&q->mu);
+            q->send_n++; q->send_tid = (uint32_t)(uintptr_t)pthread_self();
+            q->send_lr = lr0; q->send_val = a1;
             {   // np77：找"谁该给空队列发消息"——发送方打点（与被阻塞的 Receive 对应）
                 static int ns;
                 if (++ns <= 24) {
@@ -2221,6 +2300,8 @@ static uint64_t plt_stub(void) {
             q->n++;
             pthread_cond_signal(&q->cv_notempty);
             pthread_mutex_unlock(&q->mu);
+            q->send_n++; q->send_tid = (uint32_t)(uintptr_t)pthread_self();
+            q->send_lr = lr0; q->send_val = a1;
             {   // np77：同上，阻塞型发送方打点
                 static int ns; if (++ns <= 24)
                     klog("[队列] Send(%#llx) 值=%#llx 送入后 n=%zu\n",
@@ -2308,6 +2389,8 @@ static uint64_t plt_stub(void) {
             if (tick == 20 || tick % 200 == 0) k_gate_obs_dump("帧线程");
             // np177：per-thread 门命中（写 dm_gate.txt，绕过预算）。判"主线程在 sdk 里自旋"还是"纯 guest 自旋"。
             if (tick == 20 || tick % 1000 == 0) gate_thr_dump("帧线程");
+            // np180：队列配对记录（谁在等 / 谁发过）
+            if (tick == 20 || tick % 1000 == 0) mq_pair_dump("帧线程");
             // np178：主线程 PC 直方图（判"这在 guest 里哪一段打转"）——先投一枪再 dump
             if (tick % 5 == 0) smp_kick();
             if (tick == 20 || tick % 100 == 0) smp_dump("帧线程");
@@ -3518,10 +3601,10 @@ static uint64_t hook_bufcopy(uint64_t *f) {
 //   `[this+0x50]` 永远为 0 ⇒ 无限等。这里把 this 的身份与关键字段记下来（只记前 3 次）。
 static int g_wait50_n;
 static uint64_t hook_wait50(uint64_t *f) {   // 0x9febac：等待环判据点
-    (void)f;
-    if (++g_wait50_n <= 3) {
+    uint64_t self = f[FR_X19];
+    int n = ++g_wait50_n;
+    if (n <= 3) {
         char line[320];
-        uint64_t self = f[FR_X19];
         uint64_t sub = 0, sub128 = 0, f50 = 0, vt = 0;
         if (self > 0x10000ull) {
             vt = *(const uint64_t *)(uintptr_t)self;
@@ -3531,10 +3614,39 @@ static uint64_t hook_wait50(uint64_t *f) {   // 0x9febac：等待环判据点
         }
         snprintf(line, sizeof line,
                  "wait50#%d this=%#llx vt=%#llx [0x38]=%#llx [0x38+0x128]=%#llx [0x50]=%#x\n",
-                 g_wait50_n, (unsigned long long)self, (unsigned long long)vt,
+                 n, (unsigned long long)self, (unsigned long long)vt,
                  (unsigned long long)sub, (unsigned long long)sub128, (unsigned)f50);
         note_append("dm_gate.txt", line);
+        // np180：整对象 dump（只在第 1 次），用来判"这个等待者是什么东西"——
+        //   前几槽通常是 vtable/自指，中段常含名字指针或状态字。
+        if (n == 1 && self > 0x10000ull) {
+            char d[400];
+            for (int r = 0; r < 4; r++) {
+                int len = snprintf(d, sizeof d, "  obj[%02x]:", r * 0x20);
+                for (int k = 0; k < 4; k++)
+                    len += snprintf(d + len, sizeof d - (size_t)len, " %#llx",
+                                    (unsigned long long)((const uint64_t *)(uintptr_t)self)[r * 4 + k]);
+                snprintf(d + len, sizeof d - (size_t)len, "\n");
+                note_append("dm_gate.txt", d);
+            }
+        }
     }
+    // ⭐ np181：**强制放行实验已做，结论为负**——真机把 `[this+0x50]` 写成 1 后，
+    //   游戏**没有**继续推进（建/查仍止于 #34、0xdb9960 未命中、[fs] open 仍 0）。
+    //   ⇒ 这个标志不是（唯一）阻塞点，或每轮被对象重建清掉。
+    //   代码保留但**默认关闭**（`NP181_FORCE50=0`），避免把实验手段混进基线。
+#define NP181_FORCE50 0
+#if NP181_FORCE50
+    if (n == 400 && self > 0x10000ull) {
+        char l2[128];
+        *(uint32_t *)(uintptr_t)(self + 0x50) = 1;
+        snprintf(l2, sizeof l2, "force50 this=%#llx 置 [0x50]=1（第 %d 次）\n",
+                 (unsigned long long)self, n);
+        note_append("dm_gate.txt", l2);
+    }
+#else
+    (void)n; (void)self;
+#endif
     return 0;
 }
 
