@@ -1673,6 +1673,8 @@ static uint64_t g_alloc_obj[2];
 static uint64_t *g_fake_heap;       // np103b 前置声明（定义在后）
 // np125：全量调用时间线（环缓冲，见后面 ktrace_rec 的注释）。前置声明——plt_stub 比它早。
 static void ktrace_plt(int idx, uint64_t a0, uint64_t a1);
+// np175：绕过日志预算的专用写（定义在后面；plt_stub 要用它记"建-信号循环"的调用点）
+static void note_append(const char *name, const char *line);
 
 static uint64_t plt_stub(void) {
     uint64_t x16v, a0, a1, a2, a3;
@@ -1681,12 +1683,51 @@ static uint64_t plt_stub(void) {
     __asm__ volatile("mov %0, x1" : "=r"(a1));
     __asm__ volatile("mov %0, x2" : "=r"(a2));
     __asm__ volatile("mov %0, x3" : "=r"(a3));   // np96：第 4 参（VSNPrintf 的 va_list 在这里）
+    // np175：**必须在第一次 strcmp 之前**取 x30（= 客体调用点返回地址）；任何调用都会把它冲掉。
+    uint64_t lr0; __asm__ volatile("mov %0, x30" : "=r"(lr0));
     const char *nm = NULL;
     int nidx = -1;
     for (int i = 0; i < g_nplt; i++) if (g_plt[i].slot == x16v) { nm = g_plt[i].name; nidx = i; break; }
     g_plt_calls++;
-    ktrace_plt(nidx, a0, a1);   // np125：先记账（无日志开销），分析在离线做
+    // np175：同上——空闲环的这两个导入（参数全 0）不记账，免得把环冲掉
+    if (!(a0 == 0 && a1 == 0 && nm &&
+          (!strcmp(nm, "_ZN2nn2os17ConvertToTimeSpanENS0_4TickE") ||
+           !strcmp(nm, "_ZN2nn2os11SleepThreadENS_8TimeSpanE"))))
+        ktrace_plt(nidx, a0, a1);   // np125：先记账（无日志开销），分析在离线做
     if (nm) {
+        // ⭐ np175：定位"建-信号无界循环"的调用点。真机轨迹（过滤空转后）显示主线程末段
+        //   只剩 `InitializeLightEvent → SignalLightEvent`，事件对象逐次落在**栈上新地址**
+        //   （0x5fe21fbb88 → … → 0x5fe21fd6a0），注册表一路涨到 16384+ ⇒ 某个条件永远不满足。
+        //   这里记下客体调用点（lr = `bl PLT` 的下一句），离线反汇编即知循环在哪个函数。
+        //   写 dm_gate.txt 绕过日志预算，只记前 12 次。
+        if (!strcmp(nm, "_ZN2nn2os20InitializeLightEventEPNS0_14LightEventTypeEbNS0_14EventClearModeE")) {
+            static int n;
+            if (n < 12) {
+                char line[96];
+                uint64_t b = (uint64_t)(uintptr_t)g_k_m.base;
+                snprintf(line, sizeof line, "lightev#%d lr=img+%#llx ev=%#llx\n", ++n,
+                         (unsigned long long)(lr0 - b), (unsigned long long)a0);
+                note_append("dm_gate.txt", line);
+            }
+        }
+        // ⭐ np176：`WaitSystemEvent` **没有映射**（落到通用存根=立刻返回 ⇒ 游戏只能自旋）。
+        //   主库只导入了 Wait/TryWait/TimedWait/DestroySystemEvent，**没有** Initialize/Signal
+        //   ⇒ 这些对象是 **sdk 模块自己造的**（sdk 的 nn::os 自解析），我们看不到它的信号。
+        //   本轮先**只观察不改行为**：把对象前 0x40 字节 dump 出来，用于判定布局与当前是否已置位。
+        if (!strcmp(nm, "_ZN2nn2os15WaitSystemEventEPNS0_15SystemEventTypeE")) {
+            static int n;
+            if (n < 2 && a0 >= 0x1000) {
+                char line[400];
+                const uint64_t *o = (const uint64_t *)(uintptr_t)a0;
+                int len = snprintf(line, sizeof line, "sysev#%d obj=%#llx", ++n,
+                                   (unsigned long long)a0);
+                for (int i = 0; i < 8; i++)
+                    len += snprintf(line + len, sizeof line - (size_t)len, " [%02x]=%#llx", i * 8,
+                                    (unsigned long long)o[i]);
+                snprintf(line + len, sizeof line - (size_t)len, "\n");
+                note_append("dm_gate.txt", line);
+            }
+        }
         // nn::os::AllocateMemoryBlock(size_t* out_size, size_t size) —— 真给内存
         if (!strcmp(nm, "_ZN2nn2os19AllocateMemoryBlockEPmm")) {
             // 必须清零（calloc）：游戏会把这块内存当自己的内存池，池管理器的空闲链头若读到
@@ -2389,6 +2430,16 @@ static unsigned g_tr_lost;
 static void ktrace_maybe_snapshot(void); // 前置：水位落盘（定义在下面，ktrace_rec 先用到）
 
 static uint64_t ktrace_rec(uint64_t *f) {
+    // ⭐ np175（2026-10-21）：**空闲环过滤**。真机实证（np173/np174）：环 65536 格被单个空转线程
+    //   占满（65526/65536），它循环的四条全是"参数为 0 的空闲调用"：
+    //     `+0xa01d70` → `+0xa01fe0` → `ConvertToTimeSpan(0)` → `SleepThread(0)`
+    //   ⇒ 主线程停车前的真实调用被**整体冲掉**，轨迹只能看到空转。
+    //   过滤条件刻意收窄：**站点匹配 且 x0==0** 才丢，真业务调用（参数非 0）照记。
+    {
+        uint64_t site = f[FR_SITE] - (uint64_t)(uintptr_t)g_k_m.base;
+        // np175b：实测这两条即使 a0≠0 也是空闲环（a0 = 任务堆管理器），直接按站点过滤。
+        if (site == 0xa01d70ull || site == 0xa01fe0ull) return 0;
+    }
     unsigned i = __atomic_fetch_add(&g_tr_n, 1u, __ATOMIC_RELAXED);
     if (i < KTRACE_N && g_tr) {
         uint64_t base = (uint64_t)(uintptr_t)g_k_m.base;
@@ -3284,6 +3335,50 @@ static uint64_t hook_bufcopy(uint64_t *f) {
                 if (fd >= 0 && n > 0) { (void)!write(fd, line, (size_t)n); close(fd); }
             }
         }
+    }
+    return 0;
+}
+
+// ⭐ np175：**"建-信号无界循环"溯源**。真机证据链（np173–np175）：
+//   ① 过滤空转后，主线程末段只剩 `InitializeLightEvent → SignalLightEvent`；
+//   ② 12 次初始化**全部**来自同一返回地址 `img+0x10795c8`，事件对象按 0x2F0 递增；
+//   ③ 0x10795c8 是构造器 `0x1079574` 里 `bl 0xf3bfd4`（InitializeLightEvent 的本地 thunk）的下一句。
+//   ⇒ 每轮都在构造一个新对象（内含 LightEvent @ +0x58）。抓**构造器的调用者**：
+//     · LR 恒定 ⇒ 某函数在循环里反复构造（再看它上层的退出条件）；
+//     · LR 各不相同 ⇒ 是**无限递归**（每层构造一个子对象）。
+static int g_ltor_n;
+static uint64_t hook_ctor2f0(uint64_t *f) {   // 0x1079574：内含 LightEvent 的对象构造器
+    (void)f;
+    // np175：前 3 次留完整帧链；之后每 64 次留一条，用来判定"重建池"是**慢**还是**无界**。
+    ++g_ltor_n;
+    if (g_ltor_n <= 3 || (g_ltor_n % 64) == 0) {
+        char line[512];
+        uint64_t b = (uint64_t)(uintptr_t)g_k_m.base;
+        // **一次走完栈回溯**（np175b）：构造器是一层层派生下来的，逐轮挂一个钩子太慢；
+        //   这里顺着帧指针链把 8 层返回地址全带回来，离线一把反汇编即可定位工厂/循环。
+        //   帧链安全闸：fp 16 字节对齐、严格递增、lr 落在映像内才算有效帧。
+        int n = 0;
+        int len = snprintf(line, sizeof line, "ctor#%d site=img+%#llx lr=img+%#llx x0=%#llx\n",
+                           g_ltor_n, (unsigned long long)(f[FR_SITE] - b),
+                           (unsigned long long)(f[FR_X30] - b), (unsigned long long)f[FR_X0]);
+        // 池初始化函数的帧链可能不规整：放宽为"只要求在映像内"，并带原始 fp 便于诊断
+        uint64_t fp = f[FR_X29];
+        for (int i = 0; i < 10 && fp >= 0x1000 && (fp & 7) == 0; i++) {
+            uint64_t prev = *(uint64_t *)(uintptr_t)fp;
+            uint64_t ret  = *(uint64_t *)(uintptr_t)(fp + 8);
+            len += snprintf(line + len, sizeof line - (size_t)len, "  ↑#%d fp=%#llx ret=",
+                            i + 1, (unsigned long long)fp);
+            if (ret >= b && ret < b + DM_IMG_MAIN_END)
+                len += snprintf(line + len, sizeof line - (size_t)len, "img+%#llx\n",
+                                (unsigned long long)(ret - b));
+            else
+                len += snprintf(line + len, sizeof line - (size_t)len, "(外)%#llx\n",
+                                (unsigned long long)ret);
+            if (len >= (int)sizeof line - 80) break;
+            if (prev == fp || prev < fp) break;
+            fp = prev;
+        }
+        note_append("dm_gate.txt", line);
     }
     return 0;
 }
@@ -4674,6 +4769,10 @@ static void exp_k(const char *files_dir, char *out, size_t cap, size_t *used) {
         k_install_hook(img, 0xdb9960, (void *)hook_orch, "装载编排入口 0xdb9960");
         k_install_hook(img, 0xdb9a54, (void *)hook_ldcall, "装载器调用点 0xdb9a54");
         k_install_hook(img, 0x7277ec, (void *)hook_rt_ctor, "RootTask 构造 0x7277ec");
+        // np175："建-信号无界循环"溯源——内含 LightEvent 的对象构造器
+        // ⚠ 不挂 0x103e434 首指令：那是 pre-index 改 SP 的 `str x21,[sp,#-0x30]!`；
+        //   改挂序言之后的 0x103e448（`ldr x19,[x19,#0xac0]`，非 PC 相对，SP 已调好）。
+        k_install_hook(img, 0x103e448, (void *)hook_ctor2f0, "对象池初始化 0x103e448");
         // np113：查"建出来就被销毁"（见 hook_list_ins/hook_task_exit 的注释）
         //   ⚠ 0xa01fe0 已由 hook_e11 挂着（同一站点不能挂两次），那边加了调用计数与 [+0xe0] 表。
         k_install_hook(img, 0xa01aec, (void *)hook_list_ins, "任务链 链表插入 0xa01aec");

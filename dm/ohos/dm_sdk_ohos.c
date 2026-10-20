@@ -223,9 +223,22 @@ static uint64_t os_timedwait_light(uint64_t a0, uint64_t ns) {   // TimeSpan 按
     return (uint64_t)hit;
 }
 
+// ⭐ np176：SystemEvent 家族（宿主语义 = "恒已置位、不阻塞"）——见映射表处注释。
+static uint64_t os_sysevent_wait(uint64_t a0, uint64_t a1) {
+    (void)a1;
+    static int n;
+    if (++n <= 4) SDKLOG("[os] WaitSystemEvent(%#llx) → 宿主恒已置位，立即返回\n",
+                         (unsigned long long)a0);
+    return 0;
+}
+static uint64_t os_sysevent_ok(uint64_t a0, uint64_t a1) {
+    (void)a0; (void)a1;
+    return 1;                        // bool：已置位
+}
+static uint64_t os_sysevent_void(uint64_t a0, uint64_t a1) { (void)a0; (void)a1; return 0; }
+
 // 信号量
-static uint64_t os_init_sem(uint64_t a0, uint64_t init, uint64_t maxv) {
-    dm_ev_node *e = ev_get((void *)(uintptr_t)a0, 1);
+static uint64_t os_init_sem(uint64_t a0, uint64_t init, uint64_t maxv) {    dm_ev_node *e = ev_get((void *)(uintptr_t)a0, 1);
     (void)maxv;
     if (e != &g_ev_dummy) {
         // np138：与 os_init_event 同样补锁（计数初值也是并发可见状态）
@@ -758,6 +771,15 @@ static const dm_sdk_ent g_tab[] = {
     E("_ZN2nn2os16ReleaseSemaphoreEPNS0_13SemaphoreTypeE", os_release_sem),
     E("_ZN2nn2os16ReleaseSemaphoreEPNS0_13SemaphoreTypeEi", os_release_sem),
     E("_ZN2nn2os17FinalizeSemaphoreEPNS0_13SemaphoreTypeE", os_finalize_sem),
+    // ⭐ np176：**SystemEvent 家族按"恒已置位/不阻塞"语义**（宿主没有系统级事件源）。
+    //   依据：主库只导入 Wait/TryWait/TimedWait/DestroySystemEvent，**没有** Initialize/Signal
+    //   ⇒ 这些对象是 sdk 模块自己造的，我们看不到它的信号；真机 dump 显示对象 0x40 字节全 0
+    //   （未置位），而唯一调用点会对同一对象连等两次 ⇒ 回"没信号"只会让上层反复重试/自旋。
+    //   宿主侧能自洽提供的语义只有"不阻塞"：Wait 立即返回（原本如此），Try/TimedWait 回"已置位"。
+    E("_ZN2nn2os15WaitSystemEventEPNS0_15SystemEventTypeE", os_sysevent_wait),
+    E("_ZN2nn2os18TryWaitSystemEventEPNS0_15SystemEventTypeE", os_sysevent_ok),
+    E("_ZN2nn2os20TimedWaitSystemEventEPNS0_15SystemEventTypeENS_8TimeSpanE", os_sysevent_ok),
+    E("_ZN2nn2os18DestroySystemEventEPNS0_15SystemEventTypeE", os_sysevent_void),
     // ---- nn::os：时基与睡眠 ----
     E("_ZN2nn2os17ConvertToTimeSpanENS0_4TickE", os_convert_timespan),
     E("_ZN2nn2os11SleepThreadENS_8TimeSpanE", os_sleep),
