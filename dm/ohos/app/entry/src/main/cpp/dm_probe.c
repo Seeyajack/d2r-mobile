@@ -594,6 +594,8 @@ static uint8_t *g_fixup_page;                 // 安装期 calloc（不在信号
 static uintptr_t g_fixup_base;                // 模块基址（处理器里不能用 g_k_m，它在文件后面才声明）
 static pthread_t g_probe_thr;                 // np115：探针线程的 id（setjmp 上下文只属于它）
 static int g_probe_thr_set;
+static void death_note(const char *why, uint64_t pc, uint64_t addr, int sig);   // np163 定义在下方
+
 static void gate_fault_handler(int sig, siginfo_t *si, void *uc_) {
     // 字段写法与 dm/host/crash.c 的鸿蒙分支一致：mcontext_t = { regs[31], sp, pc, pstate }
     ucontext_t *uc = (ucontext_t *)uc_;
@@ -631,11 +633,13 @@ static void gate_fault_handler(int sig, siginfo_t *si, void *uc_) {
     if (g_probe_thr_set && !pthread_equal(pthread_self(), g_probe_thr)) {
         LOG("【红】客人线程出错：pc=%#llx sig=%d si_addr=%#llx —— 不跨线程 longjmp，退出判读",
             (unsigned long long)g_gate_fault_pc, sig, (unsigned long long)g_gate_fault_addr);
+        death_note("客人线程出错(_exit 140)", g_gate_fault_pc, g_gate_fault_addr, sig);
         _exit(140);
     }
     if (!g_gate_armed) {
         // 未武装段（尾跳补丁循环等）出段错误：先打日志再退出——PC 落在 hilog 里供定位
         LOG("【红】门回路：未武装段 SIGSEGV/SIGBUS pc=%#llx sig=%llx（退出码 139）", (unsigned long long)g_gate_fault_pc, (unsigned long long)sig);
+        death_note("未武装段(_exit 139)", g_gate_fault_pc, g_gate_fault_addr, sig);
         _exit(139);
     }
     g_gate_armed = 0;
@@ -934,6 +938,54 @@ static void exp_j(char *out, size_t cap, size_t *used) {
 // KGATE 槽指向记录型服务（记命中与返回点），所有日志落盘（崩溃也保得住）。
 static FILE *g_k_log;
 static char g_files_dir[512];   // np125：探针线程里也要落盘（trace），存一份目录
+
+static module_t g_k_m;   // 前向（正式定义在实验 K 段）——death_note 要用 base
+static const char *g_k_stage;   // 前向（正式定义紧随 g_files_dir）——death_note 要带阶段
+
+// ═══ np163：死亡笔记（进程即将退出时的最后一份证据）═══
+// 为什么需要：np161/np162 预算制下游戏越过旧停车点后**进程消失**（无 faultlog、无日志尾巴），
+//   连"是不是我们 _exit 的"都判不了。故障处理器退出前必须留下 PC。
+// 为什么独立实现（不用 klog）：退出时共享锁/stdio 缓冲都不可信（可能正被楔住的线程持有），
+//   唯一可靠 = 开独立 fd + **单次 write** + 立即 close（几十字节，实测这类小写从未楔过）。
+// 备份：同一行也打 hilog（logline 直调，不经 klog 的预算与锁）。
+static void death_note(const char *why, uint64_t pc, uint64_t addr, int sig) {
+    char line[4096];
+    uint64_t base = (uint64_t)(uintptr_t)g_k_m.base;
+    int n = snprintf(line, sizeof line,
+        "why=%s pc=%#llx img+%#llx si_addr=%#llx sig=%d tid=%ld stage=%s sp=%#llx\n",
+        why, (unsigned long long)pc,
+        (unsigned long long)((pc >= base && pc < base + 0x2600000) ? pc - base : 0),
+        (unsigned long long)addr, sig, (long)gettid(), g_k_stage ? g_k_stage : "?",
+        (unsigned long long)g_gate_sp);
+    // np163：把故障现场的全寄存器 + 栈一起写进笔记（单次 write，1–2KB 这类小写从未楔过）。
+    // 判读：x30 = 调用者返回地址；栈上连续值对回 main 映像偏移即还原调用链。
+    if (g_gate_have_regs && n > 0) {
+        n += snprintf(line + n, sizeof line - (size_t)n,
+            "regs: x0=%#llx x1=%#llx x2=%#llx x3=%#llx x8=%#llx x9=%#llx x19=%#llx x20=%#llx x21=%#llx x29=%#llx x30=%#llx\n",
+            (unsigned long long)g_gate_regs[0], (unsigned long long)g_gate_regs[1],
+            (unsigned long long)g_gate_regs[2], (unsigned long long)g_gate_regs[3],
+            (unsigned long long)g_gate_regs[8], (unsigned long long)g_gate_regs[9],
+            (unsigned long long)g_gate_regs[19], (unsigned long long)g_gate_regs[20],
+            (unsigned long long)g_gate_regs[21], (unsigned long long)g_gate_regs[29],
+            (unsigned long long)g_gate_regs[30]);
+        for (int i = 0; i < 64 && n > 0 && (size_t)n + 40 < sizeof line; i++) {
+            uint64_t v = 0;
+            if (g_gate_sp > 0x10000ull && g_gate_sp < 0x800000000000ull)
+                v = *(const uint64_t *)(uintptr_t)(g_gate_sp + (uint64_t)i * 8);
+            n += snprintf(line + n, sizeof line - (size_t)n, "sp+%#04x=%#llx%s\n", i * 8,
+                (unsigned long long)v,
+                (v >= base && v < base + 0x2600000) ? "(img)" : "");
+        }
+    }
+    if (n > 0) logline(line);   // hilog 备份（系统缓冲）
+    if (!g_files_dir[0]) return;
+    char p[600];
+    snprintf(p, sizeof p, "%s/dm_death.txt", g_files_dir);
+    int fd = open(p, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    if (fd < 0) return;
+    (void)!write(fd, line, (size_t)n);
+    close(fd);
+}
 // 阶段标签：实验 K 连跑三站（启动链 → 对象工厂 → nnMain），同一批插桩在三站都会响。
 // 每条日志带上"当前在哪一站"，读日志时才分得清"这次命中属于哪一站"。
 static const char *g_k_stage = "准备";
