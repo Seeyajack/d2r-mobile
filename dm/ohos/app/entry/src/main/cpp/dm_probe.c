@@ -3308,6 +3308,17 @@ static void note_append(const char *name, const char *line) {
     int fd = open(p, O_WRONLY | O_CREAT | O_APPEND, 0666);
     if (fd >= 0) { (void)!write(fd, line, strlen(line)); close(fd); }
 }
+static int g_mgr_entry_n;
+static uint64_t hook_mgr_entry(uint64_t *f) {   // 0xdb9284 入口：验证"钩子桩重放 bl"是否真把被调函数跑起来
+    if (++g_mgr_entry_n <= 6) {
+        char line[120];
+        snprintf(line, sizeof line, "mgr入口#%d x0=%#llx x30=%#llx\n",
+                 g_mgr_entry_n, (unsigned long long)f[FR_X0], (unsigned long long)f[FR_X30]);
+        klog("[编排] ★ 0xdb9284 入口 x0=%#llx\n", (unsigned long long)f[FR_X0]);
+        note_append("dm_gate.txt", line);
+    }
+    return 0;
+}
 static int g_orch_n, g_ldcall_n;
 static uint64_t hook_orch(uint64_t *f) {   // 0xdb9960：装载编排入口
     if (++g_orch_n <= 8) {
@@ -4023,6 +4034,27 @@ static void k_hook_all_branchers(uint8_t *img, uint32_t target_off, void *host_f
     }
     klog("[插桩] %s：共挂 %u 个站点（bl %u / b 尾调用 %u，上限 %d）\n", what, n, nbl, nb, cap);
 }
+// ⭐ np169：**启动信息影子对象**——内容门的宿主补口。
+// 依据（离线反汇编，0xdb9284 的提前返回）：
+//   `0xdb9334 ldr x20,[this+8]; cbnz → 继续; 0xdb933c bl 0x1074b50; 0xdb9344 cbz x20 → 返回`
+//   而 0x1074b50 = 取"启动信息对象"：
+//     `x0 = *(*(0x2289e68))`；非 0 → 虚调用 [vt+0x10] 返回；否则再看 *(0x2289e60)；
+//     两者都空 ⇒ 返回 0 ⇒ **装载编排被整段跳过**（[fs] open 恒 0 的直接原因）。
+//   这两个全局在 Switch 上由**启动器**填（外部运行时），鸿蒙上没人填 ⇒ 只能宿主补影子。
+// 修法：注入 {持有者 → 影子对象 → 影子虚表}，虚表 +0x10 返回一块清零的"启动信息"影子。
+//   语义与游戏无关（任何 Switch 程序启动时都从启动器拿启动信息）⇒ 属通用宿主能力。
+static uint64_t g_launch_info[0x40];   // 影子"启动信息"对象（清零，够游戏当结构体读）
+static uint64_t g_launch_vt[8];        // 影子虚表
+static uint64_t g_launch_obj[2];       // 影子对象 { &虚表, 0 }
+static uint64_t g_launch_holder[1];    // 持有者 { &影子对象 }（全局指向它，再解一层）
+static uint64_t launch_vt_get(void *self) {
+    (void)self;
+    static int n;
+    if (++n <= 4) klog("[启动信息] ★ 影子虚方法 +0x10 被调（第 %d 次）→ 返回影子对象 %p\n",
+                       n, (void *)g_launch_info);
+    return (uint64_t)(uintptr_t)g_launch_info;
+}
+
 static void k_inject_heap(uint8_t *img) {
     for (int i = 0; i < DM_ALLOC_VTBL_QWORDS; i++)
         g_alloc_vtbl[i] = (uint64_t)(uintptr_t)&vtbl_fallback;   // 先全铺兜底（记录调用点、返回 0）
@@ -4036,6 +4068,12 @@ static void k_inject_heap(uint8_t *img) {
     //   所以兜底路径不可靠——改由 GetTlsValue 的影子对象 [+0xb0] 顶上（见 g_tls_shadow）。
     g_alloc_holder[0] = (uint64_t)(uintptr_t)&g_alloc_obj[0];
     g_ctx_holder[0] = (uint64_t)(uintptr_t)&g_ctx_obj[0];
+    // np169：启动信息影子（内容门）——见 g_launch_info 处注释
+    g_launch_vt[0x10 / 8] = (uint64_t)(uintptr_t)&launch_vt_get;
+    g_launch_obj[0] = (uint64_t)(uintptr_t)&g_launch_vt[0];
+    g_launch_holder[0] = (uint64_t)(uintptr_t)&g_launch_obj[0];
+    *(uint64_t *)(img + 0x2289e68) = (uint64_t)(uintptr_t)&g_launch_holder[0];
+    *(uint64_t *)(img + 0x2289e60) = (uint64_t)(uintptr_t)&g_launch_holder[0];
     g_tls_shadow[0xb0 / 8] = (uint64_t)(uintptr_t)&g_alloc_obj[0];   // 影子对象 [+0xb0] = 分配器对象
     *(uint64_t *)(img + 0x226f0a0) = (uint64_t)(uintptr_t)&g_alloc_holder[0];   // 分配器持有者
     *(uint64_t *)(img + 0x22783d8) = (uint64_t)(uintptr_t)&g_ctx_holder[0];     // 线程上下文持有者
@@ -4622,6 +4660,8 @@ static void exp_k(const char *files_dir, char *out, size_t cap, size_t *used) {
         k_install_hook(img, 0xd5b694, (void *)hook_loader, "装载器入口 0xd5b694（启动包门）");
         // np166：缓冲源空 ⇒ 零页兜底（救活建任务的工人）——见 hook_bufcopy 注释
         k_install_hook(img, 0x11e8754, (void *)hook_bufcopy, "缓冲比较/拷贝 0x11e8754（源空兜底）");
+        // ⚠ 不挂 0xdb9284 首指令：它是改 SP 的 pre-index stp，钩子桩恢复路径假设 SP 不变
+        k_install_hook(img, 0xdb92a4, (void *)hook_mgr_entry, "建管理器函数内 0xdb92a4（mov x19,x0）");
         k_install_hook(img, 0xdb9960, (void *)hook_orch, "装载编排入口 0xdb9960");
         k_install_hook(img, 0xdb9a54, (void *)hook_ldcall, "装载器调用点 0xdb9a54");
         k_install_hook(img, 0x7277ec, (void *)hook_rt_ctor, "RootTask 构造 0x7277ec");
