@@ -947,21 +947,57 @@ static void klog_mu_init(void) {
     pthread_mutex_init(&g_klog_mu, &a);
     pthread_mutexattr_destroy(&a);
 }
+// ═══ np159/160/161：日志输出模式 + **预算制**（2026-10-20 深夜）═══
+// 四连实证：每次"冻结"都停在**下一次日志输出**上——文件写（1.1MB trace 全量重写卡死、
+// 单行 fflush 卡死）、hilog 打点（突发 70 行 dump 中途卡死）、两者并存时同样卡死。
+// 静默轮（np161 前一轮）反而走得最远（游戏越过旧停车点后死掉——另一个问题）。
+// ⇒ 结论：本平台在这进程的 I/O 压力下，文件写与 hilog 都会**阻塞式楔住**调用线程；
+//   客体线程一旦堵在 klog 里，游戏看起来就是"冻结"。
+// 修法 = **预算制**（沿用 ConvertToTimeSpan 的"全局截断"范式）：
+//   文件通道 ≤400KB、hilog 通道 ≤4000 行；用完各打一条"预算用尽"然后静默。
+//   诊断期（启动链/前 400KB）信息完整，之后游戏不再被我们的日志拖住。
+//   模式：0=文件+hilog（默认） 1=只 hilog 2=全静默（只计数）。
+#define DM_LOG_FILE_BUDGET (400u * 1024u)
+#define DM_LOG_HILOG_LINES 4000u
+static int g_klog_mode;
 static void klog(const char *fmt, ...) {
     if (!g_k_log) return;
+    static unsigned long n_lines;
+    static size_t n_bytes;
+    static int file_cut, hilog_cut;
+    n_lines++;
+    if (g_klog_mode == 2) return;   // 全静默：只计数不输出
+    char body[1200];
+    va_list ap; va_start(ap, fmt);
+    vsnprintf(body, sizeof body, fmt, ap);
+    va_end(ap);
     // 带线程 ID：游戏有多个线程（探针主线程 / sead 任务线程 / Havok 物理工作线程）都在打日志，
     // 没有 tid 分不清哪行是谁写的（2026-10-18 加：判读主线程卡在哪必需）。
     // 真线程后必须串行化（否则多线程 fprintf 会互相穿插）。**必须递归锁**：
     // 万一某线程在写日志时崩了、故障处理器（gate_dump_fault）又要写日志，
     // 非递归锁会把它自己锁死 ⇒ 整份日志从那一刻静默（2026-10-18 现场嫌疑之一）。
-    pthread_once(&g_klog_once, klog_mu_init);
-    pthread_mutex_lock(&g_klog_mu);
-    fprintf(g_k_log, "[阶段 %s][T%ld] ", g_k_stage, (long)gettid());
-    va_list ap; va_start(ap, fmt);
-    vfprintf(g_k_log, fmt, ap);
-    va_end(ap);
-    fflush(g_k_log);
-    pthread_mutex_unlock(&g_klog_mu);
+    if (g_klog_mode != 1 && !file_cut) {
+        pthread_once(&g_klog_once, klog_mu_init);
+        pthread_mutex_lock(&g_klog_mu);
+        size_t n = (size_t)fprintf(g_k_log, "[阶段 %s][T%ld] %s", g_k_stage, (long)gettid(), body);
+        fflush(g_k_log);
+        pthread_mutex_unlock(&g_klog_mu);
+        n_bytes += n;
+        if (n_bytes > DM_LOG_FILE_BUDGET) {
+            file_cut = 1;
+            pthread_mutex_lock(&g_klog_mu);
+            fprintf(g_k_log, "[日志] 文件通道预算用尽（%zu 字节）⇒ 后续只走 hilog\n", n_bytes);
+            fflush(g_k_log);
+            pthread_mutex_unlock(&g_klog_mu);
+        }
+    }
+    if (!hilog_cut) {
+        logline(body);
+        if (n_lines > DM_LOG_HILOG_LINES) {
+            hilog_cut = 1;
+            logline("[日志] hilog 通道预算用尽 ⇒ 后续全静默（游戏不再被日志拖住）");
+        }
+    }
 }
 
 // ═══ np151：线程快照（内核级等待点取证）═══
@@ -977,12 +1013,13 @@ int g_tick_tid;   // 帧线程 tid（首个 tick 记；快照里打 ←帧 标�
 
 void dm_probe_thread_probe(void) {
     if (!g_k_log) return;
-    // 节流：最多每 400ms 一份（工人每 250ms 醒一次；不节流多工人会重复打）
+    // 节流：最多每 100ms 一份（工人每 250ms 醒一次；np153–np158 教训：节流 400ms+
+    // 时主线程停车常发生在节流窗口内 ⇒ 抓不到；100ms 保证停车后 1 次醒来内必落一份）
     static struct timespec last;
     struct timespec now_ts;
     clock_gettime(CLOCK_MONOTONIC, &now_ts);
     if (last.tv_sec && (now_ts.tv_sec - last.tv_sec) * 1000 +
-        (now_ts.tv_nsec - last.tv_nsec) / 1000000 < 400) return;
+        (now_ts.tv_nsec - last.tv_nsec) / 1000000 < 100) return;
     last = now_ts;
     klog("[线程快照] =====\n");
     DIR *d = opendir("/proc/self/task");
@@ -1490,6 +1527,12 @@ static void *thr_trampoline(void *p) {
 static void *g_mtx_key[DM_MUTEX_MAX];
 static pthread_mutex_t g_mtx_impl[DM_MUTEX_MAX];
 static pthread_mutex_t g_mtx_reg = PTHREAD_MUTEX_INITIALIZER;   // 登记表自身的锁
+static long g_mtx_owner[DM_MUTEX_MAX];   // np160：持锁者 tid（0=无主；进/出锁登记）。
+// ★ 为什么加：np160 反汇编链坐实——主线程每次都停在 `nn::os::LockMutex`（PLT#92，
+//   GOT 0x22636f0；调用点 0xa0e140 → add x0,#0x20 → b PLT）。旧打点只在"锁等到之后"
+//   才打（ms>=5）⇒ 永久等待无声。新版 = 成对进入/离开 + 持锁者 tid：
+//   **有进入无离开 = 卡在这把锁**；owner 字段 + 该 tid 的最后一条日志 = 元凶现形
+//   （持锁不释放 / 持锁者自己又卡在别处 / 持锁线程已死）。
 static pthread_mutexattr_t g_mtx_attr;
 static pthread_once_t g_mtx_once = PTHREAD_ONCE_INIT;
 static void mtx_attr_init(void) {
@@ -1515,6 +1558,18 @@ static pthread_mutex_t *mtx_get(void *m) {
     return &g_mtx_impl[0];      // 表满：退化（不该发生）
 }
 
+// np160：取互斥量在表中的下标（owner 登记用）。benign race： worst case 返回 -1 不登记。
+static int mtx_idx(void *m) {
+    for (int i = 0; i < DM_MUTEX_MAX; i++) if (g_mtx_key[i] == m) return i;
+    return -1;
+}
+// 成对决策油门：前 100 次全记，之后每 50 次记一次（进/出用同一次决策 ⇒ 配对不破）
+static int g_n_mtxlog;
+static int mtx_log_ok(void) {
+    int n = ++g_n_mtxlog;
+    return n <= 100 || (n % 50) == 0;
+}
+
 // ── 消息队列（2026-10-18）──
 // Prepare Thread 用 ReceiveMessageQueue 收命令。之前存根秒返 0 但不写消息 ⇒ 游戏可能读到
 // 未初始化消息，且线程只能忙等（真机日志实证：Receive+Yield 空转 11 轮）。真实现：
@@ -1538,13 +1593,11 @@ static dm_mq_t *mq_get(void *q) {
         g_mq_key[i] = q;
         memset(&g_mq[i], 0, sizeof g_mq[i]);
         pthread_mutex_init(&g_mq[i].mu, NULL);
-        // np154：显式 MONOTONIC 时钟——Receive 的定时醒来（线程快照采样）用单调时钟
-        // 算超时；默认属性的 cond 是 REALTIME，两者混用 = 超时永远不触发（np154 实测）。
-        pthread_condattr_t ca;
-        pthread_condattr_init(&ca);
-        pthread_condattr_setclock(&ca, CLOCK_MONOTONIC);
-        pthread_cond_init(&g_mq[i].cv_notempty, &ca);
-        pthread_condattr_destroy(&ca);
+        // np156：队列 cond 回到**默认 REALTIME**。曾改成 MONOTONIC（np154）治"超时永不
+        // 触发"，但 np155/np156 实测唤醒只成功过一次 ⇒ OHOS musl 对 MONOTONIC 绝对
+        // 超时支持不全（futex bitset）。REALTIME+REALTIME 是处处可用的经典组合，
+        // 测试窗口内无跳时风险。
+        pthread_cond_init(&g_mq[i].cv_notempty, NULL);
         pthread_cond_init(&g_mq[i].cv_notfull, NULL);
         pthread_mutex_unlock(&g_mq_reg);
         return &g_mq[i];
@@ -1720,24 +1773,45 @@ static uint64_t plt_stub(void) {
         }
         // nn::os 互斥量 —— 真 pthread_mutex
         if (!strcmp(nm, "_ZN2nn2os12TryLockMutexEPNS0_9MutexTypeE")) {
-            return pthread_mutex_trylock(mtx_get((void *)(uintptr_t)a0)) == 0 ? 1 : 0;
+            pthread_mutex_t *mu = mtx_get((void *)(uintptr_t)a0);
+            int r = pthread_mutex_trylock(mu) == 0 ? 1 : 0;
+            if (r) {
+                int idx = mtx_idx((void *)(uintptr_t)a0);
+                if (idx >= 0) g_mtx_owner[idx] = (long)gettid();
+            }
+            return (uint64_t)r;
         }
         if (!strcmp(nm, "_ZN2nn2os9LockMutexEPNS0_9MutexTypeE")) {
-            // np76：加"等待时长"打点。互斥/队列是**真阻塞点**，它们走专门实现、不走通用记名，
-            //   所以日志里看不见——帧循环停住时，正是要在这里找"卡在谁身上"。
+            // np160：成对打点 + 持锁者登记（详见 g_mtx_owner 处注释）。
+            //   **有进入无离开 = 卡在这把锁**——本轮"静默卡死"的根因定位器。
+            pthread_mutex_t *mu = mtx_get((void *)(uintptr_t)a0);
+            int idx = mtx_idx((void *)(uintptr_t)a0);
+            int log_it = mtx_log_ok();
+            if (log_it)
+                klog("[锁] LockMutex 进入 mutex=%#llx idx=%d tid=%ld 当前owner=%ld\n",
+                     (unsigned long long)a0, idx, (long)gettid(),
+                     idx >= 0 ? g_mtx_owner[idx] : -1);
             struct timespec t0, t1;
             clock_gettime(CLOCK_MONOTONIC, &t0);
-            pthread_mutex_lock(mtx_get((void *)(uintptr_t)a0));
+            pthread_mutex_lock(mu);
             clock_gettime(CLOCK_MONOTONIC, &t1);
             long ms = (long)(t1.tv_sec - t0.tv_sec) * 1000 + (long)(t1.tv_nsec - t0.tv_nsec) / 1000000;
-            if (ms >= 5) {
-                static int n; if (++n <= 20)
-                    klog("[锁] LockMutex(%#llx) 等了 %ld ms（被别的线程占着）\n",
-                         (unsigned long long)a0, ms);
-            }
+            if (idx >= 0) g_mtx_owner[idx] = (long)gettid();
+            if (log_it)
+                klog("[锁] LockMutex 离开 mutex=%#llx tid=%ld 耗时=%ld ms（owner 置本线程）\n",
+                     (unsigned long long)a0, (long)gettid(), ms);
             return 0;
         }
         if (!strcmp(nm, "_ZN2nn2os11UnlockMutexEPNS0_9MutexTypeE")) {
+            int idx = mtx_idx((void *)(uintptr_t)a0);
+            long me = (long)gettid();
+            long ow = idx >= 0 ? g_mtx_owner[idx] : -1;
+            int log_it = mtx_log_ok();
+            if (log_it)
+                klog("[锁] UnlockMutex mutex=%#llx idx=%d tid=%ld owner=%ld%s\n",
+                     (unsigned long long)a0, idx, me, ow,
+                     (ow > 0 && ow != me) ? "（非持锁者解锁！可疑）" : "");
+            if (idx >= 0) g_mtx_owner[idx] = 0;
             pthread_mutex_unlock(mtx_get((void *)(uintptr_t)a0));
             return 0;
         }
@@ -1772,20 +1846,18 @@ static uint64_t plt_stub(void) {
                                               (in_self ? lr - g_self_base : lr)));
                 }
                 while (q->n == 0) {
-                    // np155： timedwait 250ms 定时醒（原来无超时，一睡到底）。
-                    // 为什么改：主线程 = 跑游戏的线程，运行期没有任何活着的宿主线程能打点
-                    // ⇒ 线程快照取不到证。工人线程定时醒 = 一个**活着采样时钟**：醒来重扫
-                    // 队列（语义不变），并打一份线程快照（主线程停在内核里时，它的 wchan
-                    // 就在这里被抓到）。
-                    // ⚠ np153/np154 教训：① 超时用 1s 时，末段"工人刚阻塞→主线程随即停车"
-                    // 的间隔只有几十毫秒，根本等不到超时 ⇒ 缩到 250ms；
-                    // ② cv 必须显式 MONOTONIC 时钟（默认 REALTIME 与单调 deadline 混用 =
-                    // 超时永远不触发，np154 实测 0 份快照）。
-                    struct timespec dl;
-                    clock_gettime(CLOCK_MONOTONIC, &dl);
-                    dl.tv_nsec += 250000000l;
-                    if (dl.tv_nsec >= 1000000000l) { dl.tv_sec++; dl.tv_nsec -= 1000000000l; }
-                    pthread_cond_timedwait(&q->cv_notempty, &q->mu, &dl);
+                    // np157：**轮询式醒来**（放锁 → nanosleep 250ms → 重锁 → 重扫）。
+                    // 为什么改成这样（np153–np156 四连教训）：原想借"工人定时醒"当运行期
+                    // 唯一的活着采样时钟（主线程=UI 线程，setInterval/宿主 pthread 在运行期
+                    // 排不进队），但 pthread_cond_timedwait 的定时超时在本平台**根本没响**
+                    // （MONOTONIC 混用不响；改 REALTIME+REALTIME 经典组合同样只醒过一次）
+                    // ⇒ 不再依赖 cond 超时：放锁后 nanosleep（纯 syscall，os_sleep 一直在用）
+                    // 再重锁重扫。语义不变（消息到达后重扫必然发现；最坏多 250ms 延迟）
+                    // + 醒来时打一份线程快照（主线程停在内核里时，wchan 就在这里被抓到）。
+                    pthread_mutex_unlock(&q->mu);
+                    struct timespec ts = { 0, 250000000L };
+                    nanosleep(&ts, NULL);
+                    pthread_mutex_lock(&q->mu);
                     if (q->n == 0) dm_probe_thread_probe();
                 }
             }
@@ -2054,8 +2126,29 @@ static uint64_t vtbl_fallback(void *self, void *arg) {
     return 0;
 }
 // 第 17 槽（+0x88）：调用点 0xa0e120 后紧跟 `tbz w0, #0` ⇒ 返回值当 bool，bit0=1 表示成功。
+// ⭐ np158：武装期内取 x30 + guest 栈——第 4 次插入后的 3 个第17槽调用是**最后的客体
+// 动作**，第 3 份即停车边界（其 x30 = 停车后第一段客体会执行的返回地址）。
+static int g_s17_arm;
 static uint64_t vtbl_slot17_ok(void *self, void *arg) {
     (void)self; (void)arg;
+    if (g_s17_arm > 0) {
+        g_s17_arm--;
+        uint64_t sp, lr;
+        __asm__ volatile("mov %0, sp" : "=r"(sp));
+        __asm__ volatile("mov %0, x30" : "=r"(lr));
+        uint64_t base = (uint64_t)(uintptr_t)g_k_m.base;
+        klog("[取栈] ★ 第17槽#%d：x30(返回客体)=%s+%#llx 客体SP≈%#llx\n",
+             3 - g_s17_arm,
+             (lr >= base && lr < base + 0x2600000) ? "映像+" : "外",
+             (unsigned long long)((lr >= base && lr < base + 0x2600000) ? lr - base : lr),
+             (unsigned long long)sp);
+        for (int i = 0; i < 24; i++) {
+            uint64_t v = *(const uint64_t *)(uintptr_t)(sp + (uint64_t)i * 8);
+            int in = (v >= base && v < base + 0x2600000);
+            klog("[取栈]   [sp+#%#04x] = %#llx%s\n", i * 8, (unsigned long long)v,
+                 in ? " ←main 映像内" : "");
+        }
+    }
     klog("[虚表] 第17槽(+0x88) 被调用 → 返回 1（bool 成功）\n");
     return 1;
 }
@@ -2559,6 +2652,39 @@ static uint64_t hook_e1(uint64_t *f) {   // Path A 函数入口 0x9fe82c（标�
              (unsigned long long)f[FR_X30]);
     return 0;
 }
+// ═══ np158：停车边界取证（全寄存器 + guest 栈）═══
+// 背景：主线程每次都在"第 4 次 TaskHeap 插入"附近停车（np149/150/156/158 一致），
+// 而停车点在纯 guest 原生代码里（PLT/svc/等待族全 0 命中），外部采样时钟不可靠
+// ⇒ 改成**在最后一个已知客体动作的钩子上直取现场**：
+//   ① guest SP 重构：hook_stub 从客体 SP 往下开 0x320 帧，f 即帧基址
+//      ⇒ 客体 SP = (uint64_t)f + 0x320；栈上就是客体调用链的返回地址/局部量，
+//      离线（plt 名表 + 反汇编）可把每个映像内值对回函数；
+//   ② x0–x28 + x29/x30 全打出（this/arg/对象指针都在）；
+//   ③ 触发点：hook_e2（0xa01790）第 4 次命中 = 停车前最后一次 TaskHeap 插入。
+#define HOOK_FRAME_SIZE 0x320u
+static int g_stall_arm;   // >0 时随后每个 0xa00a78 命中都打一份现场
+
+static void stall_dump(uint64_t *f, const char *tag) {
+    uint64_t base = (uint64_t)(uintptr_t)g_k_m.base;
+    uint64_t gsp = (uint64_t)(uintptr_t)f + HOOK_FRAME_SIZE;
+    klog("[取栈] ★ %s：客体SP=%#llx\n", tag, (unsigned long long)gsp);
+    for (int i = 0; i <= 17; i++)
+        klog("[取栈]   x%d=%#llx\n", i, (unsigned long long)f[i]);
+    klog("[取栈]   nzcv=%#llx x29=%#llx x30=%s+%#llx\n",
+         (unsigned long long)f[FR_NZCV], (unsigned long long)f[FR_X29],
+         (f[FR_X30] >= base && f[FR_X30] < base + 0x2600000) ? "映像+" : "外",
+         (unsigned long long)((f[FR_X30] >= base && f[FR_X30] < base + 0x2600000)
+                              ? f[FR_X30] - base : f[FR_X30]));
+    for (int i = FR_X18; i <= FR_X28; i++)
+        klog("[取栈]   x%d=%#llx\n", i - 5, (unsigned long long)f[i]);
+    for (int i = 0; i < 36; i++) {
+        uint64_t v = *(const uint64_t *)(uintptr_t)(gsp + (uint64_t)i * 8);
+        int in = (v >= base && v < base + 0x2600000);
+        klog("[取栈]   [sp+#%#04x] = %#llx%s\n", i * 8, (unsigned long long)v,
+             in ? " ←main 映像内" : "");
+    }
+}
+
 static uint64_t hook_e2(uint64_t *f) {   // 分发调用方入口 0xa01790
     if (++g_n_e2 <= 16) {
         uint64_t a1 = f[FR_X1];
@@ -2568,6 +2694,13 @@ static uint64_t hook_e2(uint64_t *f) {   // 分发调用方入口 0xa01790
              (unsigned long long)f[FR_X0], (unsigned long long)a1,
              (unsigned long long)tag, (unsigned long long)f[FR_X2],
              (unsigned long long)f[FR_X30]);
+    }
+    // np158：第 4 次插入 = 停车边界 ⇒ 取全寄存器 + guest 栈，并给随后每个 0xa00a78
+    // 命中武装（3×第17槽 序列就挂在它后面）。
+    if (g_n_e2 == 4) {
+        g_stall_arm = 4;
+        g_s17_arm = 3;   // 随后 3 个第17槽 = 最后的客体动作，第 3 份即停车边界
+        stall_dump(f, "第4次TaskHeap插入入口 0xa01790");
     }
     // ★ 钉子 #8 影子补丁（2026-10-17 傍晚，根因见上方注释与进度文档第十三节）：
     //   记录全零 ⇒ 标签 0 ⇒ 分发器返 0 ⇒ x21=0 ⇒ str [x21+0xc8] 崩。标签 0 不可能是合法
@@ -2599,6 +2732,10 @@ static uint64_t hook_e3(uint64_t *f) {   // 分发函数入口 0xa00a78
         klog("[钉子8] 0xa00a78：结构体=%#llx 标签=%llu x1=%#llx\n",
              (unsigned long long)st, (unsigned long long)(uint32_t)tag,
              (unsigned long long)f[FR_X1]);
+    }
+    if (g_stall_arm > 0) {   // np158：武装期内每次分发都取现场（最后一次 = 停车边界）
+        g_stall_arm--;
+        stall_dump(f, "武装期 0xa00a78");
     }
     return 0;
 }
@@ -3942,6 +4079,13 @@ static void *k_thread(void *arg) {
     }
     GATE_LOG("启动链后");
     k_ab_obs("启动链后");
+    // ⭐ np161：**深跑 0x1f8 正式退役**（np143/144 早已决议"这条路在真实游戏里不存在"，
+    //   但代码一直没删——每轮都主动深跑 ⇒ 每轮必崩 AddRef(NULL) ⇒ handler longjmp 把
+    //   客体线程从调用现场传送走 ⇒ 客体锁状态被我们污染，后续 LockMutex 永久等待）。
+    //   深跑是当年为定位 0x1f8 崩点插的探针，使命已完成（结论见 §1.6/§1.7），
+    //   继续开着只有负价值：崩溃 + 状态污染 + 掩盖真实流程。
+    // 如需复活做实验，取消下面注释即可。
+#if 0
     // 更深一站：模块的第一个真实功能函数 0x1f8（C++ 对象工厂：读数据槽 → 分配 0xaa0 → 构造）
     g_k_stage = "工厂 0x1f8";
     klog("=== 深跑：0x1f8（对象工厂，x0 = 注入的管理器对象）===\n");
@@ -3963,6 +4107,7 @@ static void *k_thread(void *arg) {
             return NULL;
         }
     }
+#endif
     // 终站：游戏的真正入口 nnMain（模块符号表 #506：st_value 0x735330，size 1008，GLOBAL FUNC）
     // 依据：rtld 的符号表里列出它要为主模块解析的入口名 nnMain（启动约定，非猜测）。
     GATE_LOG("nnMain前");
@@ -4229,6 +4374,9 @@ static void exp_k(const char *files_dir, char *out, size_t cap, size_t *used) {
     // （真机实证：日志只有"工厂崩 + 红色护栏"，nnMain 一行都没有）。
     g_nnmain_entered = 0;
     g_k_faulted = 0;
+    // np159/160：日志模式——np161 轮起恢复**文件 + hilog 镜像**（默认 0）。
+    // 保留开关备查：DM_LOG_MODE=hilog 只走 hilog。
+    { const char *m = getenv("DM_LOG_MODE"); if (m && !strcmp(m, "hilog")) g_klog_mode = 1; }
     // np125：探针线程（k_thread）里也要用文件目录（trace 落盘），存一份全局
     snprintf(g_files_dir, sizeof g_files_dir, "%s", files_dir ? files_dir : "");
     if (files_dir && *files_dir) {
