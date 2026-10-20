@@ -3254,6 +3254,44 @@ static uint64_t hook_rt_mgr(uint64_t *f) {   // 0x726f60：phase2/phase4 的「�
         klog("[RootTask] ★ 走到「建管理器」分支（站点 0x726f60，bl 0xdb9284）第 %d 次\n", g_rt_mgr);
     return 0;
 }
+
+// ⭐ np165：**装载器入口探针**（0xd5b694）——回答"启动包到底有没有被要求装载"。
+// 依据（离线反汇编）：0xdb9284（StarterPackMgr 创建 + 装载编排）尾部依次调
+//   0xd5b354 → 0xd5b4c8 → **0xd5b694（装载器）** → 0xd5b758 → …；
+//   装载器一进来就读门：`x8 = *(0x2276168); x8 = [x8]; ldrb w8,[x8,#0x419];
+//   cbnz w8 → 跳到 0xd5b744（**跳过装载**）`。
+//   ⇒ 本钩子把门三层值打出来：外层指针 / 内层对象 / 门字节。判读：
+//     · 钩子 0 次  ⇒ 编排没走到装载器（更早的分支/条件把它拦了）；
+//     · 内层=0     ⇒ 门对象没建（会在装载器里崩，或已被前置判断拦）；
+//     · 门字节≠0   ⇒ **主动跳过装载**（这就是 [fs] open 恒 0 的直接原因）。
+static int g_ld_gate;
+static uint64_t hook_loader(uint64_t *f) {
+    if (++g_ld_gate <= 6) {
+        uint64_t base = (uint64_t)(uintptr_t)g_k_m.base;
+        uint64_t outer = *(const uint64_t *)(uintptr_t)(base + 0x2276168);
+        uint64_t inner = 0, gate = 0xff;
+        if (outer > 0x10000ull && outer < 0x800000000000ull) {
+            inner = *(const uint64_t *)(uintptr_t)outer;
+            if (inner > 0x10000ull && inner < 0x800000000000ull)
+                gate = *(const uint8_t *)(uintptr_t)(inner + 0x419);
+        }
+        char line[240];
+        snprintf(line, sizeof line,
+                 "装载器#%d x0=%#llx 门[外=%#llx 内=%#llx 字节=%#x]%s\n",
+                 g_ld_gate, (unsigned long long)f[FR_X0], (unsigned long long)outer,
+                 (unsigned long long)inner, (unsigned)gate,
+                 (gate != 0 && gate != 0xff) ? " ⇒ 将跳过装载" : "");
+        klog("[装载器] ★ %s", line);
+        // 绕过日志预算的专用写（预算在 ~4100 行就截了，而装载发生在 5000+ 行）
+        if (g_files_dir[0]) {
+            char p[600];
+            snprintf(p, sizeof p, "%s/dm_gate.txt", g_files_dir);
+            int fd = open(p, O_WRONLY | O_CREAT | O_APPEND, 0666);
+            if (fd >= 0) { (void)!write(fd, line, strlen(line)); close(fd); }
+        }
+    }
+    return 0;
+}
 static uint64_t hook_rt_ctor(uint64_t *f) {  // 0x7277ec：RootTask 构造（alloc 0x3d0）
     if (++g_rt_ctor <= 4)
         klog("[RootTask] 构造 0x7277ec 被调（第 %d 次）owner=%#llx x30=%#llx\n",
@@ -4516,6 +4554,8 @@ static void exp_k(const char *files_dir, char *out, size_t cap, size_t *used) {
         // ★ np111：RootTask::calc 的阶段状态机（P0-1/P0-2）。放在最前面，保证一定装得上。
         k_install_hook(img, 0x726838, (void *)hook_rt_calc, "RootTask::calc 入口（阶段状态机）");
         k_install_hook(img, 0x726f60, (void *)hook_rt_mgr, "RootTask 建管理器站点 0x726f60");
+        // np165：装载器入口探针（门三层值）——见 hook_loader 注释
+        k_install_hook(img, 0xd5b694, (void *)hook_loader, "装载器入口 0xd5b694（启动包门）");
         k_install_hook(img, 0x7277ec, (void *)hook_rt_ctor, "RootTask 构造 0x7277ec");
         // np113：查"建出来就被销毁"（见 hook_list_ins/hook_task_exit 的注释）
         //   ⚠ 0xa01fe0 已由 hook_e11 挂着（同一站点不能挂两次），那边加了调用计数与 [+0xe0] 表。
