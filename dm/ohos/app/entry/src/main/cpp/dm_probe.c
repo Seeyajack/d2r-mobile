@@ -1212,7 +1212,9 @@ static pthread_key_t g_k_key[8];
 static module_t g_k_s;
 static pthread_key_t g_s_key[8];
 struct sdk_sym { const char *name; uint64_t addr; };
-#define SDK_OS_MAX 512
+// np135：512 → 16384。M1 第二步要做 PLT 自解析，导出表必须收**全量**——
+//   离线实证 sdk 有 14,834 个导出（dynsym 14,849），原先只收 nn::os 一族不够用。
+#define SDK_OS_MAX 16384
 static struct sdk_sym g_sdk_os[SDK_OS_MAX];
 static int g_n_sdk_os;
 static uint64_t sdk_ret0(uint64_t a, uint64_t b) { (void)a; (void)b; return 0; }   // sdk 未识别导入的兜底
@@ -1255,6 +1257,39 @@ static uint64_t k_gate_stub(void) {
     if (g_k_hits < 16) g_k_hit_lr[g_k_hits] = lr;
     g_k_hits++;
     return 0;   // 首跑：先一律"无事发生"（0），看流程能走多远
+}
+// np136（批次 B）：门观测桩命中快照。挂在 nnMain 调用前 + trace 定时器里——
+//   判互斥量实现是否踩 svc 门（ArbitrateLock 等）。命中 0 = 纯用户态自旋链路走通；
+//   >0 则前 8 个返回点离线定位（注意 LR 可能落在 main 或 sdk 映像，按值域分辨）。
+static void k_gate_obs_dump(const char *tag) {
+    klog("[门观测:%s] k_gate_stub 共命中 %d 次；前 8 个返回点：", tag, g_k_hits);
+    for (int i = 0; i < 8 && i < g_k_hits; i++)
+        klog(" %#llx", (unsigned long long)g_k_hit_lr[i]);
+    klog("\n");
+}
+// np143：单例 A/B/当前实例 创建时机观测（任意线程可调，帧线程上采到的是 nnMain 运行期）。
+//   依据：构造器 0x103ba34 尾部 AddRef(NULL) 定谳——它要 A（指针变量 @mem[0x232db98]，经指针槽
+//   0x2264e48 双重取址）与 B（@mem[0x232db88]，槽 0x2289aa0）；"当前实例"@mem[0x232db90]（槽 0x2289af8）。
+//   按客人自己的取址方式读（先读槽得指针、再解引用），槽值一并打出，可交叉验证槽是否真指向预期变量。
+//   顺带增量 dump 大分配（≥0x400）：[替换] 分配 的**打印上限只有前 8 次**（构造器期不能打日志），
+//   靠 g_big 数组（上限 24）才能覆盖 nnMain 段里的 A(0x21a0)/B(0x2c068) 分配。
+static void dump_big_allocs(void);        // np143：前置声明（实现在下面）
+static void k_ab_obs(const char *tag) {
+    uint8_t *b = (uint8_t *)g_k_m.base;
+    uint64_t _sa = *(const uint64_t *)(uintptr_t)(b + 0x2264e48);
+    uint64_t _sb = *(const uint64_t *)(uintptr_t)(b + 0x2289aa0);
+    uint64_t _sc = *(const uint64_t *)(uintptr_t)(b + 0x2289af8);
+    uint64_t _A = (_sa > 0x10000ull && _sa < 0x800000000000ull)
+                ? *(const uint64_t *)(uintptr_t)_sa : 0;
+    uint64_t _B = (_sb > 0x10000ull && _sb < 0x800000000000ull)
+                ? *(const uint64_t *)(uintptr_t)_sb : 0;
+    uint64_t _C = (_sc > 0x10000ull && _sc < 0x800000000000ull)
+                ? *(const uint64_t *)(uintptr_t)_sc : 0;
+    klog("[AB观测] %s：A槽=%#llx→A=%#llx ；B槽=%#llx→B=%#llx ；当前实例=%#llx\n", tag,
+         (unsigned long long)_sa, (unsigned long long)_A,
+         (unsigned long long)_sb, (unsigned long long)_B,
+         (unsigned long long)_C);
+    dump_big_allocs();   // np143：改成增量输出（见函数内说明），此处可反复调用
 }
 // 记录型 PLT 存根：x16 = 该槽地址（thunk 里 add x16,x16,#imm 后 br），据此认出是哪个 SDK 符号。
 typedef struct { uint64_t slot; const char *name; } plt_ent_t;
@@ -1311,6 +1346,34 @@ static int thr_find_by_self(void) {
         if (g_thr[i].game && g_thr[i].started && pthread_equal(g_thr[i].tid, me)) return i;
     return -1;
 }
+// ───────── np135：sdk 每线程 TLS 影子槽（M1 第三步）─────────
+// 背景：ohos 目标下，sdk 的线程槽跳床统一走 musl tsd（mrs tpidr_el0 → *(tp−272) → +键号×8），
+//   由探针按线程写槽。此前 8 个槽全填哨兵值——KGATE（门表）= k_gate_stub 是对的，但
+//   K18/KTLR 必须是"真影子"，否则 sdk 的 TSD 访问/互斥量名牌一执行就撞（np134 崩因）。
+// 尺寸依据（2026-10-20 离线实证，反汇编 sdk 全部 4,973 个站点）：
+//   K18（x18 虚拟寄存器及物化指针的落点）：369 处 [x18+disp] 最大 0x41e0、add/sub 物化
+//     偏移最大 0xc80、存在 −0x10 负偏移 ⇒ 块 0x4500，槽值 = 块 + 0x10（负偏移也有落点）。
+//   KTLR（TLR 指针）：tpidrro 站点后续偏移集合 {0x1d0,0x1d8,0x1f0,0x1f8} ⇒ 区 0x200；
+//     其中 [0x1f8] = NN 线程对象（自旋锁经它读 +0x1b8 的 u32 属主名牌）⇒ 对象 0x1c0。
+//   KTLS（mrs/msr tpidr_el0，2 读 3 写）：语义待定，维持哨兵观察。
+// 名牌唯一性：全局自增 u32（0 保留作"无主"）。探针场景线程少，影子块不释放（泄漏可接受）。
+static uint32_t g_sdk_tag_seq;
+static void k_sdk_tls_shadow_install(void) {
+    uint64_t tp = 0; __asm__ volatile("mrs %0, tpidr_el0" : "=r"(tp));
+    uint64_t tsd = *(uint64_t *)(tp - 272);
+    uint8_t *k18 = (uint8_t *)calloc(1, 0x4500);      // TSD 影子（前 0x10 留给负偏移）
+    uint8_t *tlr = (uint8_t *)calloc(1, 0x200);       // TLR 影子区
+    uint8_t *nn  = (uint8_t *)calloc(1, 0x1c0);       // NN 线程对象（+0x1b8 = u32 名牌）
+    if (!k18 || !tlr || !nn) { klog("[sdk-tls] ✗ 影子块分配失败\n"); return; }
+    uint32_t tag = ++g_sdk_tag_seq;
+    *(uint32_t *)(nn + 0x1b8)  = tag;
+    *(uint64_t *)(tlr + 0x1f8) = (uint64_t)(uintptr_t)nn;
+    *(uint64_t *)(tsd + (uint64_t)g_s_key[DM_IMG_SDK_KEY_K18_IDX]  * 8) = (uint64_t)(uintptr_t)(k18 + 0x10);
+    *(uint64_t *)(tsd + (uint64_t)g_s_key[DM_IMG_SDK_KEY_KTLR_IDX] * 8) = (uint64_t)(uintptr_t)tlr;
+    klog("[sdk-tls] 影子槽已装：K18=%p（块 %p） KTLR=%p NN=%p 名牌=%u\n",
+         (void *)(k18 + 0x10), (void *)k18, (void *)tlr, (void *)nn, (unsigned)tag);
+}
+
 static void *thr_trampoline(void *p) {
     dm_thread_t *t = (dm_thread_t *)p;
     // np133：给新线程也填 **sdk 的键页槽**（sdk 的门表指针在它自己的键号上）。
@@ -1325,6 +1388,8 @@ static void *thr_trampoline(void *p) {
             (void *)(uintptr_t)0x4400000000000006ull, (void *)(uintptr_t)0x4400000000000007ull,
         };
         for (int i = 0; i < 8; i++) *(uint64_t *)(tsd + (uint64_t)g_s_key[i] * 8) = (uint64_t)sv[i];
+        // np135：K18/KTLR 换真影子（TSD 影子块 / TLR 影子区 + NN 线程对象 + 唯一名牌）
+        k_sdk_tls_shadow_install();
     }
     t->entry(t->arg);           // 游戏的线程体
     return NULL;
@@ -1758,10 +1823,12 @@ static uint64_t plt_stub(void) {
             if (nvn && !strcmp(nvn, "nvnDeviceGetProcAddress")) return (uint64_t)(uintptr_t)&nvn_dev_gpa;
             return (uint64_t)(uintptr_t)&nvn_stub;
         }
-        // ★ 关键：C++ 静态局部对象的初始化守卫。返回 1 = "由我来初始化"；
-        // 返回 0 会被当成"别人已初始化"而跳过 ⇒ 全部静态单例没建、虚表为空（本轮崩因）。
-        if (!strcmp(nm, "__cxa_guard_acquire")) { klog("[服务] __cxa_guard_acquire → 1（由我来初始化）\n"); return 1; }
-        if (!strcmp(nm, "__cxa_guard_release") || !strcmp(nm, "__cxa_guard_abort")) return 0;
+        // ★ C++ 静态局部对象的初始化守卫：**已迁到通用胶水层**（dm/ohos/dm_sdk_ohos.c）。
+        //   迁走的原因（2026-10-20 np145 定谳）：这是**与游戏无关的 C++ ABI 语义**，属通用框架能力；
+        //   而旧实现在这里是"恒返回 1 + release 空操作 + 从不写 guard 字节" ⇒
+        //   游戏自己的 `ldarb`+`tbnz #0`"已初始化"判据**永不成立**
+        //   ⇒ 25179 个静态局部初始化器**每次被调用都重跑一遍**（重复写字段/加解锁/分配）。
+        //   现由 dm_sdk_ohos.c 的 cxa_guard_acquire/release 实现真正的字节状态机。
         // ===== 语义已知的服务：成批实现（"步子适度放大"：这些不必一个个试）=====
         // 真时基：返回 ns 级单调时间（返回 0 会让游戏的计时/节拍逻辑失真）
         if (!strcmp(nm, "_ZN2nn2os13GetSystemTickEv")) {
@@ -1788,6 +1855,16 @@ static uint64_t plt_stub(void) {
             // np111：借游戏自己的帧线程定期 dump RootTask 的阶段（P0-2）。
             //   第 20 帧一次（早看），之后每 200 帧一次（看是否卡住）。
             if (tick == 20 || tick % 200 == 0) rt_dump("周期");
+            // np136（批次 B）：同点位报门观测桩命中——宿主定时器线程永不被调度
+            //   （仪器铁律），累计值看互斥量链路在主循环期踩不踩 svc 门。
+            if (tick == 20 || tick % 200 == 0) k_gate_obs_dump("帧线程");
+            // np143：nnMain 运行期采样单例 A/B —— 判"建 A/B 的初始化链"是否在 nnMain 段内跑。
+            //   挂在帧线程（唯一确定会被调度、又确在 nnMain 运行期的线程）上。
+            if (tick == 20 || tick % 200 == 0) k_ab_obs("帧线程");
+            // np145：guard 语义修复后的统计摘要（acquire 总数 / 我初始化 / 不同 guard / 重跑）。
+            //   ★ 借游戏自己的帧线程打（仪器铁律：观测绝不挂宿主线程）。
+            //   判据：**"重跑"计数应恒为 0**；"我初始化"应 ≈ "不同 guard"。
+            if (tick == 20 || tick % 200 == 0) dm_sdk_guard_report();
             // np103：定期读"变体表"（0x22dce70）的状态——#206 查它拿到空指针。
             //   看三样：+0x18 缓存指针、缓存内容前 16 字节、+0x48 计数。
             //   若计数=2（初始化器跑过）而缓存内容全 0 ⇒ "建了表但没人填内容"。
@@ -1890,8 +1967,10 @@ static uint64_t g_alloc_obj[2];       // 对象 A：{ &虚表, &A }
 static uint64_t g_alloc_holder[1];    // 持有者：{ &A }
 static uint64_t g_ctx_holder[1];      // 上下文持有者：{ &ctx }
 static uint64_t g_ctx_obj[0x20];      // 上下文对象（[0x88] 处为 0 = 让 thunk 返回 0，走本线程路径）
-static uint64_t g_mgr_obj[8];       // 管理器对象：+0x18 处放"子对象"指针
+static uint64_t g_mgr_obj[8];       // 管理器对象（工厂 0x1f8 入参影子）：+0x00 虚表 / +0x18 子对象链 / +0x20 名字串
 static uint64_t g_mgr_sub[8];       // 子对象：+0x18 处放虚方法指针
+static uint64_t g_mgr_vt[8];        // 管理器虚表桩：构造器 0x103b83c 只读 [vt+0x10] 一个标志字节 ⇒ 零缓冲即可
+static char g_mgr_name[] = "";      // 名字串：strlen=0 ⇒ 拷贝长度 0 ⇒ 不去碰 NULL 拷贝源（契约见 k_inject_heap）
 // ── *(0x227df98) 指向的 .bss 全局（模块偏移 0x22d9198）──
 // 真机+离线双重确认：**模块代码从不写它**（连同我们已成功注入的 0x22d8a18/0x22d8a40 也一样）
 // ⇒ 这些全局本由 Switch 外部运行时填，鸿蒙上没有 ⇒ 只能由宿主补影子。
@@ -2042,16 +2121,20 @@ static uint64_t ktrace_rec(uint64_t *f) {
 
 // np125b：**中途落盘**。原设计只在 nnMain 返回/崩溃时落盘，但本轮的卡点是"阻塞"——
 //   游戏既不返回也不崩，数据永远拿不到（真机实证：脚本报"轨迹没抓到"）。
-//   改成按水位落盘：到 2000 / 8000 / 32000 条各落一次（后面的覆盖前面的）。
+//   改成按水位落盘：每 +500 条落一次（后面的覆盖前面的）。
 //   这样无论跑多久、是否阻塞，总能拿到"到目前最大"的那份。
+// np138（2026-10-20 下午）：粒度 2000 → **500**。主线程静默卡死定位时，旧 2000 粒度
+//   最后一滴可能离冻点上千条调用（live 跑冻点就在 4000 水位后十几行）；500 让冻点更近。
+//   代价 = 落盘更频（每次 fopen/fwrite/fclose，burst 期约每几毫秒一次）——可接受：
+//   冻点定位的主仪器是等待族打点（零扰动），轨迹只是保险。
 static void ktrace_dump(const char *files_dir);
 static void ktrace_maybe_snapshot(void) {
-    static unsigned next = 2000u;
+    static unsigned next = 500u;
     if (!g_files_dir[0]) return;
     unsigned n = __atomic_load_n(&g_tr_n, __ATOMIC_RELAXED);
     if (n < next || next > KTRACE_N) return;
-    klog("[TRACE] 水位快照：已记录 %u 条（下一水位 %u）\n", n, next + 2000u);
-    next += 2000u;   // np126：粒度从"×4"改成"+2000"——阻塞时要的是"最后到过哪"，粗水位拿不到
+    klog("[TRACE] 水位快照：已记录 %u 条（下一水位 %u）\n", n, next + 500u);
+    next += 500u;
     ktrace_dump(g_files_dir);
 }
 
@@ -2101,6 +2184,9 @@ static void ktrace_mark(uint32_t off, uint64_t a0, uint64_t a1) {
 //   宿主 pthread 能被调度（探针线程本身就是），这里只做文件写，不碰客体状态。
 static void *ktrace_timer(void *arg) {
     (void)arg;
+    // ⚠ np136 实证：宿主 pthread_create 的线程体从未被调度（仪器铁律，np26–np29 三回合
+    //   零输出）⇒ 这个定时器实际不会跑。保留仅为将来若调度问题修复后自动生效；
+    //   当前周期打点全部挂在游戏帧线程（plt_stub 服务分派里 ConvertToTimeSpan tick）。
     for (int i = 0; i < 4; i++) {
         struct timespec ts = { 10, 0 };
         nanosleep(&ts, NULL);
@@ -3018,6 +3104,7 @@ static uint64_t hook_setter(uint64_t *f) {
         *(uint64_t *)(uintptr_t)slot = val;      // 原函数干的就是这件事
     return 0;
 }
+static void *g_boot_last_disp;   // 诊断（2026-10-20）：启动链全程盯 SIGSEGV disposition 的上一个值
 static uint64_t hook_boot(uint64_t *f) {    uint64_t base = (uint64_t)(uintptr_t)g_k_m.base;
     uint64_t site = f[FR_SITE];
     uint64_t so = (site >= base && site < base + DM_IMG_MAIN_END) ? site - base : site;
@@ -3031,6 +3118,17 @@ static uint64_t hook_boot(uint64_t *f) {    uint64_t base = (uint64_t)(uintptr_t
         klog("[启动链] #%d 进入 +%#llx（返回地址 +%#llx）｜槽 0x2280eb8=%#llx\n",
              g_n_boot, (unsigned long long)so, (unsigned long long)lo,
              (unsigned long long)slot);
+    }
+    {   // 诊断（2026-10-20）：本轮崩点（PostCalc 收 NULL 句柄）时我方 handler 没拦到、
+        //   进程被 DFX 收尸。逐站读回 SIGSEGV disposition，只在**变化时**打一行——
+        //   变化时刻就是"谁换掉了它"（musl 信号链/游戏自装崩溃处理器）。
+        struct sigaction rb;
+        sigaction(SIGSEGV, NULL, &rb);
+        if ((void *)rb.sa_sigaction != g_boot_last_disp) {
+            g_boot_last_disp = (void *)rb.sa_sigaction;
+            klog("[信号] 启动链 #%d：SIGSEGV disposition 变为 %p\n",
+                 g_n_boot, (void *)rb.sa_sigaction);
+        }
     }
     return 0;
 }
@@ -3315,6 +3413,18 @@ static uint64_t hook_e30(uint64_t *f) {
     return 0;
 }
 
+// ★ 崩溃点仪器（2026-10-20）：CallbackemitterPostCalc_Basic_0（0x103b1f0）入口。
+//   机理已坐实（faultlog ESR=读故障 + si_addr=0 + x0=0 ⇒ 第三条指令 `ldr x20,[x0]` 读 0 崩；
+//   诊断串 EFF_ERR[CallbackemitterPostCalc_Basic_0]；兄弟 Initialize/Finalize 同构吃句柄）：
+//   **调用方递了 NULL 句柄**。静态只确认"必走某对象 +0xc10 的 blr"（构造器 0x1037630 是
+//   唯一静态引用、全映像无直接 bl），231 处同偏移加载静态无法区分 ⇒ 挂入口记
+//   x0（句柄）与 x30（LR=调用方返回址）。钩子在入口、崩指令之前触发 ⇒ **致命调用必被捕获**；
+//   klog 即 fflush ⇒ 崩前最后一条已落盘。离线：x30-4 反汇见 blr，其前若干条内的
+//   `ldr x?,[x?,#0xc10]` 即调用者函数与对象来源。
+//   ⚠ 只记地址、不解引用 *x0——非致命调用的 x0 可能是野指针，钩子自己解引用会污染现场。
+static int g_n_pcalc;
+static uint64_t hook_pcalc(uint64_t *f) { frame_log("PostCalc 0x103b1f0", f, &g_n_pcalc); return 0; }
+
 // 0x9fa4c8 的**替身**（np54 起）：原实现是"建临时对象 → 按 ':' 切分 → 遍历已注册解析器"，
 // 在宿主上一路缺数据、恒返回 0 ⇒ worker 的 x2 = 0 ⇒ 崩在 0xa05324（`ldr w8,[x23,#8]`）。
 // 按 §八「影子对象」打法：宿主直接返回一个**合法的全零对象**（calloc 8KB），
@@ -3401,15 +3511,19 @@ static uint64_t host_alloc_replace(uint64_t *f) {
 }
 
 // np106b：大分配记录落地（构造器期之后调用，此时打日志才安全）
+// np143：改成**增量输出**（只打新增条目）——现在会在多个采样点反复调用
+//   （静态初始化后 / nnMain 运行期帧线程），每次都全量重打会淹日志。
 static void dump_big_allocs(void) {
+    static int done;                 // 已打印到第几条
     uint64_t b2 = (uint64_t)(uintptr_t)g_k_m.base;
-    for (int i = 0; i < g_n_big; i++) {
+    for (int i = done; i < g_n_big; i++) {
         int in = g_big_lr[i] >= b2 && g_big_lr[i] < b2 + DM_IMG_MAIN_END;
         klog("[大分配] #%d %#llx 字节（第 %d 次分配）；站点=%s%#llx\n", i,
              (unsigned long long)g_big_sz[i], (int)g_big_seq[i],
              in ? "+" : "(外)",
              (unsigned long long)(in ? g_big_lr[i] - b2 : g_big_lr[i]));
     }
+    done = g_n_big;
 }
 // 批量挂点：扫全映像，找出所有指向 target 的 **bl（调用）与 b（尾调用）** 站点并全部挂上。
 // 为什么连 b 也要挂：崩链上的调用可能是尾调用（不更新 x30），只扫 bl 会把它们漏掉。
@@ -3449,9 +3563,18 @@ static void k_inject_heap(uint8_t *img) {
     g_tls_shadow[0xb0 / 8] = (uint64_t)(uintptr_t)&g_alloc_obj[0];   // 影子对象 [+0xb0] = 分配器对象
     *(uint64_t *)(img + 0x226f0a0) = (uint64_t)(uintptr_t)&g_alloc_holder[0];   // 分配器持有者
     *(uint64_t *)(img + 0x22783d8) = (uint64_t)(uintptr_t)&g_ctx_holder[0];     // 线程上下文持有者
-    // 工厂 0x1f8 的入参：读 [x1+0x18] → 对象 → [+0x18] → 虚方法（见崩点 0x103b8a8）
+    // 工厂 0x1f8 的入参契约（np141 符号级定谳；客体构造器 0x103b83c 全函数反汇编封闭）：
+    //   +0x00 虚表指针：构造器 ldr x8,[x20] 后读 [vt+0x10] 一个标志字节（0x103b994-0x103b99c）
+    //   +0x18 子对象链：读 [sub+0x18] 虚方法，两次 blr（0x103b8b8/0x103b8d4，日志两次"[管理器] 虚方法被调用"）
+    //   +0x20 名字串  ：其上做手工 strlen（分隔符全局指向 0x00；钳位 63）定拷贝长度，
+    //                   拷贝源是 [+0x18+8]；空串 ⇒ 长度 0 ⇒ musl memcpy 不 deref NULL 源 ⇒ 安全通过
+    // 构造器 0x103b9a0 之后只操作新对象、0x1f8 返回后亦然 ⇒ 契约就这三项，无隐藏字段。
+    g_mgr_obj[0x00 / 8] = (uint64_t)(uintptr_t)&g_mgr_vt[0];
     g_mgr_sub[0x18 / 8] = (uint64_t)(uintptr_t)&mgr_method;
     g_mgr_obj[0x18 / 8] = (uint64_t)(uintptr_t)&g_mgr_sub[0];
+    g_mgr_obj[0x20 / 8] = (uint64_t)(uintptr_t)g_mgr_name;
+    klog("[mgr-契约] P0-5：+0x00 虚表=%p +0x18 链=%p +0x20 空串=%p（strlen=0）\n",
+         (void *)&g_mgr_vt[0], (void *)&g_mgr_sub[0], (void *)g_mgr_name);
     // nnMain 路径的 sead::ThreadMgr（见 g_tm_a 处注释：这个槽此前漏注 ⇒ 崩 0x9FE9A8）
     for (int i = 0; i < DM_TM_VTBL_QWORDS; i++) g_tm_vtbl[i] = (uint64_t)(uintptr_t)&tm_method;
     g_tm_obj[0] = (uint64_t)(uintptr_t)&g_tm_vtbl[0];
@@ -3613,6 +3736,8 @@ static void *k_thread(void *arg) {
     //   就会读空门表（真机实证：静态初始化期崩，si_addr=0xd0/0x158，x8=门表偏移）。
     if (g_n_sdk_os)
         for (int i = 0; i < 8; i++) *(uint64_t *)(tsd + (uint64_t)g_s_key[i] * 8) = (uint64_t)sv[i];
+    // np135：K18/KTLR 换真影子（TSD 影子块 / TLR 影子区 + NN 线程对象 + 唯一名牌）
+    if (g_n_sdk_os) k_sdk_tls_shadow_install();
     // 装机他判：把本次编译时间打进日志——跑完先看这一行与本地编译时间是否一致，
     // 不一致就说明设备上跑的是旧包（今天已被这个问题浪费三轮）。
     klog("=== 探针构建：%s %s ===\n", __DATE__, __TIME__);
@@ -3642,6 +3767,7 @@ static void *k_thread(void *arg) {
              (unsigned long long)_g, (unsigned long long)_o, _v); \
     } while (0)
     GATE_LOG("启动链前");
+    k_ab_obs("启动链前");
     g_k_stage = "启动链 0x1c8";
     klog("=== 起跑：入口 0x1c8（启动链）base %#llx ===\n", (unsigned long long)b);
     g_gate_armed = 1; g_gate_fault_pc = 0;
@@ -3656,6 +3782,7 @@ static void *k_thread(void *arg) {
         return NULL;
     }
     GATE_LOG("启动链后");
+    k_ab_obs("启动链后");
     // 更深一站：模块的第一个真实功能函数 0x1f8（C++ 对象工厂：读数据槽 → 分配 0xaa0 → 构造）
     g_k_stage = "工厂 0x1f8";
     klog("=== 深跑：0x1f8（对象工厂，x0 = 注入的管理器对象）===\n");
@@ -3680,6 +3807,7 @@ static void *k_thread(void *arg) {
     // 终站：游戏的真正入口 nnMain（模块符号表 #506：st_value 0x735330，size 1008，GLOBAL FUNC）
     // 依据：rtld 的符号表里列出它要为主模块解析的入口名 nnMain（启动约定，非猜测）。
     GATE_LOG("nnMain前");
+    k_ab_obs("nnMain前");
     g_k_stage = "nnMain";
     g_nnmain_entered = 1;   // np86：置位后，工厂分支就知道"别再 fall-through 了"
     klog("=== 终站：nnMain（0x735330）===\n");
@@ -3691,8 +3819,21 @@ static void *k_thread(void *arg) {
          (unsigned long long)*(const uint64_t *)(b + 0x2280eb8),
          (unsigned long long)((uintptr_t)b + 0x22d9260));
     g_gate_armed = 1; g_gate_fault_pc = 0;
+    k_gate_obs_dump("nnMain 调用前");   // np136：静态初始化期（344 次 InitializeMutex 都在这）的门命中快照
     if (!g_fixup_page) g_fixup_page = calloc(1, 0x8000);   // 越障暂存区 32KB（64 块 × 0x100，见 gate_fault_handler）
     g_fixup_base = (uintptr_t)b;
+    {   // 诊断（2026-10-20）：nnMain 之前 SIGSEGV 的 disposition 还是我们的吗？静态初始化期
+        //   （模块 .init_array）有没有谁换掉它。线程掩码用"空集读回式"（不改掩码）——
+        //   同步信号（SIGSEGV）在本线程被阻塞也会让 handler 不跑，是"没拦到"的候选原因。
+        struct sigaction rb;
+        sigaction(SIGSEGV, NULL, &rb);
+        sigset_t empty, cur;
+        sigemptyset(&empty);
+        pthread_sigmask(SIG_BLOCK, &empty, &cur);
+        klog("[信号] nnMain前：SIGSEGV disposition=%p｜本线程掩码%s\n",
+             (void *)rb.sa_sigaction,
+             sigismember(&cur, SIGSEGV) ? " 阻塞 SIGSEGV（★ 没拦到的候选原因）" : " 未阻塞");
+    }
     if (sigsetjmp(g_gate_jmp, 1) == 0) {
         // 按"干净调用"准备寄存器：x21 = 模块基址（Switch SDK 约定），x0..x7 清零。
         register uint64_t r21 __asm__("x21") = b;
@@ -3769,6 +3910,7 @@ static void *k_thread(void *arg) {
         gate_dump_fault("nnMain");
         ktrace_dump(g_files_dir);   // np125：崩了也要把 trace 落盘——最后几十条往往就是崩因
     }
+    k_gate_obs_dump("k_thread 收尾");   // np136：nnMain 返回/崩后才打得到，循环期靠定时器
     return NULL;
 }
 // ───────── np133：装载 sdk 模块并建导出表（M1 第二步）─────────
@@ -3777,6 +3919,14 @@ static void *k_thread(void *arg) {
 //   先只切"互斥量"——它只用到我们刚补的 ArbitrateLock/Unlock，不涉及句柄创建。
 // 装载要做四件事（与 main 的装载逐条对应）：映射 → 写键页 → 应用 RELATIVE → 封 R+X。
 // （状态声明在文件前面：g_k_s / g_s_key / g_sdk_os / g_n_sdk_os，线程蹦床要用）
+
+// np135：导出表查找。**全量表**（np133 时只收 nn::os 340 个）——PLT 自解析与白名单
+// 都要查它；线性扫描，装载期一次性调用（4,135 槽 × 14,834 条 ≈ 6,000 万次首字符比较，可接受）。
+static void *k_sdk_lookup(const char *nm) {
+    for (int i = 0; i < g_n_sdk_os; i++)
+        if (!strcmp(g_sdk_os[i].name, nm)) return (void *)(uintptr_t)g_sdk_os[i].addr;
+    return NULL;
+}
 
 static int k_load_sdk(void) {
     memset(&g_k_s, 0, sizeof g_k_s);
@@ -3830,7 +3980,10 @@ static int k_load_sdk(void) {
         if ((uint32_t)r_info == 1027) { *(uint64_t *)(img + r_off) = (uint64_t)img + (uint64_t)r_add; n_rel++; }
     }
 
-    // 导出表：只收 _ZN2nn2os（本批要用的那一族；换批改这里即可）
+    // 导出表：**全量收集**（np135，M1 第二步 PLT 自解析的依据）。
+    //   离线实证：sdk 的 4,135 个 PLT 导入里 4,126 个是本模块自己的导出——NX 动态链接
+    //   约定"模块对自身导出的调用也走 PLT 导入槽"，装载器必须自解析；只收 nn::os 一族时
+    //   这些内线全落到 sdk_ret0 空转（np134 崩链的根因之一）。
     g_n_sdk_os = 0;
     uint32_t nsym = DT_HASH ? *(uint32_t *)(img + DT_HASH + 4) : 0;
     for (uint32_t i = 0; DT_HASH && i < nsym && g_n_sdk_os < SDK_OS_MAX; i++) {
@@ -3839,16 +3992,19 @@ static int k_load_sdk(void) {
         uint16_t shndx = *(uint16_t *)(img + st + 6);
         uint64_t value = *(uint64_t *)(img + st + 8);
         if (!name_off || !shndx || !value) continue;
-        const char *nm = (const char *)(img + DT_STRTAB + name_off);
-        if (strncmp(nm, "_ZN2nn2os", 9)) continue;
-        g_sdk_os[g_n_sdk_os].name = nm;
+        g_sdk_os[g_n_sdk_os].name = (const char *)(img + DT_STRTAB + name_off);
         g_sdk_os[g_n_sdk_os].addr = (uint64_t)img + value;
         g_n_sdk_os++;
     }
 
-    // ★ sdk 自己的 PLT 槽也要填（它只导入 13 个符号）。不填的话，sdk 一调 malloc 就是
-    //   `blr x17` 跳到「未加基址的原始值」（真机实证：pc=0x33ff04 正是 sdk 的函数偏移）。
-    //   分配器一族直接用宿主 libc；其余（nnMain/nninitStartup/__rel_* 等）给"返 0"桩并记账。
+    // ★ sdk 自己的 PLT 槽也要填。**np135 实证：它导入 4,135 个符号，其中 4,126 个是本模块
+    //   自己的导出**（旧注释"只导入 13 个"是过期错注——漏数这 4,126 条内线，sdk 的内部协作
+    //   曾全部落到空转桩）。不填的话，sdk 一调 malloc 就是 `blr x17` 跳到「未加基址的原始值」
+    //   （真机实证：pc=0x33ff04 正是 sdk 的函数偏移）。
+    //   填充优先级：malloc 族 → 宿主 libc；本模块导出 → 自解析（img + st_value）；
+    //   剩余 4 个真外部符号（nnMain / nninitStartup /
+    //   nnosGetDefaultUserExceptionStackForApplication / __nnDetailNintendoSdkRuntimeObjectFile）
+    //   → sdk_ret0 暂桩并记账。
     uint64_t DT_JMPREL_S = 0, DT_PLTRELSZ_S = 0;
     for (int i = 0; i < 64; i++) {
         uint64_t tag = *(uint64_t *)(dyn + (uint64_t)i * 16);
@@ -3858,7 +4014,7 @@ static int k_load_sdk(void) {
         else if (tag == 2) DT_PLTRELSZ_S = val;
     }
     static uint64_t (*sdk_ret0p)(uint64_t, uint64_t) = sdk_ret0; (void)sdk_ret0p;
-    uint64_t n_sdk_plt = 0;
+    uint64_t n_sdk_plt = 0, n_self = 0, n_libc = 0, n_ext = 0;
     for (uint64_t off = 0; off + 24 <= DT_PLTRELSZ_S; off += 24) {
         uint64_t r_off  = *(uint64_t *)(img + DT_JMPREL_S + off);
         uint64_t r_info = *(uint64_t *)(img + DT_JMPREL_S + off + 8);
@@ -3867,39 +4023,44 @@ static int k_load_sdk(void) {
         uint32_t name_off = *(uint32_t *)(img + st);
         const char *nm = (const char *)(img + DT_STRTAB + name_off);
         uint64_t target = 0;
-        if      (!strcmp(nm, "malloc"))        target = (uint64_t)(uintptr_t)malloc;
-        else if (!strcmp(nm, "calloc"))        target = (uint64_t)(uintptr_t)calloc;
-        else if (!strcmp(nm, "realloc"))       target = (uint64_t)(uintptr_t)realloc;
-        else if (!strcmp(nm, "free"))          target = (uint64_t)(uintptr_t)free;
-        else if (!strcmp(nm, "aligned_alloc")) target = (uint64_t)(uintptr_t)aligned_alloc;
-        else                                   target = (uint64_t)(uintptr_t)sdk_ret0;
+        if      (!strcmp(nm, "malloc"))        { target = (uint64_t)(uintptr_t)malloc; n_libc++; }
+        else if (!strcmp(nm, "calloc"))        { target = (uint64_t)(uintptr_t)calloc; n_libc++; }
+        else if (!strcmp(nm, "realloc"))       { target = (uint64_t)(uintptr_t)realloc; n_libc++; }
+        else if (!strcmp(nm, "free"))          { target = (uint64_t)(uintptr_t)free; n_libc++; }
+        else if (!strcmp(nm, "aligned_alloc")) { target = (uint64_t)(uintptr_t)aligned_alloc; n_libc++; }
+        else {
+            void *p = k_sdk_lookup(nm);      // 自解析：命中本模块自己的导出
+            if (p) { target = (uint64_t)(uintptr_t)p; n_self++; }
+            else   { target = (uint64_t)(uintptr_t)sdk_ret0; n_ext++; }
+        }
         *(uint64_t *)(img + r_off) = target;
         n_sdk_plt++;
     }
     if (dm_ohos_map_image_seal(&g_k_s)) { klog("[sdk] ✗ 封 R+X 失败\n"); return -1; }
-    klog("[sdk] 已装载：base=%p RELATIVE %llu 条，导出 nn::os %d 个\n",
-         (void *)g_k_s.base, (unsigned long long)n_rel, g_n_sdk_os);
+    klog("[sdk] 已装载：base=%p RELATIVE %llu 条，导出 %d 个；PLT %llu 槽 = 自解析 %llu + libc %llu + 外部桩 %llu\n",
+         (void *)g_k_s.base, (unsigned long long)n_rel, g_n_sdk_os,
+         (unsigned long long)n_sdk_plt, (unsigned long long)n_self,
+         (unsigned long long)n_libc, (unsigned long long)n_ext);
     return 0;
 }
 
-static void *k_sdk_lookup(const char *nm) {
-    for (int i = 0; i < g_n_sdk_os; i++)
-        if (!strcmp(g_sdk_os[i].name, nm)) return (void *)(uintptr_t)g_sdk_os[i].addr;
-    return NULL;
-}
-// 第一批白名单：只开互斥量（Initialize/Lock/Unlock/TryLock）。
+// 第一批白名单：只开互斥量（Initialize/Lock/Unlock/TryLock/Finalize）。
 // 为什么只开它：它只用 ArbitrateLock/Unlock，不创建句柄、不碰线程；出问题也最容易回退。
 //
-// ⚠ np134（真机实证，**暂关**）：切到 sdk 的互斥量后崩在 sdk 自己的 **TLS 分配器**
-//   （patch 区 0x7ac308：`mrs x2,tpidrro_el0; add x2,x2,键页[K18]` 的 bump 分配）。
+// ⚠ np134（真机实证，暂关）：切到 sdk 的互斥量后崩在 sdk 自己的 TLS 分配器
+//   （patch 区 0x7ac308：apple 形态的 `mrs x2,tpidrro_el0; add x2,x2,键页[K18]` bump 分配）。
 //   原因：**宿主上 tpidrro_el0 是垃圾值**（读出来 = 0x8000000000000000 之类），
 //   main 不踩这条路径（它的 TLS 帮助函数从未被调），sdk 一调就撞。
-//   修法方向（下一轮）：改写器把 `mrs tpidrro_el0` 也改写成"从键页/KTLS 取 TSD 基址"，
-//   或宿主侧为 sdk 提供等价的 TLS 槽（nxnative 用 objmap 管理的就是这个）。
-//   在此之前保持关闭：装载/建表全部保留（零风险），只是不把导入切过去。
+// ✅ np136（2026-10-20，批次 B 激活）：三块拼图（① ohos 重改写 ② PLT 自解析
+//   ③ TLS 影子槽）已在批次 A 真机验证（行为零变化），**本批翻开白名单**——
+//   过滤式 `strstr(nm,"Mutex")` 经 main 导入清单实证只会命中这 5 个
+//   （Finalize/Lock/Unlock/Initialize/TryLockMutex；无 WaitConditionVariable 误伤，
+//   它的 mangle 名虽含 9MutexType 但 main 没导入它）。判据：g_nimpl_sdk=5、
+//   崩 0、InitializeMutex 的 344 次调用不再落宿主空转桩。
 static int k_sdk_bind_allowed(const char *nm) {
-    (void)nm;
-    return 0;      // ← np134：暂关。修好 TLS/tpidrro 问题后改回 !strncmp(...)&&strstr(...,"Mutex")
+    // np136 批次 B：只放行互斥量一族。误伤已排查（见上方注释：main 导入里含 "Mutex"
+    //   的 nn::os 符号恰好 5 个）；k_sdk_lookup 未命中会打「白名单符号未在 sdk 找到」告警。
+    return !strncmp(nm, "_ZN2nn2os", 9) && strstr(nm, "Mutex") != NULL;
 }
 
 static void exp_k(const char *files_dir, char *out, size_t cap, size_t *used) {
@@ -4070,9 +4231,27 @@ static void exp_k(const char *files_dir, char *out, size_t cap, size_t *used) {
         k_install_replace_hook(img, 0x9fa4c8, (void *)hook_rep_parse, "键解析·替身 0x9fa4c8（返全零对象）");
         // 解析派发（worker 的调用者，函数指针进来）：直接看它喂给构造函数的 x2
         k_install_hook(img, 0xa05fa4, (void *)hook_e30, "派发 0xa05fa4（看 x2）");
+        // ★ 崩溃点仪器（2026-10-20）：PostCalc 入口——本轮崩点就是它收到 NULL 句柄
+        //   （ldr x20,[x0] 读 0）。记录 x0 + x30(LR=调用方返回址)，见 hook_pcalc 注释。
+        k_install_hook(img, 0x103B1F0, (void *)hook_pcalc, "PostCalc 0x103b1f0 入口（NULL 句柄崩点）");
         // np133：装载 sdk（M1）。失败不致命：装载不了就全走宿主实现，行为与之前一致。
         if (k_load_sdk() != 0)
             klog("[sdk] 未装载（继续用宿主实现，行为不变）\n");
+        // np146：把 main 映像的 R+X 封区告知胶水层（写 guest 内存前的可写性判据）。
+        //   ⚠ 必须在写任何 guard 字节之前——否则拿 /proc/self/maps 兜底，
+        //   而本进程 maps 有上千行，缓冲区一截断就"查无此页"（np146 实测 27 个全被误判）。
+        //   封区两段：[0, text_end) 与 [patch_off, end)（见 map_image_ohos.c 的 seal）。
+        {
+            const uint64_t ranges[][2] = {
+                { 0,                    DM_IMG_MAIN_TEXT_END },
+                { DM_IMG_MAIN_PATCH_OFF, DM_IMG_MAIN_END      },
+            };
+            dm_sdk_set_sealed_ranges((uint64_t)(uintptr_t)img, ranges, 2);
+            klog("[封区] 已告知胶水层：[%#llx,%#llx) + [%#llx,%#llx)（基址 %p）\n",
+                 (unsigned long long)0, (unsigned long long)DM_IMG_MAIN_TEXT_END,
+                 (unsigned long long)DM_IMG_MAIN_PATCH_OFF,
+                 (unsigned long long)DM_IMG_MAIN_END, (void *)img);
+        }
         g_nplt = 0; g_plt_calls = 0;
         for (uint64_t off = 0; off + 24 <= DT_PLTRELSZ; off += 24) {
             uint64_t r_off  = *(uint64_t *)(img + DT_JMPREL + off);
@@ -4179,6 +4358,15 @@ static void exp_k(const char *files_dir, char *out, size_t cap, size_t *used) {
     sigemptyset(&sa.sa_mask);
     sigaction(SIGSEGV, &sa, &o1); sigaction(SIGBUS, &sa, &o2);
     sigaction(SIGILL, &sa, &o3);  sigaction(SIGTRAP, &sa, &o4);
+    {   // 诊断（2026-10-20）：我们的处理器真的装上了吗？OHOS musl 的 sigaction 包了一层
+        //   "信号链"——真实 disposition 是它自己的 signal_chain_handler，各处理器在链里
+        //   排队（hilog 见 MUSL-SIGCHAIN：signal_chain_handler 先跑两级、随后 DfxSignalHandler
+        //   接管落盘）。读回来看：真实 disposition 是谁、装之前的旧主（o1）是谁。
+        struct sigaction rb;
+        sigaction(SIGSEGV, NULL, &rb);
+        klog("[信号] 装后读回：SIGSEGV 真实 disposition=%p flags=%#x｜装之前的旧主=%p\n",
+             (void *)rb.sa_sigaction, rb.sa_flags, (void *)o1.sa_sigaction);
+    }
 
     g_k_hits = 0; g_k_faulted = 0; g_k_rv = 0;
     pthread_t th;
@@ -4203,6 +4391,8 @@ static void exp_k(const char *files_dir, char *out, size_t cap, size_t *used) {
     appf(out, cap, used, "  钉子8 runner 链：激活检查 %d 次 / 运行转发器 %d 次 / "
                          "runner 入口 %d 次 / 销毁 %d 次（明细见日志）\n",
          g_n_e9, g_n_e10, g_n_e11, g_n_e12);
+    appf(out, cap, used, "  PostCalc 崩点仪器：入口命中 %d 次（见 dm_run_test.log 的 [桩] PostCalc 行；"
+                         "崩前最后一条的 x30 即调用方返回址，离线 x30-4 反汇定位调用者）\n", g_n_pcalc);
     {
         int n = 0;
         for (int i = 0; i < DM_THREAD_MAX; i++) if (g_thr[i].game) n++;

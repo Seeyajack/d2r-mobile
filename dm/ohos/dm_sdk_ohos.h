@@ -31,6 +31,15 @@ void dm_sdk_set_log(void (*fn)(const char *, ...));
 int dm_sdk_call(const char *sym, uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3,
                 uint64_t *ret);
 
+// C++ 静态局部对象初始化守卫（__cxa_guard_*）的统计摘要。
+// 探针在**游戏自己的帧线程**上调用（仪器铁律：观测绝不挂宿主线程）。
+void dm_sdk_guard_report(void);
+
+// 注入主映像的 R+X 封区（写 guest 内存前的可写性判据之一，见实现注释）。
+// base = 映像运行期基址；ranges[i] = { 映像内偏移 lo, hi }，左闭右开。
+// 不注入也能工作（退化为只认 /proc/self/maps，查不到则放行），但注入后判断更准。
+void dm_sdk_set_sealed_ranges(uint64_t base, const uint64_t (*ranges)[2], int n);
+
 #ifdef __cplusplus
 }
 #endif
