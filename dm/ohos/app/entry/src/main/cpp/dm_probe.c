@@ -633,8 +633,13 @@ static void gate_fault_handler(int sig, siginfo_t *si, void *uc_) {
     if (g_probe_thr_set && !pthread_equal(pthread_self(), g_probe_thr)) {
         LOG("【红】客人线程出错：pc=%#llx sig=%d si_addr=%#llx —— 不跨线程 longjmp，退出判读",
             (unsigned long long)g_gate_fault_pc, sig, (unsigned long long)g_gate_fault_addr);
-        death_note("客人线程出错(_exit 140)", g_gate_fault_pc, g_gate_fault_addr, sig);
-        _exit(140);
+        death_note("客人线程出错", g_gate_fault_pc, g_gate_fault_addr, sig);
+        // ⭐ np164 实验：**只让这个工人线程停住，不杀进程**。
+        //   理由：np163 实证死因是"工人线程跑任务时源指针空"（对象 +0x180 = 0）。
+        //   若主线不依赖这个工人，进程就能继续走 ⇒ 用"worker 静默死亡"换主线存活，
+        //   把"一个工人崩 = 整个游戏死"降级成"一个工人崩 = 一个任务丢"。
+        //   风险：该线程若持着客体锁，主线程会卡在那把锁上（届时死亡笔记+trace 仍在）。
+        for (;;) pause();
     }
     if (!g_gate_armed) {
         // 未武装段（尾跳补丁循环等）出段错误：先打日志再退出——PC 落在 hilog 里供定位
@@ -1798,6 +1803,10 @@ static uint64_t plt_stub(void) {
             static _Thread_local uint64_t tls_shadow[0x40];
             if (!tls_shadow[0xb0 / 8])
                 tls_shadow[0xb0 / 8] = (uint64_t)(uintptr_t)&g_alloc_obj[0];
+            // np164：**[+0x60] 也必须是"当前线程分配器"**（死亡笔记实证：0x16339e4 取
+            //   [tls+0x60] 当分配器，调其虚表 +0x10 的 allocate(0x28)；空 ⇒ 崩）。
+            if (!tls_shadow[0x60 / 8])
+                tls_shadow[0x60 / 8] = (uint64_t)(uintptr_t)&g_alloc_obj[0];
             return (uint64_t)(uintptr_t)&tls_shadow[0];
         }
         // 核掩码 / 栈信息 / 优先级 —— 影子语义，别让游戏拿到 0 而误判"没有可用核"
@@ -2211,6 +2220,22 @@ static uint64_t vtbl_slot16_size(void *self, void *arg) {
     (void)self; (void)arg;
     klog("[虚表] 第16槽(+0x80) 被调用 → 返回尺寸 0x1000\n");
     return 0x1000;
+}
+// np164：分配器虚表 +0x10（槽 2）= **按尺寸分配**。
+// 依据（真机死亡笔记 + 反汇编）：0x16339e4 `GetTlsValue(slot)` → `[ret+0x60]`（空）
+//   → 期望是"当前线程分配器"；0x16339f0 处 `ldr x8,[obj]; ldr x8,[x8,#0x10];
+//   w1=0x28; blr x8` ⇒ 调虚表 +0x10 的 allocate(size)，返回值被当对象指针
+//   （随后 `stp xzr,xzr,[x19,#0x18]` 清零对象头）。
+//   旧表全铺 vtbl_fallback（返 0）⇒ allocate 返 0 ⇒ 写 [0+0x18] 二次崩。
+static uint64_t vtbl_slot2_alloc(void *self, uint64_t size) {
+    (void)self;
+    size_t n = (size_t)size;
+    if (n == 0 || n > 0x1000000) n = 0x40;      // 异常尺寸兜底
+    void *p = calloc(1, n);
+    static int nlog;
+    if (++nlog <= 8)
+        klog("[虚表] 第2槽(+0x10) allocate(%llu) → %p\n", (unsigned long long)size, p);
+    return (uint64_t)(uintptr_t)p;
 }
 #define DM_ALLOC_VTBL_QWORDS 0x40          // 0x200 字节：够覆盖游戏翻到的 +0xd0
 static uint64_t g_alloc_vtbl[DM_ALLOC_VTBL_QWORDS];   // 虚表：槽 6（+0x30）= host_alloc，槽 17（+0x88）见上
@@ -3899,6 +3924,7 @@ static void k_hook_all_branchers(uint8_t *img, uint32_t target_off, void *host_f
 static void k_inject_heap(uint8_t *img) {
     for (int i = 0; i < DM_ALLOC_VTBL_QWORDS; i++)
         g_alloc_vtbl[i] = (uint64_t)(uintptr_t)&vtbl_fallback;   // 先全铺兜底（记录调用点、返回 0）
+    g_alloc_vtbl[2]  = (uint64_t)(uintptr_t)&vtbl_slot2_alloc;    // +0x10 按尺寸分配（np164）
     g_alloc_vtbl[6]  = (uint64_t)(uintptr_t)&host_alloc;         // +0x30 分配内存
     g_alloc_vtbl[16] = (uint64_t)(uintptr_t)&vtbl_slot16_size;   // +0x80 报尺寸 ⇒ 0x1000
     g_alloc_vtbl[17] = (uint64_t)(uintptr_t)&vtbl_slot17_ok;     // +0x88 当 bool 用 ⇒ 返 1
