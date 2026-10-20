@@ -1865,24 +1865,24 @@ static uint64_t plt_stub(void) {
             //   ★ 借游戏自己的帧线程打（仪器铁律：观测绝不挂宿主线程）。
             //   判据：**"重跑"计数应恒为 0**；"我初始化"应 ≈ "不同 guard"。
             if (tick == 20 || tick % 200 == 0) dm_sdk_guard_report();
-            // np103：定期读"变体表"（0x22dce70）的状态——#206 查它拿到空指针。
-            //   看三样：+0x18 缓存指针、缓存内容前 16 字节、+0x48 计数。
-            //   若计数=2（初始化器跑过）而缓存内容全 0 ⇒ "建了表但没人填内容"。
+            // np103（P0-8 修正读偏移，2026-10-20）：0x22dce70 是**带双层 guard 的静态局部对象**，
+            //   真实布局（§1.7.2 符号级闭环，勿再改）：+0x00 外层 guard 字节 / +0x08 载荷（两个 u32）
+            //   / +0x10 内层 guard 字节 / +0x48 条目数（代码写死的 2，**不是运行计数**）
+            //   / +0x50 表项指针（初始化器写完指向 tbl+0x08）。
+            //   ⚠ 旧版读 tbl+0x18 当"缓存指针"是读错偏移 ⇒ "内容全 0"的旧结论作废（§1.7.2）。
+            //   guard 字节语义（P0-7 修复后）：0=FREE / 4=BUSY / 2=DONE ⇒ 2 ⇒ 初始化器确实跑过。
             if (tick % 400 == 100) {
                 uint64_t b2 = (uint64_t)(uintptr_t)g_k_m.base;
                 if (b2) {
                     const uint8_t *tbl = (const uint8_t *)(uintptr_t)(b2 + 0x22dce70);
-                    uint64_t cache = *(const uint64_t *)(uintptr_t)(tbl + 0x18);
+                    uint8_t g_out = tbl[0x00], g_in = tbl[0x10];
+                    uint32_t p0 = *(const uint32_t *)(uintptr_t)(tbl + 0x08);
+                    uint32_t p1 = *(const uint32_t *)(uintptr_t)(tbl + 0x0c);
                     uint32_t cnt = *(const uint32_t *)(uintptr_t)(tbl + 0x48);
-                    char hex[80]; size_t u = 0;
-                    if (cache > 0x10000ull && cache < 0x800000000000ull) {
-                        const uint8_t *c = (const uint8_t *)(uintptr_t)cache;
-                        for (int i = 0; i < 16 && u + 3 < sizeof hex; i++)
-                            u += (size_t)snprintf(hex + u, sizeof hex - u, "%02x", c[i]);
-                    }
-                    hex[u] = 0;
-                    klog("[变体表] tick=%u 计数=%u 缓存=%#llx 内容[%s]\n",
-                         tick, cnt, (unsigned long long)cache, hex);
+                    uint64_t item = *(const uint64_t *)(uintptr_t)(tbl + 0x50);
+                    klog("[变体表] tick=%u guard[out=%u in=%u] 载荷={%#x,%#x} 条目=%u 表项指针=%#llx%s\n",
+                         tick, g_out, g_in, p0, p1, cnt, (unsigned long long)item,
+                         item == (uint64_t)(uintptr_t)(tbl + 0x08) ? "（自指 tbl+0x08，符合预期）" : "");
                     // np103b：字符串对象(0x22dcdf0)的虚表来自 *(0x22828b0)+0x10——
                     //   若那又是我们的假堆/替身虚表 ⇒ 虚调用全返 0 ⇒ 字符串永远空（根因实锤）。
                     uint64_t g28 = *(const uint64_t *)(uintptr_t)(b2 + 0x22828b0);
