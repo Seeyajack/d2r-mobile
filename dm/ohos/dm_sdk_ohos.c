@@ -5,6 +5,7 @@
 #include <stddef.h>
 #include <stdio.h>
 #include <string.h>
+#include <sched.h>
 
 static void (*g_log)(const char *, ...);
 void dm_sdk_set_log(void (*fn)(const char *, ...)) { g_log = fn; }
@@ -356,7 +357,12 @@ static uint64_t os_convert_timespan(uint64_t tick) {
     return (uint64_t)tick * 625u / 12u;
 }
 static uint64_t os_sleep(uint64_t ns) {
-    if (!ns) return 0;
+    // ⭐ np174（2026-10-21）：`SleepThread(TimeSpan(0))` 在 NX 上的语义是**让出剩余时间片**
+    //   （yield），不是空操作。游戏的空闲/等待环正是 `ConvertToTimeSpan(0) → SleepThread(0)`；
+    //   返回 0 让它退化成**纯自旋**——np173 真机实证：轨迹丢弃 27,185,391 条、线程快照里
+    //   多个线程 state=R、主线程也是 R 却不再调任何导入（CPU 被空转抢光）。
+    //   ⇒ ns==0 走 sched_yield()。这是"宿主语义对齐"，换任何游戏都成立。
+    if (!ns) { sched_yield(); return 0; }
     {   // np79：看游戏到底要睡多久（前 20 次 + 任何 >100ms 的都记）
         static int n;
         if (n < 20 || ns > 100000000ull) {
