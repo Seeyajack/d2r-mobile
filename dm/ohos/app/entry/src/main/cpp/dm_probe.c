@@ -1014,8 +1014,8 @@ static void klog_mu_init(void) {
 //   文件通道 ≤400KB、hilog 通道 ≤4000 行；用完各打一条"预算用尽"然后静默。
 //   诊断期（启动链/前 400KB）信息完整，之后游戏不再被我们的日志拖住。
 //   模式：0=文件+hilog（默认） 1=只 hilog 2=全静默（只计数）。
-#define DM_LOG_FILE_BUDGET (400u * 1024u)
-#define DM_LOG_HILOG_LINES 4000u
+#define DM_LOG_FILE_BUDGET (1536u * 1024u)
+#define DM_LOG_HILOG_LINES 12000u
 static int g_klog_mode;
 static void klog(const char *fmt, ...) {
     if (!g_k_log) return;
@@ -1803,10 +1803,13 @@ static uint64_t plt_stub(void) {
             static _Thread_local uint64_t tls_shadow[0x40];
             if (!tls_shadow[0xb0 / 8])
                 tls_shadow[0xb0 / 8] = (uint64_t)(uintptr_t)&g_alloc_obj[0];
-            // np164：**[+0x60] 也必须是"当前线程分配器"**（死亡笔记实证：0x16339e4 取
-            //   [tls+0x60] 当分配器，调其虚表 +0x10 的 allocate(0x28)；空 ⇒ 崩）。
+            // np167 实验：**暂时回退 [+0x60] 补口**——np159/np161（未补）实体到 #35，
+            //   np164+（补了）只到 #9 ⇒ 怀疑填分配器改变了另一条路径行为。
+            //   若回退后实体回到 #35，则 [+0x60] 的正确值不是分配器（另有语义）。
+#if 0
             if (!tls_shadow[0x60 / 8])
                 tls_shadow[0x60 / 8] = (uint64_t)(uintptr_t)&g_alloc_obj[0];
+#endif
             return (uint64_t)(uintptr_t)&tls_shadow[0];
         }
         // 核掩码 / 栈信息 / 优先级 —— 影子语义，别让游戏拿到 0 而误判"没有可用核"
@@ -2774,7 +2777,7 @@ static uint64_t hook_e2(uint64_t *f) {   // 分发调用方入口 0xa01790
     }
     // np158：第 4 次插入 = 停车边界 ⇒ 取全寄存器 + guest 栈，并给随后每个 0xa00a78
     // 命中武装（3×第17槽 序列就挂在它后面）。
-    if (g_n_e2 == 4) {
+    if (0 && g_n_e2 == 4) {   // np167：停用（突发写风险，现场已由死亡笔记承担）
         g_stall_arm = 4;
         g_s17_arm = 3;   // 随后 3 个第17槽 = 最后的客体动作，第 3 份即停车边界
         stall_dump(f, "第4次TaskHeap插入入口 0xa01790");
@@ -3248,6 +3251,38 @@ static uint64_t hook_rt_calc(uint64_t *f) {   // 0x726838 入口：x0 = RootTask
     }
     return 0;
 }
+// ⭐ np166：**缓冲源空 ⇒ 零页兜底**（影子数据范式，救活建任务的工人）。
+// 依据（死亡笔记 + 反汇编）：0x11e7a20（缓冲读）从 `[obj+0x180]` 取源指针，经
+//   csel 传给 0x11e8754（逐字节比较/拷贝循环，x0=目标、x1=源、w2=长度）；
+//   源指针为 0 ⇒ `ldrb w15,[x1,x10]` 崩（si_addr=0）。
+//   该工人是"建任务"的那个 ⇒ 它一死任务链永远空 ⇒ RootTask 不 calc ⇒ 不装载。
+// 修法（与"缺内容=空串/零页"的既有影子范式一致）：钩 0x11e8754 入口，
+//   源指针非法 ⇒ 换成静态零页、长度钳到零页大小 ⇒ 比较必然不相等（走"未命中"分支，
+//   语义最保守），工人不崩、任务链能建。零页数据不代表内容正确——只为越过这一关。
+static uint8_t g_zero_src[0x10000];
+static int g_zsrc_n;
+static uint64_t hook_bufcopy(uint64_t *f) {
+    uint64_t src = f[FR_X1];
+    if (!src || src < 0x10000ull) {
+        f[FR_X1] = (uint64_t)(uintptr_t)g_zero_src;
+        if (f[FR_X2] > (uint64_t)sizeof g_zero_src) f[FR_X2] = (uint64_t)sizeof g_zero_src;
+        if (++g_zsrc_n <= 8) {
+            klog("[零页] ★ 0x11e8754 源指针=%#llx 非法 ⇒ 换零页（长度钳 %llu，第 %d 次）\n",
+                 (unsigned long long)src, (unsigned long long)f[FR_X2], g_zsrc_n);
+            // 绕过日志预算的专用写（崩溃点在 400KB 预算之后，普通日志看不到）
+            if (g_files_dir[0]) {
+                char line[200], p[600];
+                int n = snprintf(line, sizeof line, "零页#%d src=%#llx len=%llu\n", g_zsrc_n,
+                                 (unsigned long long)src, (unsigned long long)f[FR_X2]);
+                snprintf(p, sizeof p, "%s/dm_zero.txt", g_files_dir);
+                int fd = open(p, O_WRONLY | O_CREAT | O_APPEND, 0666);
+                if (fd >= 0 && n > 0) { (void)!write(fd, line, (size_t)n); close(fd); }
+            }
+        }
+    }
+    return 0;
+}
+
 static uint64_t hook_rt_mgr(uint64_t *f) {   // 0x726f60：phase2/phase4 的「建管理器」站点
     (void)f;
     if (++g_rt_mgr <= 4)
@@ -3264,6 +3299,35 @@ static uint64_t hook_rt_mgr(uint64_t *f) {   // 0x726f60：phase2/phase4 的「�
 //     · 钩子 0 次  ⇒ 编排没走到装载器（更早的分支/条件把它拦了）；
 //     · 内层=0     ⇒ 门对象没建（会在装载器里崩，或已被前置判断拦）；
 //     · 门字节≠0   ⇒ **主动跳过装载**（这就是 [fs] open 恒 0 的直接原因）。
+// np168：0xdb9284 内部两点探针（判断"建管理器之后是否走到装载编排"）。
+//   0xdb9960 = 装载编排入口；0xdb9a54 = 装载器调用点。两点都走**绕过预算**的专用写。
+static void note_append(const char *name, const char *line) {
+    if (!g_files_dir[0]) return;
+    char p[600];
+    snprintf(p, sizeof p, "%s/%s", g_files_dir, name);
+    int fd = open(p, O_WRONLY | O_CREAT | O_APPEND, 0666);
+    if (fd >= 0) { (void)!write(fd, line, strlen(line)); close(fd); }
+}
+static int g_orch_n, g_ldcall_n;
+static uint64_t hook_orch(uint64_t *f) {   // 0xdb9960：装载编排入口
+    if (++g_orch_n <= 8) {
+        char line[120];
+        snprintf(line, sizeof line, "编排入口#%d x0=%#llx\n", g_orch_n, (unsigned long long)f[FR_X0]);
+        klog("[编排] ★ 0xdb9960 进入 x0=%#llx\n", (unsigned long long)f[FR_X0]);
+        note_append("dm_gate.txt", line);
+    }
+    return 0;
+}
+static uint64_t hook_ldcall(uint64_t *f) {   // 0xdb9a54：装载器调用点
+    if (++g_ldcall_n <= 8) {
+        char line[120];
+        snprintf(line, sizeof line, "装载调用#%d x0=%#llx\n", g_ldcall_n, (unsigned long long)f[FR_X0]);
+        klog("[编排] ★ 0xdb9a54 装载器调用点 x0=%#llx\n", (unsigned long long)f[FR_X0]);
+        note_append("dm_gate.txt", line);
+    }
+    return 0;
+}
+
 static int g_ld_gate;
 static uint64_t hook_loader(uint64_t *f) {
     if (++g_ld_gate <= 6) {
@@ -4201,7 +4265,7 @@ static void *k_thread(void *arg) {
     //   深跑是当年为定位 0x1f8 崩点插的探针，使命已完成（结论见 §1.6/§1.7），
     //   继续开着只有负价值：崩溃 + 状态污染 + 掩盖真实流程。
     // 如需复活做实验，取消下面注释即可。
-#if 0
+#if 1   // np167 实验：恢复深跑，验证其副作用是否是"实体#35/RootTask calc"的前置条件
     // 更深一站：模块的第一个真实功能函数 0x1f8（C++ 对象工厂：读数据槽 → 分配 0xaa0 → 构造）
     g_k_stage = "工厂 0x1f8";
     klog("=== 深跑：0x1f8（对象工厂，x0 = 注入的管理器对象）===\n");
@@ -4556,6 +4620,10 @@ static void exp_k(const char *files_dir, char *out, size_t cap, size_t *used) {
         k_install_hook(img, 0x726f60, (void *)hook_rt_mgr, "RootTask 建管理器站点 0x726f60");
         // np165：装载器入口探针（门三层值）——见 hook_loader 注释
         k_install_hook(img, 0xd5b694, (void *)hook_loader, "装载器入口 0xd5b694（启动包门）");
+        // np166：缓冲源空 ⇒ 零页兜底（救活建任务的工人）——见 hook_bufcopy 注释
+        k_install_hook(img, 0x11e8754, (void *)hook_bufcopy, "缓冲比较/拷贝 0x11e8754（源空兜底）");
+        k_install_hook(img, 0xdb9960, (void *)hook_orch, "装载编排入口 0xdb9960");
+        k_install_hook(img, 0xdb9a54, (void *)hook_ldcall, "装载器调用点 0xdb9a54");
         k_install_hook(img, 0x7277ec, (void *)hook_rt_ctor, "RootTask 构造 0x7277ec");
         // np113：查"建出来就被销毁"（见 hook_list_ins/hook_task_exit 的注释）
         //   ⚠ 0xa01fe0 已由 hook_e11 挂着（同一站点不能挂两次），那边加了调用计数与 [+0xe0] 表。
