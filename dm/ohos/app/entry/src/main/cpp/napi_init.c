@@ -343,6 +343,15 @@ static napi_value RunVkPaceTest(napi_env env, napi_callback_info info) {
     return ret;
 }
 
+static napi_value RunThreadProbe(napi_env env, napi_callback_info info) {
+    // np151：线程状态快照（stat/wchan/syscall）——主线程停车点的内核级取证。
+    // 由 ArkTS 侧 setInterval 每 2 秒调；报告直接进 filesDir/dm_run_test.log。
+    dm_probe_thread_probe();
+    napi_value ret = NULL;
+    napi_create_string_utf8(env, "ok", NAPI_AUTO_LENGTH, &ret);
+    return ret;
+}
+
 static napi_value Init(napi_env env, napi_value exports) {
     // 取 ArkUI 传进来的 XComponent 实例并注册回调（照 dm/ohos/front_ohos.c 的写法）
     napi_value exportInstance = NULL;
@@ -363,6 +372,7 @@ static napi_value Init(napi_env env, napi_value exports) {
 
     napi_property_descriptor desc[] = {
         { "runProbes",      NULL, RunProbes,      NULL, NULL, NULL, napi_default, NULL },
+        { "runThreadProbe", NULL, RunThreadProbe, NULL, NULL, NULL, napi_default, NULL },
         { "runVkProbe",     NULL, RunVkProbe,     NULL, NULL, NULL, napi_default, NULL },
         { "runHostTests",   NULL, RunHostTests,   NULL, NULL, NULL, napi_default, NULL },
         { "runVkSmoke",     NULL, RunVkSmoke,     NULL, NULL, NULL, napi_default, NULL },

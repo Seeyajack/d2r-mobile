@@ -4,6 +4,7 @@
 #include "dm_probe.h"
 
 #include <dlfcn.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <hilog/log.h>
@@ -963,6 +964,83 @@ static void klog(const char *fmt, ...) {
     pthread_mutex_unlock(&g_klog_mu);
 }
 
+// ═══ np151：线程快照（内核级等待点取证）═══
+// 背景（真机实证链）：np149/np150 证实主线程**硬阻塞**（25s vs 90s 日志逐项一致、
+// 轨迹环不环绕）；np151 插桩分析——PLT 等待族 0 打点、svc 同步层 0 调用、svc 门 0 命中
+// ⇒ 冻结点在**纯 guest 原生代码**里，宿主侧仪器全部失灵。
+// 取证换成内核视角：/proc/self/task/*/stat（线程状态）+ wchan（内核等待点）+
+// syscall（正在执行的系统调用号与参数）。同 uid ⇒ App 自己读一定可读；hdc shell
+// 是另一个 uid 读不了沙箱内进程 ⇒ 必须借一个**活着的宿主线程**来读——宿主 pthread
+// 永不被调度（仪器铁律 np26–29/np136）⇒ 借 ArkTS UI 线程 setInterval → NAPI 进来打。
+// 用法：ArkTS 每 2 秒调一次；只在探针运行期（g_k_log 开着）打，运行期外静默。
+int g_tick_tid;   // 帧线程 tid（首个 tick 记；快照里打 ←帧 标记）
+
+void dm_probe_thread_probe(void) {
+    if (!g_k_log) return;
+    // 节流：最多每 400ms 一份（工人每 250ms 醒一次；不节流多工人会重复打）
+    static struct timespec last;
+    struct timespec now_ts;
+    clock_gettime(CLOCK_MONOTONIC, &now_ts);
+    if (last.tv_sec && (now_ts.tv_sec - last.tv_sec) * 1000 +
+        (now_ts.tv_nsec - last.tv_nsec) / 1000000 < 400) return;
+    last = now_ts;
+    klog("[线程快照] =====\n");
+    DIR *d = opendir("/proc/self/task");
+    if (!d) { klog("[线程快照] 打不开 /proc/self/task\n"); return; }
+    struct dirent *de;
+    while ((de = readdir(d)) != NULL) {
+        const char *t = de->d_name;
+        if (t[0] < '0' || t[0] > '9') continue;
+        char p[128], line[2048];
+        char state = '?';
+        long cpu = 0;
+        // ① stat：取 state 与 utime+stime（") " 后第 12/13 个 token = 整体第 14/15 字段）
+        snprintf(p, sizeof p, "/proc/self/task/%s/stat", t);
+        FILE *f = fopen(p, "r");
+        if (f && fgets(line, sizeof line, f)) {
+            char *rp = strrchr(line, ')');
+            if (rp && rp[1] == ' ') {
+                state = rp[2];
+                long v[13]; int nv = 0;
+                char *q = rp + 2;
+                while (nv < 13) {
+                    while (*q == ' ') q++;
+                    if (*q < '0' || *q > '9') break;
+                    v[nv++] = strtol(q, &q, 10);
+                }
+                if (nv == 13) cpu = v[11] + v[12];   // utime + stime（ticks）
+            }
+        }
+        if (f) fclose(f);
+        // ② wchan：内核等待点（线程睡在哪个内核函数上）
+        char wc[80] = "(不可读)";
+        snprintf(p, sizeof p, "/proc/self/task/%s/wchan", t);
+        f = fopen(p, "r");
+        if (f) {
+            if (fgets(wc, sizeof wc, f)) {
+                char *nl = strpbrk(wc, "\r\n"); if (nl) *nl = 0;
+                if (!wc[0]) snprintf(wc, sizeof wc, "(空)");
+            }
+            fclose(f);
+        }
+        // ③ syscall：正在执行的系统调用（running 或 "N x0 x1 …"；睡在内核里时给出调用号与参数）
+        char sc[200] = "(不可读)";
+        snprintf(p, sizeof p, "/proc/self/task/%s/syscall", t);
+        f = fopen(p, "r");
+        if (f) {
+            if (fgets(sc, sizeof sc, f)) {
+                char *nl = strpbrk(sc, "\r\n"); if (nl) *nl = 0;
+                if (!sc[0]) snprintf(sc, sizeof sc, "(空)");
+            }
+            fclose(f);
+        }
+        klog("[线程快照] tid=%s%s state=%c cpu=%ld轮 wchan=%s syscall=%s\n",
+             t, (g_tick_tid && atoi(t) == g_tick_tid) ? "←帧线程" : "",
+             state, cpu, wc, sc);
+    }
+    closedir(d);
+}
+
 // ── NVN 最小空设备 + 按名字记账桩（2026-10-17 深夜，Task #9）──
 // 真机实证（np20）：游戏只从 nvnBootstrapLoader 取**两个**名字：nvnDeviceInitialize /
 // nvnDeviceGetProcAddress；其余 NVN 函数全走 GetProcAddress 按名字取。
@@ -1460,7 +1538,13 @@ static dm_mq_t *mq_get(void *q) {
         g_mq_key[i] = q;
         memset(&g_mq[i], 0, sizeof g_mq[i]);
         pthread_mutex_init(&g_mq[i].mu, NULL);
-        pthread_cond_init(&g_mq[i].cv_notempty, NULL);
+        // np154：显式 MONOTONIC 时钟——Receive 的定时醒来（线程快照采样）用单调时钟
+        // 算超时；默认属性的 cond 是 REALTIME，两者混用 = 超时永远不触发（np154 实测）。
+        pthread_condattr_t ca;
+        pthread_condattr_init(&ca);
+        pthread_condattr_setclock(&ca, CLOCK_MONOTONIC);
+        pthread_cond_init(&g_mq[i].cv_notempty, &ca);
+        pthread_condattr_destroy(&ca);
         pthread_cond_init(&g_mq[i].cv_notfull, NULL);
         pthread_mutex_unlock(&g_mq_reg);
         return &g_mq[i];
@@ -1687,7 +1771,23 @@ static uint64_t plt_stub(void) {
                          (unsigned long long)((lr >= b2 && lr < b2 + DM_IMG_MAIN_END) ? lr - b2 :
                                               (in_self ? lr - g_self_base : lr)));
                 }
-                while (q->n == 0) pthread_cond_wait(&q->cv_notempty, &q->mu);
+                while (q->n == 0) {
+                    // np155： timedwait 250ms 定时醒（原来无超时，一睡到底）。
+                    // 为什么改：主线程 = 跑游戏的线程，运行期没有任何活着的宿主线程能打点
+                    // ⇒ 线程快照取不到证。工人线程定时醒 = 一个**活着采样时钟**：醒来重扫
+                    // 队列（语义不变），并打一份线程快照（主线程停在内核里时，它的 wchan
+                    // 就在这里被抓到）。
+                    // ⚠ np153/np154 教训：① 超时用 1s 时，末段"工人刚阻塞→主线程随即停车"
+                    // 的间隔只有几十毫秒，根本等不到超时 ⇒ 缩到 250ms；
+                    // ② cv 必须显式 MONOTONIC 时钟（默认 REALTIME 与单调 deadline 混用 =
+                    // 超时永远不触发，np154 实测 0 份快照）。
+                    struct timespec dl;
+                    clock_gettime(CLOCK_MONOTONIC, &dl);
+                    dl.tv_nsec += 250000000l;
+                    if (dl.tv_nsec >= 1000000000l) { dl.tv_sec++; dl.tv_nsec -= 1000000000l; }
+                    pthread_cond_timedwait(&q->cv_notempty, &q->mu, &dl);
+                    if (q->n == 0) dm_probe_thread_probe();
+                }
             }
             uint64_t v = q->buf[q->head];
             q->head = (q->head + 1) % q->cap;
@@ -1852,6 +1952,8 @@ static uint64_t plt_stub(void) {
         if (!strcmp(nm, "_ZN2nn2os17ConvertToTimeSpanENS0_4TickE")) {
             static unsigned tick;
             if (++tick % 20 == 0) nvn_family_report("帧线程");
+            // np151：记下帧线程 tid（线程快照里打 ←帧线程 标记；主线程停车取证用）
+            if (!g_tick_tid) g_tick_tid = (int)gettid();
             // np111：借游戏自己的帧线程定期 dump RootTask 的阶段（P0-2）。
             //   第 20 帧一次（早看），之后每 200 帧一次（看是否卡住）。
             if (tick == 20 || tick % 200 == 0) rt_dump("周期");
@@ -1865,6 +1967,10 @@ static uint64_t plt_stub(void) {
             //   ★ 借游戏自己的帧线程打（仪器铁律：观测绝不挂宿主线程）。
             //   判据：**"重跑"计数应恒为 0**；"我初始化"应 ≈ "不同 guard"。
             if (tick == 20 || tick % 200 == 0) dm_sdk_guard_report();
+            // np150：svc 同步层"当前阻塞者"快照（有等待者才打）。
+            //   背景：np150 证实主线程 S 态停车而 PLT/dm_sdk 等待族 0 打点 ⇒ 冻结点
+            //   只可能在 svc 层（0x1A 锁仲裁 / 0x1C 进程级 key / 0x18 多对象）。
+            if (tick == 20 || tick % 200 == 0) dm_svc_sync_wait_report();
             // np103（P0-8 修正读偏移，2026-10-20）：0x22dce70 是**带双层 guard 的静态局部对象**，
             //   真实布局（§1.7.2 符号级闭环，勿再改）：+0x00 外层 guard 字节 / +0x08 载荷（两个 u32）
             //   / +0x10 内层 guard 字节 / +0x48 条目数（代码写死的 2，**不是运行计数**）
@@ -2196,20 +2302,73 @@ static void *ktrace_timer(void *arg) {
 }
 
 // 落盘：头部 32 字节（魔数/条数/丢失数/基址），随后是原始条目。离线用 tools/trace_view.py 读。
+//
+// ⚠⚠ np147/np148 真机缺陷（2026-10-20 晚修复，两轮实证）：
+//   原实现"每次 fopen('wb') 全量重写整个环"——np147 47001 条、np148 48000 条时，
+//   线程进 ktrace_dump 后**卡死在 fwrite 里再没出来**（日志最后一行 = 落盘点、
+//   文件 0 字节、mtime = fopen 截断时刻）。旁证：符号表 19KB 多次小写能成、
+//   日志 460KB 增量写能成、唯独 trace 的 ~1.1MB 单次写卡死 ⇒ 大写入在此环境不可靠。
+// 新版 = **增量 append**（对齐已被证明可行的小写入范式）：
+//   ① 首次 dump：建文件 + 写 32B 头（n 字段先写 0）；
+//   ② 每次水位：只 fwrite **新增条目**（≤500 条 ≈ 12KB）+ 在原地把头部 n 改成已写条数；
+//   ③ **永不截断、永不 rename** ⇒ 即使中途卡死，已写入部分完整保留；hdc file recv
+//      随时可抓、不与 dump 互斥；冻点永远在文件尾（ trace_view.py --tail 即得）。
+//   ⚠ 环绕回（n > KTRACE_N）后停止追加：文件只覆盖前 65536 条（早期窗口），
+//     真机冻结都发生在 48000 条内，够用；将来要滚动窗口再议。
+static pthread_mutex_t g_ktrace_dump_mu = PTHREAD_MUTEX_INITIALIZER;
+static FILE     *g_tr_fp;        // 常开句柄（首dump 建，之后只 append）
+static unsigned  g_tr_dumped;    // 已写入文件的条数
+
 static void ktrace_dump(const char *files_dir) {
     unsigned n = __atomic_load_n(&g_tr_n, __ATOMIC_RELAXED);
     unsigned lost = __atomic_load_n(&g_tr_lost, __ATOMIC_RELAXED);
-    if (n > KTRACE_N) n = KTRACE_N;
+    if (n > KTRACE_N) n = KTRACE_N;                      // 环就 65536 条，线性取前 N
     klog("[TRACE] 落盘：%u 条（环容量 %u，丢弃 %u）\n", n, KTRACE_N, lost);
-    char p[512];
+    if (!files_dir || !*files_dir || !g_tr) return;
+    pthread_mutex_lock(&g_ktrace_dump_mu);
+    char p[600];
     snprintf(p, sizeof p, "%s/dm_trace.bin", files_dir);
-    FILE *fp = fopen(p, "wb");
-    if (!fp) { klog("[TRACE] 打开 %s 失败\n", p); return; }
-    uint64_t hdr[4] = { 0x45434152544B4441ull /* "ADKT RACE" */, n, lost,
-                        (uint64_t)(uintptr_t)g_k_m.base };
-    fwrite(hdr, sizeof hdr, 1, fp);
-    if (n) fwrite(g_tr, sizeof *g_tr, n, fp);
-    fclose(fp);
+    if (!g_tr_fp) {
+        g_tr_fp = fopen(p, "wb");
+        if (!g_tr_fp) {
+            pthread_mutex_unlock(&g_ktrace_dump_mu);
+            klog("【红】[TRACE] 打开 %s 失败\n", p);
+            return;
+        }
+        uint64_t hdr[4] = { 0x45434152544B4441ull /* "ADKT RACE" */, 0, 0,
+                            (uint64_t)(uintptr_t)g_k_m.base };
+        if (fwrite(hdr, sizeof hdr, 1, g_tr_fp) != 1) {
+            fclose(g_tr_fp); g_tr_fp = NULL;
+            pthread_mutex_unlock(&g_ktrace_dump_mu);
+            klog("【红】[TRACE] 写头部失败 %s\n", p);
+            return;
+        }
+        g_tr_dumped = 0;
+        klog("[TRACE] 建轨迹文件 %s（增量 append 模式）\n", p);
+    }
+    unsigned add = n - g_tr_dumped;
+    if ((int)add < 0) add = 0;
+    if (add) {
+        // ① 头部 n 原地更新（8 字节小写，offset 8）——保持 trace_view.py 格式不变
+        uint64_t nn = (uint64_t)(g_tr_dumped + add);
+        if (fseek(g_tr_fp, 8, SEEK_SET) != 0 ||
+            fwrite(&nn, sizeof nn, 1, g_tr_fp) != 1 ||
+            // ② 追加新条目（走文件尾）
+            fseek(g_tr_fp, 0, SEEK_END) != 0 ||
+            fwrite(g_tr + g_tr_dumped, sizeof *g_tr, add, g_tr_fp) != add) {
+            pthread_mutex_unlock(&g_ktrace_dump_mu);
+            klog("【红】[TRACE] 追加失败（已写 %u + %u）\n", g_tr_dumped, add);
+            return;
+        }
+        g_tr_dumped = n;
+    }
+    if (fflush(g_tr_fp) != 0) {
+        pthread_mutex_unlock(&g_ktrace_dump_mu);
+        klog("【红】[TRACE] fflush 失败（已写 %u 条）\n", g_tr_dumped);
+        return;
+    }
+    pthread_mutex_unlock(&g_ktrace_dump_mu);
+    if (add) klog("[TRACE] 追加 %u 条 → 共 %u 条已落盘\n", add, g_tr_dumped);
 }
 
 // 站点指令搬进洞要重算 PC 相对位移：b / bl 是 imm26，b.cond / cbz / cbnz 是 imm19；

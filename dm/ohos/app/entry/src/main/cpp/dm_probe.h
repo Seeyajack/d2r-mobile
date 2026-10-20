@@ -17,3 +17,7 @@
 //            实验 B-3 要在里面造个文件试 mmap，用来判断
 //            「禁止可执行映射」是针对 bundle 目录还是所有应用文件。
 int dm_probe_run(const char *files_dir, char *out, size_t cap);
+
+// np151：线程快照（读 /proc/self/task/*/{stat,wchan,syscall}，只在探针运行期打日志）。
+// 由 ArkTS setInterval 每 2 秒调一次——宿主 pthread 永不被调度，只能借 UI 线程进来。
+void dm_probe_thread_probe(void);

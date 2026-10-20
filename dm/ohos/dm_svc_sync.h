@@ -6,10 +6,10 @@
 //       0x1A ArbitrateLock / 0x1B ArbitrateUnlock /
 //       0x1C WaitProcessWideKeyAtomic / 0x1D SignalProcessWideKey
 //
-// 现状：**已接线但尚未启用**。main 的 nn::os 仍走宿主实现（导入层 pthread），
-//   所以这些 svc 号目前没人调 ⇒ 接线本身零风险。等切到 sdk 自带的 nn::os 时才会用到。
-// Status: wired but not yet exercised. main's nn::os still uses the host implementation, so these
-// svc numbers are unused for now; they come into play once we switch to the SDK's own nn::os.
+// 现状（2026-10-20 np150 更正）：M1 切到 sdk 自带 nn::os 后**已实际启用**——
+//   sdk 的互斥量/事件/条件变量就站在这些 svc 原语上（main 的锁竞争经 ArbitrateLock
+//   落到本层）。头注曾写"尚未启用"，那是 import 层 pthread 时代的旧认知，已作废。
+// Status: exercised since M1 — the SDK's own nn::os sits on these primitives.
 #pragma once
 
 #include <stdint.h>
@@ -25,6 +25,9 @@ void dm_svc_sync_init(void);
 
 // 分派：返回 1 = 已处理（*ret 即 regs[0] 的返回值），0 = 不归本层管。
 int dm_svc_sync_dispatch(int num, uint64_t *regs, uint64_t *ret);
+
+// 当前阻塞者快照（np150）：帧线程 tick 调用；有等待者才打日志。
+void dm_svc_sync_wait_report(void);
 
 #ifdef __cplusplus
 }

@@ -81,9 +81,41 @@ static int64_t now_ns(void) {
 
 // 入链 → 等（可带超时）→ 出链。返回 res（0=被正常唤醒；-1=超时；-2=取消）。
 // 调用时**不持 G**。
+//
+// ⭐ np150 打点（2026-10-20 晚，P0-2 同款成对日志）：真机实证主线程 S 态停车、
+//   全进程 9 ticks CPU，而 PLT 等待族/dm_sdk 等待族**零打点**、svc 门 0 命中
+//   ⇒ 冻结点只可能在**本层**（svc 0x1A 锁仲裁 / 0x1C 进程级 key / 0x18 多对象）。
+//   本层此前 SLOG 定义了却从未用过 ⇒ 一整层阻塞路径不可见。
+//   打法：进入前打（kind/addr/key/tag/超时 + 当前锁字），唤醒后打（res + 耗时）。
+//   判读：**有进入无离开 = 主线程冻在这次 svc 等待上**；kind=1 时锁字低 30 位
+//   就是持锁者 tag，可直接对现场。
+//   附带暴露一个**丢唤醒竞态**嫌疑（见 0x1A 注释）：先写锁字再入队，中间的放锁
+//   会把本等待者永久漏掉——若日志出现 kind=1 无离开且锁字已被别人持有，即实锤。
+// ── 锁字：owner_handle（低 30 位） | 有等待者 0x40000000 ────────────────
+#define WAITERS_BIT 0x40000000u
+static inline uint32_t ld32(uint64_t a) { return *(volatile uint32_t *)(uintptr_t)a; }
+static inline void st32(uint64_t a, uint32_t v) { *(volatile uint32_t *)(uintptr_t)a = v; }
+
+static int g_n_svcwait;
+static int svcwait_log_ok(void) {
+    int n = ++g_n_svcwait;
+    return n <= 200 || (n % 50) == 0;
+}
+
 static int64_t wait_block(waiter_t *w, int kind, uint64_t addr, uint64_t key,
                           uint32_t tag, int64_t timeout_ns) {
     pthread_once(&g_once, waiter_once);
+    int log_it = svcwait_log_ok();
+    int64_t t0 = 0;
+    if (log_it) {
+        t0 = now_ns();
+        uint32_t lw = (kind == 1 && addr) ? ld32(addr) : 0;
+        SLOG("[svc-等] 阻塞进入 kind=%d（1锁/2键/4多对象）addr=%#llx key=%#llx tag=%#x "
+             "超时=%lld 锁字=%#x%s\n",
+             kind, (unsigned long long)addr, (unsigned long long)key, tag,
+             (long long)timeout_ns, lw,
+             (kind == 1 && lw && lw != (tag | WAITERS_BIT)) ? "（锁被他人持有）" : "");
+    }
     pthread_mutex_lock(&G);
     w->kind = kind; w->addr = addr; w->key = key; w->tag = tag;
     w->res = 1; w->cancel = 0; w->hit = -1;
@@ -107,6 +139,10 @@ static int64_t wait_block(waiter_t *w, int kind, uint64_t addr, uint64_t key,
     w->next = NULL;
     int64_t r = w->res;
     pthread_mutex_unlock(&G);
+    if (log_it)
+        SLOG("[svc-等] 阻塞离开 kind=%d addr=%#llx key=%#llx res=%lld 耗时=%lld ms\n",
+             kind, (unsigned long long)addr, (unsigned long long)key,
+             (long long)r, (long long)((now_ns() - t0) / 1000000));
     return r;
 }
 
@@ -135,11 +171,6 @@ static int has_more_locked(int kind, uint64_t addr) {
         if (w->kind == kind && w->addr == addr) return 1;
     return 0;
 }
-
-// ── 锁字：owner_handle（低 30 位） | 有等待者 0x40000000 ────────────────
-#define WAITERS_BIT 0x40000000u
-static inline uint32_t ld32(uint64_t a) { return *(volatile uint32_t *)(uintptr_t)a; }
-static inline void st32(uint64_t a, uint32_t v) { *(volatile uint32_t *)(uintptr_t)a = v; }
 
 // 解锁：无等待者清零；有等待者**直接把锁交给队首**（handoff，不是唤醒后抢）
 static void unlock_handoff_locked(uint64_t addr) {
@@ -174,6 +205,24 @@ void dm_svc_sync_init(void) {
     pthread_once(&g_once, waiter_once);
     static __thread int done;
     if (!done) { done = 1; pthread_cond_init(&t_w.cv, NULL); }
+}
+
+// ═══ 当前阻塞者快照（np150）：帧线程 tick 调用，有等待者才打 ═══
+// 判读：主线程活着但某个工人卡在锁/key 上时，一眼看到"谁在等什么"；
+//   若主线程自己冻在 wait_block，成对日志（进入无离开）已覆盖，这里只在
+//   tick 线程仍存活时有意义。
+void dm_svc_sync_wait_report(void) {
+    pthread_mutex_lock(&G);
+    int n = 0;
+    for (waiter_t *w = g_wait; w; w = w->next) {
+        n++;
+        SLOG("[svc-等] 当前阻塞者 kind=%d（1锁/2键/4多对象）addr=%#llx key=%#llx "
+             "tag=%#x seq=%llu\n",
+             w->kind, (unsigned long long)w->addr, (unsigned long long)w->key,
+             w->tag, (unsigned long long)w->seq);
+    }
+    pthread_mutex_unlock(&G);
+    if (n) SLOG("[svc-等] 共 %d 个当前阻塞者\n", n);
 }
 
 // ── svc 分派 ──────────────────────────────────────────────────────────

@@ -54,6 +54,27 @@ struct Index {
   @State testFilter: string = '';
   // 历史探针（已跑完、留着做回归用）默认收起 —— 找按钮不用再划来划去。
   @State showHistory: boolean = false;
+  // np151：线程快照定时器。宿主 pthread 永不被调度（仪器铁律），只能借 UI 线程的
+  // setInterval 每 2 秒进原生侧读 /proc/self/task/*/{stat,wchan,syscall}——
+  // 主线程 S 态停车的 kernel 级等待点取证（运行期外 C 侧自动静默）。
+  private threadTimer: number = -1;
+
+  aboutToAppear(): void {
+    this.threadTimer = setInterval(() => {
+      try {
+        dmprobe.runThreadProbe();
+      } catch (err) {
+        // 快照失败不能影响探针本身；静默（真机上看 dm_run_test.log 有没有 [线程快照] 行即可判断）。
+      }
+    }, 2000);
+  }
+
+  onPageHide(): void {
+    if (this.threadTimer >= 0) {
+      clearInterval(this.threadTimer);
+      this.threadTimer = -1;
+    }
+  }
 
   // ---- 当前测试：常驻置顶。换测试项只改这一段 ----
   @Builder
