@@ -18,6 +18,7 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <time.h>
+#include <ucontext.h>
 #include <unistd.h>
 
 #include "dm.h"                 // module_t
@@ -1428,20 +1429,165 @@ static void gate_dump_fault(const char *where) {
     nvn_api_summary(where);
     klog("=== 现场结束 ===\n");
 }
+// ⭐ np177：**per-thread 门命中取证**。为什么要：np175/176 之后卡点变成"主线程在 guest/ sdk
+//   代码里打转、该区间零 SDK 调用"，普通环形轨迹分不清"guest 自旋"还是"sdk 内部自旋"。
+//   而 sdk 的内部同步（自解析、走 svc 门）若在原地等，一定会**踩门**——按线程记账就能分辨：
+//   · 主线程行 n 高速增长 ⇒ sdk 内部自旋（门桩返回 0 = 立刻返回 ⇒ 等不到就重试）；
+//   · 主线程行 n 不涨    ⇒ 纯 guest 代码自旋（下一步只能上采样器取 PC）。
+typedef struct { uint32_t tid; uint32_t n; uint64_t lr[4]; } gate_thr_t;
+static gate_thr_t g_gthr[24];
+static uint32_t g_main_pthread;        // nnMain 所在线程（在"终站：nnMain"处登记）
+
 static uint64_t k_gate_stub(void) {
     uint64_t lr; __asm__ volatile("mov %0, x30" : "=r"(lr));
     if (g_k_hits < 16) g_k_hit_lr[g_k_hits] = lr;
     g_k_hits++;
+    // 无锁登记：并发下最多丢几条，够判"谁在踩门"（不进任何锁，避免把门本身变成卡点）
+    uint32_t me = (uint32_t)(uintptr_t)pthread_self();
+    for (int i = 0; i < 24; i++) {
+        uint32_t t = __atomic_load_n(&g_gthr[i].tid, __ATOMIC_RELAXED);
+        if (t == 0) {
+            uint32_t expect = 0;
+            if (__atomic_compare_exchange_n(&g_gthr[i].tid, &expect, me, 0,
+                                            __ATOMIC_RELAXED, __ATOMIC_RELAXED)) t = me;
+            else if (expect != me) continue;
+        }
+        if (t == me) {
+            uint32_t k = g_gthr[i].n & 3u;
+            g_gthr[i].lr[k] = lr;
+            __atomic_store_n(&g_gthr[i].n, g_gthr[i].n + 1u, __ATOMIC_RELAXED);
+            break;
+        }
+    }
     return 0;   // 首跑：先一律"无事发生"（0），看流程能走多远
 }
 // np136（批次 B）：门观测桩命中快照。挂在 nnMain 调用前 + trace 定时器里——
 //   判互斥量实现是否踩 svc 门（ArbitrateLock 等）。命中 0 = 纯用户态自旋链路走通；
 //   >0 则前 8 个返回点离线定位（注意 LR 可能落在 main 或 sdk 映像，按值域分辨）。
+// ⭐ np178：**主线程 PC 采样器**——"guest 代码里自旋"唯一能取到证据的仪器。
+//   为什么必须上它（np175–np177 实证）：主线程停在 `建/查#34「TextureArchiveWork」` 之后，
+//   该区间 **零 SDK 调用**（轨迹无记录）、**零等待打点**、**门命中总数 0**（np177 实测）
+//   ⇒ 它纯在 guest 指令流里打转；环形轨迹、门计数、等待打点全部看不见。
+//   做法：给 **nnMain 所在线程**挂 SIGPROF 定时器（20ms），handler 只把中断点的 pc/fp
+//   写进静态数组（async-signal-safe，不加锁不分配），由帧线程定期把直方图落到 dm_gate.txt。
+//   判读：直方图里那一两个 pc 就是"原地打转"的位置；配上 fp 可离线回溯。
+#define SMP_N 4096
+static volatile uint32_t g_smp_n;
+static uint64_t g_smp_pc[SMP_N];
+static uint64_t g_smp_fp[SMP_N];
+static int g_smp_started;
+static pthread_t g_main_pth;          // 主线程句柄（给 pthread_kill 定向投信号用）
+
+static void smp_handler(int sig, siginfo_t *si, void *uc_) {
+    (void)sig; (void)si;
+    ucontext_t *uc = (ucontext_t *)uc_;
+    uint32_t i = __atomic_fetch_add(&g_smp_n, 1u, __ATOMIC_RELAXED);
+    if (i < SMP_N) {
+        g_smp_pc[i] = (uint64_t)uc->uc_mcontext.pc;
+        g_smp_fp[i] = (uint64_t)uc->uc_mcontext.regs[29];
+    }
+}
+// 只装 handler；**不开定时器**——NDK 的 sigevent 不暴露 SIGEV_THREAD_ID，
+// 改成由帧线程 pthread_kill 定向投（样本一定落在主线程上，且不依赖宿主线程被调度）。
+static void smp_arm(void) {
+    if (g_smp_started) return;
+    g_smp_started = 1;
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_sigaction = smp_handler;
+    sa.sa_flags = SA_SIGINFO | SA_RESTART;
+    sigemptyset(&sa.sa_mask);
+    if (sigaction(SIGPROF, &sa, NULL) != 0) { klog("[采样] sigaction 失败\n"); return; }
+    klog("[采样] ✔ SIGPROF handler 已装（由帧线程定向投样）\n");
+}
+static void smp_kick(void) {
+    if (!g_smp_started || !g_main_pth) return;
+    // ⚠ 主线程自己也在走 tick 路径：它若自己 pthread_kill 自己，样本会全部落在
+    //   musl 的 `pthread_kill+0xa4`（svc 返回点）——np178 首轮 4096/4096 就这么废掉的。
+    if ((uint32_t)(uintptr_t)pthread_self() == g_main_pthread) return;
+    pthread_kill(g_main_pth, SIGPROF);
+}
+// np178：**maps 快照**。采样点落在映像外时，必须先知道它属于哪个 .so 才能反查符号。
+//   只记可执行段（r-xp）：行数可控，且足以判定"某地址属于哪个库、偏移多少"。
+static void dump_maps_once(void) {
+    if (!g_files_dir[0]) return;
+    FILE *fp = fopen("/proc/self/maps", "r");
+    if (!fp) return;
+    char p[600];
+    snprintf(p, sizeof p, "%s/dm_gate.txt", g_files_dir);
+    int fd = open(p, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fd < 0) { fclose(fp); return; }
+    char line[512];
+    int n = 0;
+    (void)!write(fd, "=== maps(r-xp) ===\n", 19);
+    while (fgets(line, sizeof line, fp) && n < 120) {
+        if (strstr(line, "r-xp")) { (void)!write(fd, line, strlen(line)); n++; }
+    }
+    close(fd);
+    fclose(fp);
+}
+static void smp_dump(const char *tag) {
+    if (!g_files_dir[0]) return;
+    uint32_t n = __atomic_load_n(&g_smp_n, __ATOMIC_RELAXED);
+    if (n > SMP_N) n = SMP_N;
+    char p[600], buf[900];
+    snprintf(p, sizeof p, "%s/dm_gate.txt", g_files_dir);
+    int fd = open(p, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fd < 0) return;
+    uint64_t b = (uint64_t)(uintptr_t)g_k_m.base;
+    uint64_t top[16] = {0}; uint32_t cnt[16] = {0}; int used = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        uint64_t pc = g_smp_pc[i];
+        int k, hit = -1;
+        for (k = 0; k < used; k++) if (top[k] == pc) { hit = k; break; }
+        if (hit < 0) {
+            if (used < 16) { hit = used++; top[hit] = pc; cnt[hit] = 0; }
+            else continue;                 // 表满：忽略新 pc（主热点早已入表）
+        }
+        cnt[hit]++;
+    }
+    int len = snprintf(buf, sizeof buf, "smp[%s] 样本=%u", tag, n);
+    for (int rank = 0; rank < 6; rank++) {
+        int best = -1;
+        for (int k = 0; k < used; k++) if (cnt[k] && (best < 0 || cnt[k] > cnt[best])) best = k;
+        if (best < 0) break;
+        len += snprintf(buf + len, sizeof buf - (size_t)len, " %u×%s%#llx",
+                        cnt[best], (top[best] >= b && top[best] < b + DM_IMG_MAIN_END) ? "img+" : "外",
+                        (unsigned long long)((top[best] >= b && top[best] < b + DM_IMG_MAIN_END)
+                                             ? top[best] - b : top[best]));
+        cnt[best] = 0;                      // 用过即清，避免重复
+    }
+    snprintf(buf + len, sizeof buf - (size_t)len, "\n");
+    (void)!write(fd, buf, strlen(buf));
+    close(fd);
+}
+
 static void k_gate_obs_dump(const char *tag) {
     klog("[门观测:%s] k_gate_stub 共命中 %d 次；前 8 个返回点：", tag, g_k_hits);
     for (int i = 0; i < 8 && i < g_k_hits; i++)
         klog(" %#llx", (unsigned long long)g_k_hit_lr[i]);
     klog("\n");
+}
+// np177：per-thread 门命中落 dm_gate.txt（绕过日志预算，任何时候都能拿到）。
+//   判读：主线程（带 ←main 标记）的 n 若持续增长 ⇒ 它在 sdk 内部踩门（自旋）；不涨 ⇒ 纯 guest 自旋。
+static void gate_thr_dump(const char *tag) {
+    if (!g_files_dir[0]) return;
+    char p[600], buf[1200];
+    snprintf(p, sizeof p, "%s/dm_gate.txt", g_files_dir);
+    int fd = open(p, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fd < 0) return;
+    int len = snprintf(buf, sizeof buf, "gate[%s] 总=%d\n", tag, g_k_hits);
+    for (int i = 0; i < 24; i++) {
+        uint32_t t = g_gthr[i].tid, n = g_gthr[i].n;
+        if (!t || !n) continue;
+        if (len > (int)sizeof buf - 220) break;
+        len += snprintf(buf + len, sizeof buf - (size_t)len, "  tid=%#x n=%u%s lr=%#llx %#llx\n",
+                        t, n, (t == g_main_pthread) ? " ←main" : "",
+                        (unsigned long long)g_gthr[i].lr[0],
+                        (unsigned long long)g_gthr[i].lr[1]);
+    }
+    (void)!write(fd, buf, (size_t)len);
+    close(fd);
 }
 // np143：单例 A/B/当前实例 创建时机观测（任意线程可调，帧线程上采到的是 nnMain 运行期）。
 //   依据：构造器 0x103ba34 尾部 AddRef(NULL) 定谳——它要 A（指针变量 @mem[0x232db98]，经指针槽
@@ -1707,6 +1853,24 @@ static uint64_t plt_stub(void) {
                 uint64_t b = (uint64_t)(uintptr_t)g_k_m.base;
                 snprintf(line, sizeof line, "lightev#%d lr=img+%#llx ev=%#llx\n", ++n,
                          (unsigned long long)(lr0 - b), (unsigned long long)a0);
+                note_append("dm_gate.txt", line);
+            }
+        }
+        // ⭐ np179：**空转循环的调用点**。SIGPROF 采样在本进程里始终拿不到样本（疑被掩码），
+        //   改用最直接的等价物：这两条导入是空闲环的"心跳"，把它们的**客体返回地址**
+        //   按首次出现各记一条 ⇒ 直接得到"哪个函数在转这个环"。
+        if (!strcmp(nm, "_ZN2nn2os17ConvertToTimeSpanENS0_4TickE") ||
+            !strcmp(nm, "_ZN2nn2os11SleepThreadENS_8TimeSpanE")) {
+            static uint64_t seen[8]; static int ns;
+            uint64_t off = lr0 - (uint64_t)(uintptr_t)g_k_m.base;
+            int dup = 0;
+            for (int i = 0; i < ns; i++) if (seen[i] == off) { dup = 1; break; }
+            if (!dup && ns < 8) {
+                char line[128];
+                seen[ns++] = off;
+                snprintf(line, sizeof line, "loopcall#%d src=%s img+%#llx\n", ns,
+                         (!strcmp(nm, "_ZN2nn2os17ConvertToTimeSpanENS0_4TickE")) ? "Convert" : "Sleep",
+                         (unsigned long long)off);
                 note_append("dm_gate.txt", line);
             }
         }
@@ -2142,6 +2306,11 @@ static uint64_t plt_stub(void) {
             // np136（批次 B）：同点位报门观测桩命中——宿主定时器线程永不被调度
             //   （仪器铁律），累计值看互斥量链路在主循环期踩不踩 svc 门。
             if (tick == 20 || tick % 200 == 0) k_gate_obs_dump("帧线程");
+            // np177：per-thread 门命中（写 dm_gate.txt，绕过预算）。判"主线程在 sdk 里自旋"还是"纯 guest 自旋"。
+            if (tick == 20 || tick % 1000 == 0) gate_thr_dump("帧线程");
+            // np178：主线程 PC 直方图（判"这在 guest 里哪一段打转"）——先投一枪再 dump
+            if (tick % 5 == 0) smp_kick();
+            if (tick == 20 || tick % 100 == 0) smp_dump("帧线程");
             // np143：nnMain 运行期采样单例 A/B —— 判"建 A/B 的初始化链"是否在 nnMain 段内跑。
             //   挂在帧线程（唯一确定会被调度、又确在 nnMain 运行期的线程）上。
             if (tick == 20 || tick % 200 == 0) k_ab_obs("帧线程");
@@ -2451,6 +2620,10 @@ static uint64_t ktrace_rec(uint64_t *f) {
         __atomic_fetch_add(&g_tr_lost, 1u, __ATOMIC_RELAXED);
     }
     ktrace_maybe_snapshot();
+    // np178b：**由任意"非主线程"的导入调用驱动采样**（主线程自己不投）。
+    //   为什么：tick 路径的 ConvertToTimeSpan 其实是主线程自己在调（np178 实证：采样归零），
+    //   而 worker 线程的 ReceiveMessageQueue 高频（万次级）⇒ 用它当采样时基。
+    if (!(i & 31u)) smp_kick();
     return 0;
 }
 
@@ -2479,6 +2652,7 @@ static void ktrace_maybe_snapshot(void) {
 static void ktrace_plt(int idx, uint64_t a0, uint64_t a1) {
     if (!g_tr) return;
     unsigned i = __atomic_fetch_add(&g_tr_n, 1u, __ATOMIC_RELAXED);
+    if (!(i & 63u)) smp_kick();     // np178b：worker 线程的导入调用驱动主线程采样
     if (i < KTRACE_N) {
         g_tr[i].off = KTRACE_PLT_MARK | (uint32_t)(idx < 0 ? 0xFFFFFF : (idx & 0xFFFFFF));
         g_tr[i].tid = (uint32_t)(uintptr_t)pthread_self();
@@ -3335,6 +3509,31 @@ static uint64_t hook_bufcopy(uint64_t *f) {
                 if (fd >= 0 && n > 0) { (void)!write(fd, line, (size_t)n); close(fd); }
             }
         }
+    }
+    return 0;
+}
+
+// ⭐ np179：**主线程在等谁**。真机已定谳：主线程在 `ksys::PreInitializeApp` 里跑等待环
+//   （0x9febac `ldr w8,[x19,#0x50]; cbnz → 退出`，否则 0x9febb4 `bl 0xa1db68` 边 pump 任务边睡），
+//   `[this+0x50]` 永远为 0 ⇒ 无限等。这里把 this 的身份与关键字段记下来（只记前 3 次）。
+static int g_wait50_n;
+static uint64_t hook_wait50(uint64_t *f) {   // 0x9febac：等待环判据点
+    (void)f;
+    if (++g_wait50_n <= 3) {
+        char line[320];
+        uint64_t self = f[FR_X19];
+        uint64_t sub = 0, sub128 = 0, f50 = 0, vt = 0;
+        if (self > 0x10000ull) {
+            vt = *(const uint64_t *)(uintptr_t)self;
+            sub = *(const uint64_t *)(uintptr_t)(self + 0x38);
+            f50 = *(const uint32_t *)(uintptr_t)(self + 0x50);
+            if (sub > 0x10000ull) sub128 = *(const uint64_t *)(uintptr_t)(sub + 0x128);
+        }
+        snprintf(line, sizeof line,
+                 "wait50#%d this=%#llx vt=%#llx [0x38]=%#llx [0x38+0x128]=%#llx [0x50]=%#x\n",
+                 g_wait50_n, (unsigned long long)self, (unsigned long long)vt,
+                 (unsigned long long)sub, (unsigned long long)sub128, (unsigned)f50);
+        note_append("dm_gate.txt", line);
     }
     return 0;
 }
@@ -4437,6 +4636,12 @@ static void *k_thread(void *arg) {
     g_k_stage = "nnMain";
     g_nnmain_entered = 1;   // np86：置位后，工厂分支就知道"别再 fall-through 了"
     klog("=== 终站：nnMain（0x735330）===\n");
+    // np177：登记"主线程"身份，供 per-thread 门命中取证标记 ←main
+    g_main_pthread = (uint32_t)(uintptr_t)pthread_self();
+    g_main_pth = pthread_self();
+    // np178：装 SIGPROF handler（采样由帧线程 tick 定向投给主线程）
+    smp_arm();
+    dump_maps_once();     // 采样点若落在映像外，靠这张表定位所属 .so
     // 再挂一次影子堆：万一静态初始化里有构造器把它清零，这里补回来（代价极小）。
     k_fake_heap_install((uint8_t *)b);
     // np72：**框架自证**——影子堆安装会写映像里的几个洞；这里确认它没有顺手清掉 0x2280eb8。
@@ -4773,6 +4978,8 @@ static void exp_k(const char *files_dir, char *out, size_t cap, size_t *used) {
         // ⚠ 不挂 0x103e434 首指令：那是 pre-index 改 SP 的 `str x21,[sp,#-0x30]!`；
         //   改挂序言之后的 0x103e448（`ldr x19,[x19,#0xac0]`，非 PC 相对，SP 已调好）。
         k_install_hook(img, 0x103e448, (void *)hook_ctor2f0, "对象池初始化 0x103e448");
+        // np179：主线程等待环的判据点（[this+0x50] 永远为 0 ⇒ 看清 this 是谁）
+        k_install_hook(img, 0x9febac, (void *)hook_wait50, "等待环判据 0x9febac");
         // np113：查"建出来就被销毁"（见 hook_list_ins/hook_task_exit 的注释）
         //   ⚠ 0xa01fe0 已由 hook_e11 挂着（同一站点不能挂两次），那边加了调用计数与 [+0xe0] 表。
         k_install_hook(img, 0xa01aec, (void *)hook_list_ins, "任务链 链表插入 0xa01aec");
