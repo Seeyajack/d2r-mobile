@@ -1014,8 +1014,12 @@ static void klog_mu_init(void) {
 //   文件通道 ≤400KB、hilog 通道 ≤4000 行；用完各打一条"预算用尽"然后静默。
 //   诊断期（启动链/前 400KB）信息完整，之后游戏不再被我们的日志拖住。
 //   模式：0=文件+hilog（默认） 1=只 hilog 2=全静默（只计数）。
-#define DM_LOG_FILE_BUDGET (1536u * 1024u)
-#define DM_LOG_HILOG_LINES 12000u
+// np172（2026-10-21）：窗口 1.5MB→6MB。原因：np171/np172 已把游戏推进到 res::System /
+//   Resource Loading 三线程 / TextureArchiveWork（日志 1.5 万行），1.5MB 在"主线程停车点之前"
+//   就用尽了 ⇒ 又是 np167 那类**观测窗口不足造出的假停滞**。仍然是逐行写+fflush，
+//   没有大单写（楔死的是大单写，不是总量）。
+#define DM_LOG_FILE_BUDGET (6144u * 1024u)
+#define DM_LOG_HILOG_LINES 20000u
 static int g_klog_mode;
 static void klog(const char *fmt, ...) {
     if (!g_k_log) return;
@@ -1803,13 +1807,14 @@ static uint64_t plt_stub(void) {
             static _Thread_local uint64_t tls_shadow[0x40];
             if (!tls_shadow[0xb0 / 8])
                 tls_shadow[0xb0 / 8] = (uint64_t)(uintptr_t)&g_alloc_obj[0];
-            // np167 实验：**暂时回退 [+0x60] 补口**——np159/np161（未补）实体到 #35，
-            //   np164+（补了）只到 #9 ⇒ 怀疑填分配器改变了另一条路径行为。
-            //   若回退后实体回到 #35，则 [+0x60] 的正确值不是分配器（另有语义）。
-#if 0
+            // np172（2026-10-21）：**重新打开 [+0x60] 补口**。
+            //   np167 关它的依据是"补了之后实体只到 #9"，但同一天已查明那是**日志预算 400KB
+            //   截断造成的假象**（预算提到 1.5MB 后实体本来就有 #40）⇒ 依据作废。
+            //   而 np171 的死亡笔记给了硬证据：`img+0x16339f0 si_addr=0 x0=0`，反汇编即
+            //   `GetTlsValue → ldr x0,[x0,#0x60]` → `ldr x8,[x0]` → 虚表 +0x10 分配 0x28 字节
+            //   ⇒ 缺 [+0x60] 岗位线程必崩（被停住后 PreInitializeApp 的工人就断了）。
             if (!tls_shadow[0x60 / 8])
                 tls_shadow[0x60 / 8] = (uint64_t)(uintptr_t)&g_alloc_obj[0];
-#endif
             return (uint64_t)(uintptr_t)&tls_shadow[0];
         }
         // 核掩码 / 栈信息 / 优先级 —— 影子语义，别让游戏拿到 0 而误判"没有可用核"
@@ -4034,25 +4039,29 @@ static void k_hook_all_branchers(uint8_t *img, uint32_t target_off, void *host_f
     }
     klog("[插桩] %s：共挂 %u 个站点（bl %u / b 尾调用 %u，上限 %d）\n", what, n, nbl, nb, cap);
 }
-// ⭐ np169：**启动信息影子对象**——内容门的宿主补口。
-// 依据（离线反汇编，0xdb9284 的提前返回）：
-//   `0xdb9334 ldr x20,[this+8]; cbnz → 继续; 0xdb933c bl 0x1074b50; 0xdb9344 cbz x20 → 返回`
-//   而 0x1074b50 = 取"启动信息对象"：
-//     `x0 = *(*(0x2289e68))`；非 0 → 虚调用 [vt+0x10] 返回；否则再看 *(0x2289e60)；
-//     两者都空 ⇒ 返回 0 ⇒ **装载编排被整段跳过**（[fs] open 恒 0 的直接原因）。
-//   这两个全局在 Switch 上由**启动器**填（外部运行时），鸿蒙上没人填 ⇒ 只能宿主补影子。
-// 修法：注入 {持有者 → 影子对象 → 影子虚表}，虚表 +0x10 返回一块清零的"启动信息"影子。
-//   语义与游戏无关（任何 Switch 程序启动时都从启动器拿启动信息）⇒ 属通用宿主能力。
-static uint64_t g_launch_info[0x40];   // 影子"启动信息"对象（清零，够游戏当结构体读）
-static uint64_t g_launch_vt[8];        // 影子虚表
-static uint64_t g_launch_obj[2];       // 影子对象 { &虚表, 0 }
-static uint64_t g_launch_holder[1];    // 持有者 { &影子对象 }（全局指向它，再解一层）
-static uint64_t launch_vt_get(void *self) {
+// ⭐ np171（2026-10-21）：**"当前堆"补口**——内容门 1/2 的真正开关。
+// 依据（本轮真机 + 离线反汇编双向坐实；⚠ np169 曾把这处误判成"启动信息"，已纠正）：
+//   ① `0x1074b50` / `0x1074b2c` = **取当前堆**（`x0 = *(*holder)`；非空则虚调用 [vt+0x10] 返回；
+//      两个槽互为回退）。证据：全映像 **127 个调用点**、nnMain 自己也调，调用形态一律
+//      `x = [this+8]; cbnz x,skip; bl getter`（"给了堆就用给的，没给取当前的"）。
+//   ② 门 1 = `0xdb9334 ldr x20,[this+8]; cbnz → 继续; bl 0x1074b50; 0xdb9344 cbz x20 → 早退`，
+//      拿到的 x20 立刻当堆用：`0xdb935c bl 0xf34f9c` → 内部 `w0=0x158, x1=x20, w2=8, bl 0x9f3464`
+//      （分配 StarterPackMgr 本体 0x158 字节；0x9f3464 是我们替换的分配器，它只 calloc、不看堆参数）。
+//   ③ ⭐ **门 2 是门 1 的函数**：w26 在 0xdb9284 里**只有一处写**（`0xdb9368 mov w26,#1`，位于门 1
+//      通过之后），三个读点 0xdb93e8 / 0xdb977c / **0xdb980c** 全由它决定 ⇒ **堆非空 ⇒ 门 2 自动放行**。
+//   ⇒ 真正的门只有一道：**当前堆有没有**。np169 把这里补成"零填充结构"（语义错），被当堆取走后
+//      读虚表 +0x80 当场崩（si_addr=0x80，pc=img+0xa091a0）——这就是 np170 基线的早崩源。
+// 修法：holder → (虚表 +0x10) → **影子分配器 g_alloc_obj**（64 槽虚表：+0x10/+0x30 分配、
+//   +0x80 报尺寸、+0x88 当 bool），而不是零填充结构。
+static uint64_t g_curheap_vt[8];       // "当前堆"持有者的虚表：+0x10 = 取堆
+static uint64_t g_curheap_obj[2];      // 持有者对象 { &虚表, 0 }
+static uint64_t g_curheap_holder[1];   // 全局槽指向它，再解一层
+static uint64_t curheap_get(void *self) {
     (void)self;
     static int n;
-    if (++n <= 4) klog("[启动信息] ★ 影子虚方法 +0x10 被调（第 %d 次）→ 返回影子对象 %p\n",
-                       n, (void *)g_launch_info);
-    return (uint64_t)(uintptr_t)g_launch_info;
+    if (++n <= 4) klog("[当前堆] ★ 取当前堆（虚方法 +0x10，第 %d 次）→ 影子分配器 %p\n",
+                       n, (void *)&g_alloc_obj[0]);
+    return (uint64_t)(uintptr_t)&g_alloc_obj[0];
 }
 
 static void k_inject_heap(uint8_t *img) {
@@ -4068,12 +4077,12 @@ static void k_inject_heap(uint8_t *img) {
     //   所以兜底路径不可靠——改由 GetTlsValue 的影子对象 [+0xb0] 顶上（见 g_tls_shadow）。
     g_alloc_holder[0] = (uint64_t)(uintptr_t)&g_alloc_obj[0];
     g_ctx_holder[0] = (uint64_t)(uintptr_t)&g_ctx_obj[0];
-    // np169：启动信息影子（内容门）——见 g_launch_info 处注释
-    g_launch_vt[0x10 / 8] = (uint64_t)(uintptr_t)&launch_vt_get;
-    g_launch_obj[0] = (uint64_t)(uintptr_t)&g_launch_vt[0];
-    g_launch_holder[0] = (uint64_t)(uintptr_t)&g_launch_obj[0];
-    *(uint64_t *)(img + 0x2289e68) = (uint64_t)(uintptr_t)&g_launch_holder[0];
-    *(uint64_t *)(img + 0x2289e60) = (uint64_t)(uintptr_t)&g_launch_holder[0];
+    // np171：当前堆补口（门 1 的唯一开关；门 2 的 w26 由门 1 决定）——见 g_curheap_vt 处注释
+    g_curheap_vt[0x10 / 8] = (uint64_t)(uintptr_t)&curheap_get;
+    g_curheap_obj[0] = (uint64_t)(uintptr_t)&g_curheap_vt[0];
+    g_curheap_holder[0] = (uint64_t)(uintptr_t)&g_curheap_obj[0];
+    *(uint64_t *)(img + 0x2289e68) = (uint64_t)(uintptr_t)&g_curheap_holder[0];
+    *(uint64_t *)(img + 0x2289e60) = (uint64_t)(uintptr_t)&g_curheap_holder[0];
     g_tls_shadow[0xb0 / 8] = (uint64_t)(uintptr_t)&g_alloc_obj[0];   // 影子对象 [+0xb0] = 分配器对象
     *(uint64_t *)(img + 0x226f0a0) = (uint64_t)(uintptr_t)&g_alloc_holder[0];   // 分配器持有者
     *(uint64_t *)(img + 0x22783d8) = (uint64_t)(uintptr_t)&g_ctx_holder[0];     // 线程上下文持有者
