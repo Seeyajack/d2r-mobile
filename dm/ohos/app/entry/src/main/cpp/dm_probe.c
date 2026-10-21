@@ -575,8 +575,11 @@ __attribute__((used, section("dmswhle"))) static const char dm_swhle_probe[4] = 
 // 指针，被调方却看到 x0=0）——**崩点现场是唯一不会骗人的证人**。
 // 异步信号安全：处理器里只做搬运，打印与帧链回溯留到 siglongjmp 之后（见 gate_dump_fault）。
 #define GATE_REG_N 31
-static sigjmp_buf g_gate_jmp;
-static volatile sig_atomic_t g_gate_armed;
+// 2026-10-22：改**线程局部**。看门狗把每个构造函数放在 worker 线程里跑，崩溃也在那边发生；
+// 全局 jmp_buf 会被"上一个卡住的线程"和"当前线程"互相踩（longjmp 到别人的栈 = 灾难）。
+// 信号处理器在**出错线程**上执行，所以 TLS 正好对上。
+static __thread sigjmp_buf g_gate_jmp;
+static __thread volatile sig_atomic_t g_gate_armed;
 static volatile uint64_t g_gate_fault_pc;
 static volatile int g_gate_fault_sig;
 static uint64_t g_gate_regs[GATE_REG_N];
@@ -4976,6 +4979,37 @@ static int k_skip_ctor(size_t i) { (void)i; return 0; }
 // DT_INIT_ARRAY/DT_INIT_ARRAYSZ ⇒ 任何模块都能跑。逐个武装 + 逐个编号 + 崩了跳过继续，
 // 这样一轮就能看到"能走多远、第一个崩的是谁"。
 // Generic ctor runner driven by the module's own dynamic tags (works for any module).
+// ── 看门狗：把"卡死"也变成一条可记账的记录 ──
+// 为什么必须：sigsetjmp 只接**崩溃**，接不住**卡死**。而 SDK 里那些"连服务/连驱动"的构造函数
+// 在宿主上不是崩、是**永远等下去**（subsdk0 #3 连 nvhost、subsdk3 #2 同类）。没有看门狗，
+// 一个卡死就把整轮拖住，剩下的构造函数永远跑不到。
+// 做法：每个构造函数单开一个线程，主线程带超时等；超时就记账并**放弃那个线程**（不 join，泄漏一个
+// 阻塞线程，探针里可以接受）。崩溃仍由 worker 里的 sigsetjmp 接住。
+// The watchdog turns a hang into a logged, skippable event: each ctor runs on its own thread and the
+// main thread waits with a timeout; on timeout the thread is abandoned (leaked) and we move on.
+#define CTOR_TIMEOUT_MS 2000
+typedef struct {
+    void (*fn)(int, char **, char **);
+    volatile int done, faulted;
+    pthread_mutex_t mu; pthread_cond_t cv;
+} ctor_job;
+static void *ctor_tramp(void *p) {
+    ctor_job *j = (ctor_job *)p;
+    if (sigsetjmp(g_gate_jmp, 1) == 0) {
+        g_gate_armed = 1;
+        j->fn(0, NULL, NULL);
+        g_gate_armed = 0;
+    } else {
+        g_gate_armed = 0;
+        j->faulted = 1;
+    }
+    pthread_mutex_lock(&j->mu);
+    j->done = 1;
+    pthread_cond_signal(&j->cv);
+    pthread_mutex_unlock(&j->mu);
+    return NULL;
+}
+
 static void k_run_ctors(const char *tag, module_t *m) {
     if (!m || !m->base || !m->init_array || !m->init_arraysz) {
         klog("[%s 构造] 没有 init_array（跳过）\n", tag);
@@ -4984,27 +5018,68 @@ static void k_run_ctors(const char *tag, module_t *m) {
     uint8_t *b = m->base;
     typedef void (*ctor_t)(int, char **, char **);
     ctor_t *arr = (ctor_t *)(b + m->init_array);
-    size_t n = m->init_arraysz / 8, ran = 0, skipped = 0, faulted = 0;
+    size_t n = m->init_arraysz / 8, ran = 0, skipped = 0, faulted = 0, hung = 0;
     klog("[%s 构造] DT_INIT_ARRAY=%#llx 共 %zu 个\n", tag,
          (unsigned long long)(uintptr_t)m->init_array, n);
+    // 跳过名单：**卡死**的构造函数（setjmp 只能接崩溃，接不住卡死）。
+    // 每跳一个都要有明确的"为什么"——它们是待办，不是永久豁免。
+    // Skip list for constructors that HANG (setjmp cannot catch a hang). Each entry is a TODO, not a pardon.
+    // 2026-10-22 真机：subsdk0 = **NVN/GPU 运行时**，它的构造函数序列就是驱动初始化（#3 卡在 +0x35C48
+    // 的 NvRmGpu 一族，跳过 #3 后 #4 又卡）⇒ 在宿主的 NVN 层（M4）就位之前，**整个模块的构造函数都别跑**，
+    // 一条条试没有意义。装载（映射/重定位/PLT）照做——符号要用。
+    // subsdk0 = the NVN/GPU runtime: its ctor sequence is driver bring-up, so skip the whole module's
+    // ctors until the host NVN layer (M4) exists. Loading (map/reloc/PLT) still happens: the symbols are needed.
+    // 现在有看门狗了，跳过名单**清空**：卡死由超时自动记账（每条都会打印"超时 N ms 未返回"），
+    // 不需要人工逐条维护。名单本身保留——将来遇到"卡死但超时后又活着、会污染后续状态"的才放进来。
+    static const struct { const char *tag; size_t idx; const char *why; } kSkip[] = {
+        { "", 0, "" },      // 占位（空名单时避免零长数组）
+    };
     for (size_t i = 0; i < n; i++) {
         if (!arr[i]) { skipped++; continue; }
-        // **逐条先记再调**：构造函数可能不是"崩"而是"卡死"（setjmp 抓不到卡死），
-        // 那样日志的最后一行就是卡住的那条——这是唯一能定位它的手段。
+        int skip = 0;
+        for (size_t k = 0; k < sizeof kSkip / sizeof kSkip[0]; k++)
+            if (kSkip[k].tag[0] && !strcmp(kSkip[k].tag, tag) &&
+                (kSkip[k].idx == i || kSkip[k].idx == (size_t)-1)) {
+                klog("[%s 构造] #%zu 跳过：%s\n", tag, i, kSkip[k].why); skip = 1; break;
+            }
+        if (skip) { skipped++; continue; }
         klog("[%s 构造] #%zu/%zu → %#llx\n", tag, i, n, (unsigned long long)(uintptr_t)arr[i]);
-        if (sigsetjmp(g_gate_jmp, 1) == 0) {
-            g_gate_armed = 1;
-            arr[i](0, NULL, NULL);
-            g_gate_armed = 0;
-            ran++;
-        } else {
-            g_gate_armed = 0;
+        ctor_job *j = (ctor_job *)calloc(1, sizeof *j);      // 超时后 worker 还会写它 ⇒ 不能放栈上
+        if (!j) { skipped++; continue; }
+        j->fn = arr[i];
+        pthread_mutex_init(&j->mu, NULL);
+        pthread_cond_init(&j->cv, NULL);
+        pthread_t th;
+        if (pthread_create(&th, NULL, ctor_tramp, j) != 0) { skipped++; continue; }
+        struct timespec dl;
+        clock_gettime(CLOCK_REALTIME, &dl);
+        dl.tv_sec += CTOR_TIMEOUT_MS / 1000;
+        dl.tv_nsec += (long)(CTOR_TIMEOUT_MS % 1000) * 1000000L;
+        if (dl.tv_nsec >= 1000000000L) { dl.tv_sec++; dl.tv_nsec -= 1000000000L; }
+        pthread_mutex_lock(&j->mu);
+        while (!j->done) {
+            if (pthread_cond_timedwait(&j->cv, &j->mu, &dl) != 0) break;
+        }
+        int done = j->done, bad = j->faulted;
+        pthread_mutex_unlock(&j->mu);
+        if (!done) {
+            hung++;                                          // 卡死：记账、放弃该线程、继续下一个
+            klog("[%s 构造] #%zu **超时 %d ms 未返回** ⇒ 放弃该线程继续（卡死，属要宿主拦的服务/驱动）\n",
+                 tag, i, CTOR_TIMEOUT_MS);
+        } else if (bad) {
             faulted++;
             klog("[%s 构造] #%zu 崩了（pc %#llx sig %d）—— 跳过继续\n", tag, i,
                  (unsigned long long)g_gate_fault_pc, g_gate_fault_sig);
+            pthread_join(th, NULL);
+            free(j);
+        } else {
+            ran++;
+            pthread_join(th, NULL);
+            free(j);
         }
     }
-    klog("[%s 构造] 跑完：成功 %zu / 空槽 %zu / 崩 %zu（共 %zu）\n", tag, ran, skipped, faulted, n);
+    klog("[%s 构造] 跑完：成功 %zu / 空槽+跳过 %zu / 崩 %zu / **卡死 %zu**（共 %zu）\n",
+         tag, ran, skipped, faulted, hung, n);
 }
 
 static void k_run_module_init(const module_t *m) {
