@@ -3596,6 +3596,49 @@ static uint64_t hook_bufcopy(uint64_t *f) {
     return 0;
 }
 
+// ⭐ np183b：**面包屑**——在 PreInitializeApp（0xdb9284..0xdb9ae8）内部布 8 个标记点，
+//   每个只在首次命中时写一行 `bcrd img+<offset>`。跑一轮就能看出"它停在哪一段之后"。
+//   站点都是安全指令（非 PC 相对/不动 SP）；cbz/bl 由安装器重算位移。
+static uint64_t g_bcrd_seen[8];
+static int g_bcrd_n;
+static uint64_t hook_bcrd(uint64_t *f) {
+    uint64_t off = f[FR_SITE] - (uint64_t)(uintptr_t)g_k_m.base;
+    for (int i = 0; i < g_bcrd_n; i++) if (g_bcrd_seen[i] == off) return 0;
+    if (g_bcrd_n < 8) {
+        char l[96];
+        g_bcrd_seen[g_bcrd_n++] = off;
+        snprintf(l, sizeof l, "bcrd img+%#llx（第 %d 个）\n",
+                 (unsigned long long)off, g_bcrd_n);
+        note_append("dm_gate.txt", l);
+    }
+    return 0;
+}
+
+// ⭐ np183：**编排进度标记**。目的：回答"PreInitializeApp 到底停在哪一段"。
+//   两个点都是安全指令（非 PC 相对、不动 SP）：
+//     0xdb9ae8 `mov w26,wzr` —— 堆空时走的补支路（w26=0 那条）；
+//     0xdb99e4 `mov x0,x20`  —— 打印 "StarterPackMgr" 前一句（StarterPackMgr 段入口，
+//                              装载编排 0xdb9960 就在它附近）。
+static int g_pm_early_n, g_pm_spm_n;
+static uint64_t hook_pm_early(uint64_t *f) {   // 0xdb9ae8
+    (void)f;
+    if (++g_pm_early_n <= 4) {
+        char l[96];
+        snprintf(l, sizeof l, "pm_early#%d（堆空补支路）\n", g_pm_early_n);
+        note_append("dm_gate.txt", l);
+    }
+    return 0;
+}
+static uint64_t hook_pm_spm(uint64_t *f) {     // 0xdb99e4
+    (void)f;
+    if (++g_pm_spm_n <= 4) {
+        char l[96];
+        snprintf(l, sizeof l, "pm_spm#%d（StarterPackMgr 段）\n", g_pm_spm_n);
+        note_append("dm_gate.txt", l);
+    }
+    return 0;
+}
+
 // ⭐ np179：**主线程在等谁**。真机已定谳：主线程在 `ksys::PreInitializeApp` 里跑等待环
 //   （0x9febac `ldr w8,[x19,#0x50]; cbnz → 退出`，否则 0x9febb4 `bl 0xa1db68` 边 pump 任务边睡），
 //   `[this+0x50]` 永远为 0 ⇒ 无限等。这里把 this 的身份与关键字段记下来（只记前 3 次）。
@@ -5091,7 +5134,27 @@ static void exp_k(const char *files_dir, char *out, size_t cap, size_t *used) {
         //   改挂序言之后的 0x103e448（`ldr x19,[x19,#0xac0]`，非 PC 相对，SP 已调好）。
         k_install_hook(img, 0x103e448, (void *)hook_ctor2f0, "对象池初始化 0x103e448");
         // np179：主线程等待环的判据点（[this+0x50] 永远为 0 ⇒ 看清 this 是谁）
+        // ⭐ np182：**实验——强制等待环退出**（比"写标志"更强：直接改判据指令）。
+        //   原指令 `0x9febac ldr w8,[x19,#0x50]` 改成 `mov w8,#1` ⇒ 紧随的 `cbnz` 永远跳去退出。
+        //   ⚠ 必须**在挂 0x9febac 钩子之前**改：钩子会把站点首指令搬进洞、再回跳，
+        //     因此它搬到的就是这条 `mov`，行为与"改判据"一致，且日志照旧。
+        //   判据：主线程是否越过它继续到 0xdb9960 装载编排、以及 [fs] open 是否变非 0。
+#define NP182_SKIP_WAIT 0
+#if NP182_SKIP_WAIT
+        *(uint32_t *)(img + 0x9febac) = 0x52800028u;      // mov w8, #1
+        klog("[实验] np182：0x9febac 改为 mov w8,#1（强制等待环退出）\n");
+#endif
         k_install_hook(img, 0x9febac, (void *)hook_wait50, "等待环判据 0x9febac");
+        // np183b：PreInitializeApp 内部面包屑（8 点，均匀铺开）
+        {
+            static const uint32_t bc[] = { 0xdb92c0, 0xdb9400, 0xdb9500, 0xdb9600,
+                                           0xdb9700, 0xdb9800, 0xdb9900, 0xdb9a00 };
+            for (unsigned i = 0; i < sizeof bc / sizeof bc[0]; i++)
+                k_install_hook(img, bc[i], (void *)hook_bcrd, "面包屑");
+        }
+        // np183：编排进度标记（早退补支路 / StarterPackMgr 段）
+        k_install_hook(img, 0xdb9ae8, (void *)hook_pm_early, "编排 0xdb9ae8（堆空补支路）");
+        k_install_hook(img, 0xdb99e4, (void *)hook_pm_spm, "编排 0xdb99e4（StarterPackMgr 段）");
         // np113：查"建出来就被销毁"（见 hook_list_ins/hook_task_exit 的注释）
         //   ⚠ 0xa01fe0 已由 hook_e11 挂着（同一站点不能挂两次），那边加了调用计数与 [+0xe0] 表。
         k_install_hook(img, 0xa01aec, (void *)hook_list_ins, "任务链 链表插入 0xa01aec");
