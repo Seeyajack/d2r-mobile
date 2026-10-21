@@ -2916,38 +2916,125 @@ static void ktrace_dump(const char *files_dir) {
     if (add) klog("[TRACE] 追加 %u 条 → 共 %u 条已落盘\n", add, g_tr_dumped);
 }
 
-// 站点指令搬进洞要重算 PC 相对位移：b / bl 是 imm26，b.cond / cbz / cbnz 是 imm19；
-// 其余指令原样搬。返回 0 = 超程或形态未知（调用方跳过该站点，宁可少挂不可挂错）。
-static int reloc_pc_rel(uint32_t w, uint8_t *from, uint8_t *to, uint32_t *out) {
+// 站点指令搬进洞：PC 相对指令按洞内位置重算；**adrp / adr / ldr(字面量) 物化**
+//（绝对地址/常量装载期已知 ⇒ movz/movk 序列，最多占 3 条指令槽）；b.cond/cbz/tbz 等
+// **超程**时改"取反 + 跳过 + 无条件跳"（imm26 射程 ±128MB，洞在映像内必达）。
+// out[0..2] = 最多三条指令；返回 0 = 形态未知/仍超程（调用方跳过该站点，宁可少挂不可挂错）。
+// ⚠ 2026-10-21 重写：旧版对 adrp/adr/ldr 字面量一律**拒绝挂载**（槽①只有 4 字节，
+//   装不下物化序列）——历史上因此丢了 0xa01490 等一批站点。现在桩有 3 个指令槽
+//   （hook_stub.S 的 slot_orig/orig2/orig3，默认 nop），物化序列放得下了。
+static uint32_t enc_movz(uint32_t rd, uint16_t v, int hw) {   // movz xN, #v, lsl #(16*hw)
+    return 0xD2800000u | ((uint32_t)hw << 21) | ((uint32_t)v << 5) | (rd & 31);
+}
+static uint32_t enc_movk(uint32_t rd, uint16_t v, int hw) {   // movk xN, #v, lsl #(16*hw)
+    return 0xF2800000u | ((uint32_t)hw << 21) | ((uint32_t)v << 5) | (rd & 31);
+}
+// 64 位绝对地址 → movz/movk/movk 三条（高位为 0 时第三条是无害的 OR 0）
+static void emit_addr64(uint64_t a, uint32_t rd, uint32_t out[3]) {
+    out[0] = enc_movz(rd, (uint16_t)(a & 0xFFFF), 0);
+    out[1] = enc_movk(rd, (uint16_t)((a >> 16) & 0xFFFF), 1);
+    out[2] = enc_movk(rd, (uint16_t)((a >> 32) & 0xFFFF), 2);
+}
+// 32 位立即数 → movz/movk 两条（w 寄存器形态）
+static void emit_val32(uint32_t v, uint32_t rd, uint32_t out[3]) {
+    out[0] = 0x52800000u | ((uint32_t)(v & 0xFFFF) << 5) | (rd & 31);
+    out[1] = 0x72A00000u | ((uint32_t)((v >> 16) & 0xFFFF) << 5) | (rd & 31);
+    out[2] = 0xD503201Fu;                                     // nop
+}
+// 条件分支超程时的公共尾巴：out[0] 已放好"取反+跳过"，这里放 out[1] = b target
+static int cond_ooc_tail(uint8_t *tgt, uint8_t *to0, uint32_t out[3]) {
+    int64_t d = ((int64_t)(intptr_t)tgt - (int64_t)(intptr_t)(to0 + 4)) / 4;
+    if (d < -(1 << 25) || d >= (1 << 25)) return 0;
+    out[1] = 0x14000000u | ((uint32_t)d & 0x03FFFFFFu);
+    return 1;
+}
+static int reloc_site(uint32_t w, uint8_t *from, uint8_t *to0, uint32_t out[3]) {
+    out[1] = out[2] = 0xD503201Fu;                            // 默认后两槽 nop
     uint32_t op26 = w & 0xFC000000u;
     int32_t  imm; int64_t d;
-    // ★ 2026-10-18 真机根因：adrp / adr / ldr(字面量) 都是 **PC 相对取址**，而记录式桩的槽①
-    //   只有一条指令的位置（4 字节），搬进洞里执行会按**洞内 PC** 算地址 ⇒ 悄悄算到另一个页面，
-    //   上层再解引用就拿到垃圾（实测：+0xA246A4 崩，槽值其实是对的，是这条 adrp 被搬坏了）。
-    //   movz/movk 至少要两条才装得下绝对地址，槽①放不下 ⇒ **明确拒绝挂载**（返回 -1），
-    //   宁可不插桩，也不能插一个"改坏寄存器"的桩。
-    if ((w & 0x9F000000u) == 0x90000000u ||    // adrp
-        (w & 0x9F000000u) == 0x10000000u ||    // adr
-        (w & 0x3B000000u) == 0x18000000u) {    // ldr (literal)
-        return -1;
+    // ── adrp：目标页 = (from & ~0xFFF) + imm21<<12；物化成绝对页地址 ──
+    if ((w & 0x9F000000u) == 0x90000000u) {
+        uint32_t rd = w & 0x1Fu;
+        int32_t imm21 = (int32_t)((((w >> 5) & 0x7FFFFu) << 2) | ((w >> 29) & 3u));
+        if (imm21 & 0x100000) imm21 -= 0x200000;
+        uint64_t page = ((uint64_t)(uintptr_t)from & ~0xFFFull) + ((int64_t)imm21 << 12);
+        emit_addr64(page, rd, out);
+        return 1;
+    }
+    // ── adr：目标 = from + imm21；物化成绝对地址 ──
+    if ((w & 0x9F000000u) == 0x10000000u) {
+        uint32_t rd = w & 0x1Fu;
+        int32_t imm21 = (int32_t)((((w >> 5) & 0x7FFFFu) << 2) | ((w >> 29) & 3u));
+        if (imm21 & 0x100000) imm21 -= 0x200000;
+        emit_addr64((uint64_t)(uintptr_t)from + imm21, rd, out);
+        return 1;
+    }
+    // ── ldr (literal)：值在映像字面量池里、.text 只读 ⇒ 装载期读出来直接物化成立即数 ──
+    //   （SIMD 形态 sN/dN 搬不进 GPR，明确拒绝）
+    if ((w & 0x3B000000u) == 0x18000000u) {
+        uint32_t opc = (w >> 30) & 3u;
+        uint32_t rd = w & 0x1Fu;
+        if (opc >= 2u) return 0;                              // sN/dN：不接
+        int32_t imm19 = (int32_t)((w >> 5) & 0x7FFFFu);
+        if (imm19 & 0x40000) imm19 -= 0x80000;
+        const uint8_t *lit = from + imm19 * 4;
+        if (opc == 0u) {                                      // wN ← 32 位常量
+            uint32_t v;
+            memcpy(&v, lit, 4);
+            emit_val32(v, rd, out);
+        } else {                                              // xN ← 64 位常量
+            uint64_t v;
+            memcpy(&v, lit, 8);
+            emit_addr64(v, rd, out);
+        }
+        return 1;
     }
     if (op26 == 0x14000000u || op26 == 0x94000000u) {                            // b / bl
         imm = (int32_t)(w & 0x03FFFFFFu);
         if (imm & 0x02000000) imm -= 0x04000000;
-        d = ((int64_t)(intptr_t)from + (int64_t)imm * 4 - (int64_t)(intptr_t)to) / 4;
+        d = ((int64_t)(intptr_t)from + (int64_t)imm * 4 - (int64_t)(intptr_t)to0) / 4;
         if (d < -(1 << 25) || d >= (1 << 25)) return 0;
-        *out = op26 | ((uint32_t)d & 0x03FFFFFFu);
+        out[0] = op26 | ((uint32_t)d & 0x03FFFFFFu);
         return 1;
     }
-    if ((w & 0x7E000000u) == 0x34000000u || (w & 0xFF000000u) == 0x54000000u) {  // cbz/cbnz / b.cond
+    // ── 条件分支：先按原形态重算；超程改"取反 + 跳过 + 无条件跳" ──
+    if ((w & 0xFF000010u) == 0x54000000u) {                    // b.cond
         imm = (int32_t)((w >> 5) & 0x7FFFFu);
         if (imm & 0x40000) imm -= 0x80000;
-        d = ((int64_t)(intptr_t)from + (int64_t)imm * 4 - (int64_t)(intptr_t)to) / 4;
-        if (d < -(1 << 18) || d >= (1 << 18)) return 0;
-        *out = (w & ~(0x7FFFFu << 5)) | (((uint32_t)d & 0x7FFFFu) << 5);
-        return 1;
+        uint8_t *tgt = from + imm * 4;
+        d = ((int64_t)(intptr_t)tgt - (int64_t)(intptr_t)to0) / 4;
+        if (d >= -(1 << 18) && d < (1 << 18)) {
+            out[0] = (w & ~(0x7FFFFu << 5)) | (((uint32_t)d & 0x7FFFFu) << 5);
+            return 1;
+        }
+        out[0] = 0x54000000u | (2u << 5) | ((w & 0xFu) ^ 1u);  // b.!cond +8
+        return cond_ooc_tail(tgt, to0, out);
     }
-    *out = w;
+    if ((w & 0x7E000000u) == 0x34000000u) {                    // cbz/cbnz
+        imm = (int32_t)((w >> 5) & 0x7FFFFu);
+        if (imm & 0x40000) imm -= 0x80000;
+        uint8_t *tgt = from + imm * 4;
+        d = ((int64_t)(intptr_t)tgt - (int64_t)(intptr_t)to0) / 4;
+        if (d >= -(1 << 18) && d < (1 << 18)) {
+            out[0] = (w & ~(0x7FFFFu << 5)) | (((uint32_t)d & 0x7FFFFu) << 5);
+            return 1;
+        }
+        out[0] = ((w ^ 0x01000000u) & ~(0x7FFFFu << 5)) | (2u << 5);   // 取反（cbz↔cbnz）+8
+        return cond_ooc_tail(tgt, to0, out);
+    }
+    if ((w & 0x7E000000u) == 0x36000000u) {                    // tbz/tbnz
+        imm = (int32_t)((w >> 5) & 0x3FFFu);
+        if (imm & 0x2000) imm -= 0x4000;
+        uint8_t *tgt = from + imm * 4;
+        d = ((int64_t)(intptr_t)tgt - (int64_t)(intptr_t)to0) / 4;
+        if (d >= -(1 << 13) && d < (1 << 13)) {
+            out[0] = (w & ~(0x3FFFu << 5)) | (((uint32_t)d & 0x3FFFu) << 5);
+            return 1;
+        }
+        out[0] = ((w ^ 0x01000000u) & ~(0x3FFFu << 5)) | (2u << 5);   // 取反（tbz↔tbnz）+8
+        return cond_ooc_tail(tgt, to0, out);
+    }
+    out[0] = w;
     return 1;
 }
 static int g_hook_n;
@@ -2961,18 +3048,16 @@ static void k_install_hook(uint8_t *img, uint32_t site_off, void *host_fn, const
     if (g_hook_n >= (int)HOOK_MAX) { klog("[插桩] 洞已满(%d 格)，跳过 %s\n", g_hook_n, what); return; }
     uint8_t *dst = img + DM_IMG_MAIN_CAVE_OFF + (size_t)g_hook_n * HOOK_STRIDE;
     memcpy(dst, b0, n);
-    // 槽①：原指令（4 字节）。PC 相对的分支（bl/b/b.cond/cbz）搬进洞后必须按新位置重算位移，
-    // 否则会跳错地方——这是挂"调用点 / 尾调用点"绕不过的一步。
+    // 槽①+①b+①c：原指令（1–3 条）。PC 相对的分支（bl/b/b.cond/cbz/tbz）搬进洞后必须按
+    //   新位置重算位移；adrp/adr/ldr(字面量) 物化成 movz/movk 序列（2026-10-21 起不再拒绝）。
     {
-        uint32_t w = *(uint32_t *)(img + site_off), nw = 0;
-        int rr = reloc_pc_rel(w, img + site_off, dst + (hook_slot_orig - b0), &nw);
-        if (rr < 0) {
-            klog("[插桩] %s 站点首指令 %08x 是 PC 相对且一格里搬不动（adrp/adr/ldr 字面量），"
-                 "**拒绝挂载**（挂了会算错地址）\n", what, w);
-            return;
-        }
-        if (rr == 0) { klog("[插桩] %s 站点指令 %08x 重定位超程，跳过\n", what, w); return; }
-        *(uint32_t *)slot_of(dst, b0) = nw;
+        uint32_t w = *(uint32_t *)(img + site_off), nw[3] = {0, 0, 0};
+        uint8_t *to0 = dst + (hook_slot_orig - b0);
+        int rr = reloc_site(w, img + site_off, to0, nw);
+        if (rr == 0) { klog("[插桩] %s 站点指令 %08x 重定位超程/形态未知，跳过\n", what, w); return; }
+        *(uint32_t *)to0 = nw[0];
+        *(uint32_t *)(to0 + 4) = nw[1];
+        *(uint32_t *)(to0 + 8) = nw[2];
     }
     // 槽②：b site+4（相对编码）
     {

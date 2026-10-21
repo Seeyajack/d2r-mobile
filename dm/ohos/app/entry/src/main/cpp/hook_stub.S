@@ -111,6 +111,12 @@ CSYM(hook_stub_begin):
     .globl CSYM(hook_slot_orig)
 CSYM(hook_slot_orig):
 2:  nop                             // 槽①：原指令（复制时按站点填入）
+    .globl CSYM(hook_slot_orig2)
+CSYM(hook_slot_orig2):
+    nop                             // 槽①b：物化第二指令（默认 nop，对既有钩子零影响）
+    .globl CSYM(hook_slot_orig3)
+CSYM(hook_slot_orig3):
+    nop                             // 槽①c：物化第三指令
     .globl CSYM(hook_slot_back)
 CSYM(hook_slot_back):
     b 2b                            // 槽②：回原流程（复制时改编码）
