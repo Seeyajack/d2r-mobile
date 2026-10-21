@@ -20,6 +20,10 @@
 #include <time.h>
 #include <ucontext.h>
 #include <unistd.h>
+#include <poll.h>              // 子进程隔离跑构造函数（等审计管道）
+#include <sys/wait.h>
+#include <signal.h>
+#include <errno.h>
 
 #include "dm.h"                 // module_t
 #include "map_image_ohos.h"     // 鸿蒙版 map_image —— 实验 D 的被测对象
@@ -1043,18 +1047,28 @@ static void klog(const char *fmt, ...) {
     // 非递归锁会把它自己锁死 ⇒ 整份日志从那一刻静默（2026-10-18 现场嫌疑之一）。
     if (g_klog_mode != 1 && !file_cut) {
         pthread_once(&g_klog_once, klog_mu_init);
-        pthread_mutex_lock(&g_klog_mu);
-        size_t n = (size_t)fprintf(g_k_log, "[阶段 %s][T%ld] %s", g_k_stage, (long)gettid(), body);
-        fflush(g_k_log);
-        pthread_mutex_unlock(&g_klog_mu);
-        n_bytes += n;
-        if (n_bytes > DM_LOG_FILE_BUDGET) {
-            file_cut = 1;
-            pthread_mutex_lock(&g_klog_mu);
-            fprintf(g_k_log, "[日志] 文件通道预算用尽（%zu 字节）⇒ 后续只走 hilog\n", n_bytes);
+        // ⚠ 2026-10-22（S3 血的教训）：**必须 trylock**。
+        // 真机现象：subsdk0 的构造函数卡住时，日志"连超时那一行都打不出来"，主线程也一起不动
+        // ⇒ 那个线程正卡在 fprintf/fflush 里**持着日志锁**（本平台"文件写会楔住调用线程"早有记录），
+        // 于是所有后续 klog 全堵在拿锁上。看门狗本身生效了，但它的日志发不出去。
+        // 改成 trylock：拿不到就跳过文件通道（改走 hilog），**日志永远不会把调用线程堵死**。
+        if (pthread_mutex_trylock(&g_klog_mu) == 0) {
+            size_t n = (size_t)fprintf(g_k_log, "[阶段 %s][T%ld] %s", g_k_stage, (long)gettid(), body);
             fflush(g_k_log);
             pthread_mutex_unlock(&g_klog_mu);
+            n_bytes += n;
+            if (n_bytes > DM_LOG_FILE_BUDGET) {
+                file_cut = 1;
+                if (pthread_mutex_trylock(&g_klog_mu) == 0) {
+                    fprintf(g_k_log, "[日志] 文件通道预算用尽（%zu 字节）⇒ 后续只走 hilog\n", n_bytes);
+                    fflush(g_k_log);
+                    pthread_mutex_unlock(&g_klog_mu);
+                }
+            }
         }
+        // else：别的线程卡在写日志里（fprintf/fflush 楔住）⇒ **本行直接丢弃**。
+        // 别退到 hilog：hilog 同样会楔（本文档头部早有记录），退了就是二次堵死。
+        else { return; }
     }
     if (!hilog_cut) {
         logline(body);
@@ -4987,7 +5001,24 @@ static int k_skip_ctor(size_t i) { (void)i; return 0; }
 // 阻塞线程，探针里可以接受）。崩溃仍由 worker 里的 sigsetjmp 接住。
 // The watchdog turns a hang into a logged, skippable event: each ctor runs on its own thread and the
 // main thread waits with a timeout; on timeout the thread is abandoned (leaked) and we move on.
-#define CTOR_TIMEOUT_MS 2000
+#define CTOR_TIMEOUT_MS 1500
+// ── 无锁审计（S3 关键手段）──
+// 为什么不能走 klog：卡死的线程正卡在 fprintf/fflush 里持着日志锁，任何"正常日志"都会被堵死。
+// 这里用**裸 write 到同一个日志文件的 fd**：不加锁、不经 stdio 缓冲、单次几十字节
+// （"小单写"在本平台是可用的；楔住的是大单写与 fflush）。
+static int g_audit_fd = -1;          // -1 = 用主日志文件的 fd；子进程里设成管道写端
+static void audit(const char *fmt, ...) {
+    if (!g_k_log) return;
+    char b[256];
+    va_list ap; va_start(ap, fmt);
+    int n = vsnprintf(b, sizeof b, fmt, ap);
+    va_end(ap);
+    if (n <= 0) return;
+    if (n > (int)sizeof b - 1) n = (int)sizeof b - 1;
+    int fd = g_audit_fd >= 0 ? g_audit_fd : fileno(g_k_log);
+    if (fd >= 0) { ssize_t w = write(fd, b, (size_t)n); (void)w; }
+}
+
 typedef struct {
     void (*fn)(int, char **, char **);
     volatile int done, faulted;
@@ -5009,6 +5040,14 @@ static void *ctor_tramp(void *p) {
     pthread_mutex_unlock(&j->mu);
     return NULL;
 }
+
+static void k_run_ctors_isolated(const char *tag, module_t *m, int timeout_ms);   // 前置声明（实现在后面）
+// 直接模式：**在调用线程上跑构造函数**，不新开 pthread。
+// 2026-10-22 离线定谳：SDK 的临界区/互斥量用 `tpidrro_el0 → +0x1f8 → +0x1b8` 取"当前线程 id"当锁持有者；
+// **新开的宿主 pthread 没有客体 TLS、也没在 nn::os 注册** ⇒ 持有者字段是垃圾 ⇒ 锁自旋永不结束。
+// 三个卡点（sdk#61 / subsdk0#3 / subsdk3#2）第一次调用全是 InitializeMutex / NvOsMutexCreate，完全对上。
+// fork 会继承**调用线程**的 TLS ⇒ 隔离要放在进程层，不是线程层。
+static int g_ctors_direct;
 
 static void k_run_ctors(const char *tag, module_t *m) {
     if (!m || !m->base || !m->init_array || !m->init_arraysz) {
@@ -5043,7 +5082,22 @@ static void k_run_ctors(const char *tag, module_t *m) {
                 klog("[%s 构造] #%zu 跳过：%s\n", tag, i, kSkip[k].why); skip = 1; break;
             }
         if (skip) { skipped++; continue; }
-        klog("[%s 构造] #%zu/%zu → %#llx\n", tag, i, n, (unsigned long long)(uintptr_t)arr[i]);
+        audit("[构造审计] %s #%zu/%zu → %#llx\n", tag, i, n, (unsigned long long)(uintptr_t)arr[i]);
+        if (g_ctors_direct) {
+            // 直接跑：调用线程有客体 TLS。崩了接住继续；卡死由**进程层**看门狗（父进程 kill）兜底。
+            if (sigsetjmp(g_gate_jmp, 1) == 0) {
+                g_gate_armed = 1;
+                arr[i](0, NULL, NULL);
+                g_gate_armed = 0;
+                ran++;
+            } else {
+                g_gate_armed = 0;
+                faulted++;
+                audit("[构造审计] %s #%zu 崩了（pc %#llx sig %d）—— 跳过继续\n", tag, i,
+                      (unsigned long long)g_gate_fault_pc, g_gate_fault_sig);
+            }
+            continue;
+        }
         ctor_job *j = (ctor_job *)calloc(1, sizeof *j);      // 超时后 worker 还会写它 ⇒ 不能放栈上
         if (!j) { skipped++; continue; }
         j->fn = arr[i];
@@ -5064,12 +5118,12 @@ static void k_run_ctors(const char *tag, module_t *m) {
         pthread_mutex_unlock(&j->mu);
         if (!done) {
             hung++;                                          // 卡死：记账、放弃该线程、继续下一个
-            klog("[%s 构造] #%zu **超时 %d ms 未返回** ⇒ 放弃该线程继续（卡死，属要宿主拦的服务/驱动）\n",
-                 tag, i, CTOR_TIMEOUT_MS);
+            audit("[构造审计] %s #%zu **超时 %d ms 未返回** ⇒ 放弃该线程继续（卡死：要宿主拦的服务/驱动）\n",
+                  tag, i, CTOR_TIMEOUT_MS);
         } else if (bad) {
             faulted++;
-            klog("[%s 构造] #%zu 崩了（pc %#llx sig %d）—— 跳过继续\n", tag, i,
-                 (unsigned long long)g_gate_fault_pc, g_gate_fault_sig);
+            audit("[构造审计] %s #%zu 崩了（pc %#llx sig %d）—— 跳过继续\n", tag, i,
+                  (unsigned long long)g_gate_fault_pc, g_gate_fault_sig);
             pthread_join(th, NULL);
             free(j);
         } else {
@@ -5078,8 +5132,8 @@ static void k_run_ctors(const char *tag, module_t *m) {
             free(j);
         }
     }
-    klog("[%s 构造] 跑完：成功 %zu / 空槽+跳过 %zu / 崩 %zu / **卡死 %zu**（共 %zu）\n",
-         tag, ran, skipped, faulted, hung, n);
+    audit("[构造审计] %s 跑完：成功 %zu / 空槽+跳过 %zu / 崩 %zu / **卡死 %zu**（共 %zu）\n",
+          tag, ran, skipped, faulted, hung, n);
 }
 
 static void k_run_module_init(const module_t *m) {
@@ -5223,8 +5277,11 @@ static void *k_thread(void *arg) {
     //   以前只把 sdk 当"符号来源"，它的构造函数一次都没跑 ⇒ SDK 的系统（任务/内存/服务）
     //   从未初始化，这也是"任务 runner 的 flags 没人置位"最可能的解释。
     //   开关 NP_SDK_CTORS 默认开；要回到旧行为就设 0。
+    // ⚠ 2026-10-22 真机：**就地跑**会被某个构造函数卡死并把主线程一起拖住（sdk #61 实测，
+    // 连看门狗的超时都发不出来）⇒ 改成子进程隔离：卡死只害死子进程，主路径照常进 nnMain。
+    // In-process runs can wedge the main thread (sdk #61), so run them in a forked child.
     if (getenv("NP_SDK_CTORS") == NULL || atoi(getenv("NP_SDK_CTORS")) != 0)
-        k_run_ctors("sdk", &g_k_s);
+        k_run_ctors_isolated("sdk", &g_k_s, 60000);
 
     k_run_module_init(&g_k_m);   // ★ 先跑模块自己的静态初始化（否则 data 段的全局对象全是空的）
     {   // 崩点归属用：把本进程映射抄进日志（模块区 / 探针 .so / 宿主堆 各自范围）
@@ -5688,6 +5745,58 @@ static void k_fill_plts_extra(xmod_t *x, int idx) {
          (unsigned long long)libc, (unsigned long long)stub);
 }
 
+// ── 子进程隔离跑构造函数（S3 的正解）──
+// 为什么：subsdk0/subsdk3 里有"连驱动/连服务"的构造函数，在宿主上会**卡死**，而且卡死会连锁
+// （它会握住某个宿主锁，把主线程一起拖住——两次真机实测都是这样）。
+// 隔离办法：fork 一个子进程专门跑它们，审计行通过管道回传；父进程只等固定时限，超时就 kill。
+// 这样"卡死"最多损失一个子进程，主路径照常往下走，账本还是完整的。
+// Isolation: run those ctors in a forked child; audit lines come back through a pipe; the parent
+// waits a bounded time and then kills the child. A hang then costs nothing but the child.
+static void k_run_ctors_isolated(const char *tag, module_t *m, int timeout_ms) {
+    int fds[2];
+    if (pipe(fds) != 0) { audit("[构造审计] %s 管道失败，改为就地跑\n", tag); k_run_ctors(tag, m); return; }
+    pid_t pid = fork();
+    if (pid == 0) {
+        close(fds[0]);
+        g_audit_fd = fds[1];                 // 子进程：审计写管道（裸 write，无锁）
+        g_ctors_direct = 1;                  // ★ 在调用线程上跑（继承来的客体 TLS），不新开 pthread
+        k_run_ctors(tag, m);
+        close(fds[1]);
+        _exit(0);
+    }
+    close(fds[1]);
+    // 父：把子进程的审计行原样转进主日志；超时就杀
+    int fd = g_audit_fd >= 0 ? g_audit_fd : fileno(g_k_log);
+    char buf[512];
+    uint64_t t0 = guest_ns() / 1000000ull;
+    for (;;) {
+        if (guest_ns() / 1000000ull - t0 > (uint64_t)timeout_ms) {
+            kill(pid, SIGKILL);
+            waitpid(pid, NULL, 0);
+            char msg[160];
+            int n = snprintf(msg, sizeof msg, "[构造审计] %s **子进程 %d ms 未跑完 ⇒ 已杀（卡死）**\n",
+                             tag, timeout_ms);
+            if (fd >= 0 && n > 0) { ssize_t w = write(fd, msg, (size_t)n); (void)w; }
+            return;
+        }
+        struct pollfd pf = { fds[0], POLLIN, 0 };
+        int pr = poll(&pf, 1, 100);
+        if (pr > 0) {
+            ssize_t r = read(fds[0], buf, sizeof buf);
+            if (r <= 0) break;                       // 子进程收尾/退出
+            if (fd >= 0) { ssize_t w = write(fd, buf, (size_t)r); (void)w; }
+        } else if (pr < 0 && errno != EINTR) break;
+    }
+    close(fds[0]);
+    int st = 0;
+    waitpid(pid, &st, 0);
+    char msg[192];
+    int n = snprintf(msg, sizeof msg, "[构造审计] %s 子进程结束：%s%s（status=%d）\n", tag,
+                     WIFSIGNALED(st) ? "被信号终止 sig=" : "正常退出",
+                     WIFSIGNALED(st) ? "" : "", WIFEXITED(st) ? WEXITSTATUS(st) : st);
+    if (fd >= 0 && n > 0) { ssize_t w = write(fd, msg, (size_t)n); (void)w; }
+}
+
 // 总入口：装全部额外模块 → 统一填 PLT →（可选）跑它们的构造函数。
 static void k_load_extras(void) {
     g_n_x = 0;
@@ -5700,7 +5809,7 @@ static void k_load_extras(void) {
     // 逐个 setjmp 保护：某个构造函数崩了只记账、继续下一个（先看整体能走多远）。
     if (getenv("NP_EXTRA_CTORS") == NULL || atoi(getenv("NP_EXTRA_CTORS")) != 0)
         for (int i = 0; i < N_XMODS; i++)
-            if (g_xmods[i].m->base) k_run_ctors(g_xmods[i].name, g_xmods[i].m);
+            if (g_xmods[i].m->base) k_run_ctors_isolated(g_xmods[i].name, g_xmods[i].m, 25000);
 }
 
 // 第一批白名单：只开互斥量（Initialize/Lock/Unlock/TryLock/Finalize）。
