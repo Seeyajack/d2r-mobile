@@ -906,7 +906,12 @@ P = lambda ext: os.path.join(outdir, f'{NAME}.{ext}')
 # 为什么必须有它：探针代码所在 .so 与映像相距远（实测 > b 指令的 ±128MB 射程），
 # 无法从 .so 直接打洞；而映像内的补丁区已排满（无 ≥0x200 零间隙，离线核实）。
 # 洞内代码用 `ldr x16,<字面量>; br x16` 访问任意 64 位绝对地址（无射程限制）。
-CAVE_SIZE = 0x4000
+# ⚠ 2026-10-21 统一重出时恢复为 0x10000：10-16 22:19 的 main 产物用的就是 64KB 洞
+#   （当时是未提交的本地改动，提交里一直留着 0x4000）——探针 dm_main_layout.h 的
+#   DM_IMG_MAIN_CAVE_SIZE=0x10000、洞内步长 0x1C0（146 格）都按它设计；用 0x4000
+#   重出会让 main 产物与探针/已测产物都不一致（16KB 只放得下 28 格，本轮已用 84 格）。
+#   两个模块必须用同一版本工具重出，否则就是"不同源"。
+CAVE_SIZE = 0x10000
 CAVE_OFF = (PATCH_OFF + len(patch) + 0xF) & ~0xF
 open(P('patched.bin'), 'wb').write(IMG + bytearray(PATCH_OFF - len(IMG)) + patch + bytearray(CAVE_OFF - (PATCH_OFF + len(patch))) + bytearray(CAVE_SIZE))
 with open(os.path.join(outdir, f'{NAME}.unresolved.tsv'), 'w', encoding='utf-8') as f:

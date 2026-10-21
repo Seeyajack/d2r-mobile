@@ -15,7 +15,7 @@
     .incbin "F:/switch-work/botw/rewritten/main.patched.bin", 0x2390000, 0x84a70
     .space 0x3590
     .p2align 14
-// ---- 模块 sdk：TEXT_END 0x350194 → 取整 0x354000，PATCH_OFF 0x7a0000，文件 8250640 字节 → 取整 0x7e0000 ----
+// ---- 模块 sdk：TEXT_END 0x350194 → 取整 0x354000，PATCH_OFF 0x7a0000，文件 8299792 字节 → 取整 0x7ec000 ----
     .section dmsdkx0, "a", @progbits
     .p2align 14
     .incbin "F:/switch-work/botw/rewritten/sdk.patched.bin", 0x0, 0x354000
@@ -26,6 +26,6 @@
     .p2align 14
     .section dmsdkx1, "a", @progbits
     .p2align 14
-    .incbin "F:/switch-work/botw/rewritten/sdk.patched.bin", 0x7a0000, 0x3e510
+    .incbin "F:/switch-work/botw/rewritten/sdk.patched.bin", 0x7a0000, 0x4a510
     .space 0x1af0
     .p2align 14
