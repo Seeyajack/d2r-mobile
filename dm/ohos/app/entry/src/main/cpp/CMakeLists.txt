@@ -32,6 +32,8 @@ add_library(dmprobe SHARED
     ${DM_DIR}/gfx/tex/nvn_bcdec.c
     ${DM_DIR}/gfx/tex/nvn_deswizzle.c
     ${DM_DIR}/gfx/nvn/nvn_tex.c
+    # C3：BC → ASTC 4x4 转码（BC 贴图不再解成 RGBA8 上传，省 4~8 倍显存与带宽）
+    ${DM_DIR}/gfx/tex/nvn_bc2astc.c
     # 宿主单测跑测框架 + 统一日志（框架靠 dlopen 去载入各单测 .so，所以它自己很薄）
     ${DM_DIR}/ohos/host_tests.c
     ${DM_DIR}/ohos/host_tests_gen.c   # 生成：单测清单（哪些 .so、叫什么名字）
