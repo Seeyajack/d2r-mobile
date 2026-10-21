@@ -1477,6 +1477,7 @@ static uint64_t g_smp_pc[SMP_N];
 static uint64_t g_smp_fp[SMP_N];
 static int g_smp_started;
 static pthread_t g_main_pth;          // 主线程句柄（给 pthread_kill 定向投信号用）
+static volatile uint32_t g_smp_kicks; // np185 实验 G：已投递的采样信号数（诊断"没样本"是没发还是没送达）
 
 static void smp_handler(int sig, siginfo_t *si, void *uc_) {
     (void)sig; (void)si;
@@ -1505,6 +1506,7 @@ static void smp_kick(void) {
     // ⚠ 主线程自己也在走 tick 路径：它若自己 pthread_kill 自己，样本会全部落在
     //   musl 的 `pthread_kill+0xa4`（svc 返回点）——np178 首轮 4096/4096 就这么废掉的。
     if ((uint32_t)(uintptr_t)pthread_self() == g_main_pthread) return;
+    __atomic_fetch_add(&g_smp_kicks, 1u, __ATOMIC_RELAXED);
     pthread_kill(g_main_pth, SIGPROF);
 }
 // np178：**maps 快照**。采样点落在映像外时，必须先知道它属于哪个 .so 才能反查符号。
@@ -1519,22 +1521,59 @@ static void dump_maps_once(void) {
     if (fd < 0) { fclose(fp); return; }
     char line[512];
     int n = 0;
-    (void)!write(fd, "=== maps(r-xp) ===\n", 19);
-    while (fgets(line, sizeof line, fp) && n < 120) {
-        if (strstr(line, "r-xp")) { (void)!write(fd, line, strlen(line)); n++; }
+    (void)!write(fd, "=== maps(全部可执行+匿名，前 500 行) ===\n", 34);
+    while (fgets(line, sizeof line, fp) && n < 500) {
+        // np185 实验 F：匿名映射（客人映像 main/sdk 都是 mmap 匿名区）必须收，
+        //   否则自旋 PC 归不了属。收 r-xp 全部 + 匿名 rw 前 200 行。
+        if (strstr(line, "r-xp") || (n < 200 && strstr(line, "rw") && !strstr(line, "/"))) {
+            (void)!write(fd, line, strlen(line)); n++;
+        }
     }
     close(fd);
     fclose(fp);
+}
+// np185 实验 F：把任意地址归类到 main / sdk / probe(.so) / 外，返回简短标签写进 out。
+static void smp_cls(uint64_t a, char *out, size_t cap) {
+    uint64_t mb = (uint64_t)(uintptr_t)g_k_m.base;
+    uint64_t sb = (uint64_t)(uintptr_t)g_k_s.base;
+    if (mb && a >= mb && a < mb + DM_IMG_MAIN_END)
+        snprintf(out, cap, "main+%#llx", (unsigned long long)(a - mb));
+    else if (sb && a >= sb && a < sb + DM_IMG_SDK_END)
+        snprintf(out, cap, "sdk+%#llx", (unsigned long long)(a - sb));
+    else if (g_self_base && a >= g_self_base && a < g_self_base + 0x400000ull)
+        snprintf(out, cap, "probe+%#llx", (unsigned long long)(a - g_self_base));
+    else
+        snprintf(out, cap, "外%#llx", (unsigned long long)a);
+}
+// np185 实验 F：对采样点走帧链（[fp]=上层fp、[fp+8]=返回地址），最多 8 层。
+//   自旋点的调用链 = "谁在让主线程转圈"的直接证据。
+static int smp_bt(uint64_t pc, uint64_t fp, char *out, size_t cap) {
+    int len = 0;
+    uint64_t pcs[8]; int n = 0;
+    pcs[n++] = pc;
+    uint64_t f = fp;
+    for (int i = 0; i < 7 && f > 0x10000ull && f < 0x800000000000ull && (f & 15ull) == 0; i++) {
+        uint64_t lr = *(uint64_t *)(uintptr_t)(f + 8);
+        uint64_t nf = *(uint64_t *)(uintptr_t)f;
+        if (lr > 0x10000ull && lr < 0x800000000000ull && n < 8) pcs[n++] = lr;
+        if (nf <= f) break;               // 必须递增，否则链断了
+        f = nf;
+    }
+    for (int i = 0; i < n; i++) {
+        char cls[48];
+        smp_cls(pcs[i], cls, sizeof cls);
+        len += snprintf(out + len, cap - (size_t)len, "%s%s", i ? " ← " : "", cls);
+    }
+    return n;
 }
 static void smp_dump(const char *tag) {
     if (!g_files_dir[0]) return;
     uint32_t n = __atomic_load_n(&g_smp_n, __ATOMIC_RELAXED);
     if (n > SMP_N) n = SMP_N;
-    char p[600], buf[900];
+    char p[600], buf[1400];
     snprintf(p, sizeof p, "%s/dm_gate.txt", g_files_dir);
     int fd = open(p, O_WRONLY | O_CREAT | O_APPEND, 0644);
     if (fd < 0) return;
-    uint64_t b = (uint64_t)(uintptr_t)g_k_m.base;
     uint64_t top[16] = {0}; uint32_t cnt[16] = {0}; int used = 0;
     for (uint32_t i = 0; i < n; i++) {
         uint64_t pc = g_smp_pc[i];
@@ -1546,19 +1585,34 @@ static void smp_dump(const char *tag) {
         }
         cnt[hit]++;
     }
-    int len = snprintf(buf, sizeof buf, "smp[%s] 样本=%u", tag, n);
+    int len = snprintf(buf, sizeof buf, "smp[%s] 样本=%u kick=%u", tag, n,
+                       __atomic_load_n(&g_smp_kicks, __ATOMIC_RELAXED));
+    uint64_t first_pc = 0; uint64_t first_fp = 0; uint32_t first_cnt = 0;
     for (int rank = 0; rank < 6; rank++) {
         int best = -1;
         for (int k = 0; k < used; k++) if (cnt[k] && (best < 0 || cnt[k] > cnt[best])) best = k;
         if (best < 0) break;
-        len += snprintf(buf + len, sizeof buf - (size_t)len, " %u×%s%#llx",
-                        cnt[best], (top[best] >= b && top[best] < b + DM_IMG_MAIN_END) ? "img+" : "外",
-                        (unsigned long long)((top[best] >= b && top[best] < b + DM_IMG_MAIN_END)
-                                             ? top[best] - b : top[best]));
+        char cls[48];
+        smp_cls(top[best], cls, sizeof cls);
+        len += snprintf(buf + len, sizeof buf - (size_t)len, " %u×%s",
+                        cnt[best], cls);
+        if (rank == 0) {                   // 记下第一名，出循环后补它的帧链
+            first_pc = top[best]; first_fp = g_smp_fp[0]; first_cnt = cnt[best];
+            for (uint32_t i = 0; i < n; i++) if (g_smp_pc[i] == top[best]) { first_fp = g_smp_fp[i]; break; }
+        }
         cnt[best] = 0;                      // 用过即清，避免重复
     }
     snprintf(buf + len, sizeof buf - (size_t)len, "\n");
     (void)!write(fd, buf, strlen(buf));
+    // np185 实验 F：热点 PC 的帧链（自旋点的调用者 = 谁让主线程转圈）
+    if (first_pc) {
+        char bt[600];
+        smp_bt(first_pc, first_fp, bt, sizeof bt);
+        char l2[700];
+        int l2n = snprintf(l2, sizeof l2, "smp-bt[%s] %u×%#llx：%s\n",
+                           tag, first_cnt, (unsigned long long)first_pc, bt);
+        (void)!write(fd, l2, (size_t)l2n);
+    }
     close(fd);
 }
 
@@ -2767,6 +2821,11 @@ static void ktrace_mark(uint32_t off, uint64_t a0, uint64_t a1) {
     } else {
         __atomic_fetch_add(&g_tr_lost, 1u, __ATOMIC_RELAXED);
     }
+    // np185 实验 G：**采样 kick 也走这里**。np175 把 G/runner 从 ktrace_rec 过滤掉后，
+    //   空闲线程（唯一确定被调度的非主线程）不再产生 kick ⇒ 新进程里 SIGPROF 无人投、
+    //   样本恒 0（20:13 轮实证）。G/runner 经 hook_e8/hook_e11 → ktrace_mark 入环，
+    //   在这里补 kick 即恢复"空闲环当时基"的旧行为。
+    if (!(i & 63u)) smp_kick();
 }
 
 // np127：**定时落盘**（宿主线程，每 10 秒一次，共 4 次）。
@@ -3125,6 +3184,20 @@ static uint64_t hook_e3(uint64_t *f) {   // 分发函数入口 0xa00a78
         klog("[钉子8] 0xa00a78：结构体=%#llx 标签=%llu x1=%#llx\n",
              (unsigned long long)st, (unsigned long long)(uint32_t)tag,
              (unsigned long long)f[FR_X1]);
+        // np185 实验 A：kind=2 路径是 `x2=[结构体+8]; br x2`——[结构体+8] 就是**运行时工厂
+        //   函数指针**（np185 离线定谳：任务就绪戳 [task+0x60] bit1|bit2 在全二进制无写入者，
+        //   置位者只可能是这类运行时派发）。打出来换算映像偏移，离线即可反汇编找写入者。
+        if (st) {
+            uint64_t fn = *(const uint64_t *)(uintptr_t)(st + 8);
+            uint64_t base = (uint64_t)(uintptr_t)g_k_m.base;
+            char l[176];
+            snprintf(l, sizeof l, "派发#%d 0xa00a78 标签=%llu 工厂指针=%s%#llx x1=%#llx\n",
+                     g_n_e3, (unsigned long long)(uint32_t)tag,
+                     (fn >= base && fn < base + DM_IMG_MAIN_END) ? "img+" : "外",
+                     (unsigned long long)((fn >= base && fn < base + DM_IMG_MAIN_END) ? fn - base : fn),
+                     (unsigned long long)f[FR_X1]);
+            note_append("dm_gate.txt", l);
+        }
     }
     if (g_stall_arm > 0) {   // np158：武装期内每次分发都取现场（最后一次 = 停车边界）
         g_stall_arm--;
@@ -3321,6 +3394,45 @@ static uint64_t hook_e11(uint64_t *f) {  // runner 0xa01fe0 入口：x0 = mgr
     }
     return 0;
 }
+// ═══ np186 实验 I：runner 放行门 flags 补位（**单因干预**，默认关闭）═══
+// 背景（np186 真机 8 轮定谳）：主线程卡在 F_wait 纯用户态空转，退出条件二选一
+//   （[mgr+0x128] 惰建子对象 / [waiter+0x50]），二者都可能依赖"任务跑完"；而 runner
+//   遍历活动表时第一个门就是 `ldrb w8,[x22+0x60]; tbz w8,#1`（0xa02030/0xa02034），
+//   我们的任务 flags 恒 0 ⇒ 0xa01cf0 激活检查从未真命中、任务永不执行。
+//   flags 置位器已全部找到（bit2=0xa00960 经 vt+0xa8；bit1=0x28e830/0xf5e248 大函数内联）
+//   但从未被调——藏在游戏逻辑深处，静态追不动。
+// 干预设计：挂在 **0xa0202c**（`ldp x24,x22,[x24+8]` 之后、`ldrb [x22+0x60]` 之前）：
+//   洞内先执行原 ldp ⇒ x22 = 当前任务；钩子把 state==4 且 flags&6!=6 的任务**仅补**
+//   `[task+0x60] |= 6`（按字节 OR，检查用 ldrb 读，别碰 +0x61 起的邻居字节）；
+//   随后原 ldrb 读到的就是新值 ⇒ 外层门通过，游戏自己的激活检查/执行逻辑原样跑。
+//   **不推 state**——np113 的崩已归因于"状态 1→2 补推"（被 prepare 当待销毁），
+//   flags 单因从未单独试过；本实验就是补上这一课。
+// 判据：hook_e9（0xa01cf0）首次真命中 = 门过了；hook_e10（0x9fdccc）命中 = 任务真执行；
+//   F_wait 退出（[mgr+0x128] 或 [waiter+0x50] 变非 0）⇒ 内容线可能整片解开；
+//   崩 ⇒ 崩点即"任务执行还缺什么"的精确答案。
+// ⚠ 纪律：编译期开关、**默认关**；实验轮临时改 1，跑完立即改回。
+#ifndef NP186_FLAGS
+#define NP186_FLAGS 0
+#endif
+static int g_n_flagsfix;
+static uint64_t hook_flagsfix(uint64_t *f) {   // 0xa0202c：x22 = 当前遍历到的任务
+#if NP186_FLAGS
+    uint64_t t = f[FR_X22];
+    if (t > 0x10000ull && t < 0x800000000000ull) {
+        uint32_t st = *(const uint32_t *)(uintptr_t)(t + 0xb8);
+        uint8_t fl = *(const uint8_t *)(uintptr_t)(t + 0x60);
+        if (st == 4 && (fl & 6u) != 6u) {
+            *(uint8_t *)(uintptr_t)(t + 0x60) = (uint8_t)(fl | 6u);
+            if (++g_n_flagsfix <= 16)
+                klog("[flags] 补位：任务=%#llx state=%u flags %#x → %#x（第 %d 次）\n",
+                     (unsigned long long)t, st, fl, fl | 6u, g_n_flagsfix);
+        }
+    }
+#else
+    (void)f;
+#endif
+    return 0;
+}
 // ★ 销毁入口探针（2026-10-18）：runner 跑完任务（虚表[0x88]）后把任务移进完成链（mgr+0xd8），
 //   下一轮对完成链逐个调 0xa01be8 销毁：状态 <7 ⇒ 推 7、析构 task+0x20、再 memcpy(task+0x88, 5)
 //   逐个调 指针->[0]->虚表[0x20]。本轮崩在这里：第一个指针（=task+0xf0）的 [0]=0。
@@ -3467,6 +3579,148 @@ static uint64_t hook_e19(uint64_t *f) {   // 0xa01490：刚建好的任务在 x0
     return 0;
 }
 
+// ===== np185 实验 A：CTA 派发点显形（纯观测，零行为变化；判据写 dm_gate.txt 绕过预算）=====
+// 离线定谳（`离线分析-任务系统卡点定谳（np185）.md`）：主线程卡在 F_wait(0x9feb38) 等待环，
+// 因 runner(0xa01fe0) 放行门 [task+0x60] bit1|bit2 在全二进制无写入者。置位者只可能是
+// 运行时派发，本组把五个派发点的实际地址打到 dm_gate.txt，拿到即可离线反汇编：
+//   ① 0xa00a78 kind=2 工厂指针（[结构体+8]）——已在 hook_e3 内补打（同一站点不能挂两次）
+//   ② CTA 建好任务后的 [arg+0xb0] 回调        → hook_e31 @ 0xa014d8（mov x0,x21 之前）
+//   ③ 任务的 vt+0x50 方法                     → hook_e32 @ 0xa01514（mov x0,x21 之前）
+//   ④ 逐类目 0xa00804(task, i, entry)         → hook_e33 @ 0xa01570（bl 之前，安装器重算 bl）
+//   ⑤ F_wait 的调用者（经虚表进来、无直接 bl） → hook_e34 @ 0x9feb3c（序言之后，打 x30）
+// 站点均为安全指令（非 PC 相对 / 不改 SP；bl 站点由安装器按原站点 PC 重算 imm26）。
+static int g_n_e31, g_n_e32, g_n_e33, g_n_e34;
+
+// 0xa014d8：x8 = [arg+0xb0] 的"建好后回调"（arg 在 x20，一并记下便于对齐 CTA#N）
+static uint64_t hook_e31(uint64_t *f) {
+    if (++g_n_e31 <= 8) {
+        uint64_t cb = f[FR_X8];
+        uint64_t base = (uint64_t)(uintptr_t)g_k_m.base;
+        char l[176];
+        snprintf(l, sizeof l, "派发#%d [arg+0xb0]回调=%s%#llx arg=%#llx\n",
+                 g_n_e31,
+                 (cb >= base && cb < base + DM_IMG_MAIN_END) ? "img+" : "外",
+                 (unsigned long long)((cb >= base && cb < base + DM_IMG_MAIN_END) ? cb - base : cb),
+                 (unsigned long long)f[FR_X20]);
+        note_append("dm_gate.txt", l);
+    }
+    return 0;
+}
+
+// 0xa01514：x8 = 任务虚表 +0x50 槽的方法（CTA 在 state=1 后调它）
+static uint64_t hook_e32(uint64_t *f) {
+    if (++g_n_e32 <= 8) {
+        uint64_t m = f[FR_X8];
+        uint64_t base = (uint64_t)(uintptr_t)g_k_m.base;
+        char l[176];
+        snprintf(l, sizeof l, "派发#%d vt+0x50=%s%#llx arg=%#llx\n",
+                 g_n_e32,
+                 (m >= base && m < base + DM_IMG_MAIN_END) ? "img+" : "外",
+                 (unsigned long long)((m >= base && m < base + DM_IMG_MAIN_END) ? m - base : m),
+                 (unsigned long long)f[FR_X20]);
+        note_append("dm_gate.txt", l);
+    }
+    return 0;
+}
+
+// 0xa01570：bl 0xa00804 之前——x0=任务 x1=类目序号 x2=类目值（逐类目初始化）
+static uint64_t hook_e33(uint64_t *f) {
+    if (++g_n_e33 <= 16) {
+        char l[128];
+        snprintf(l, sizeof l, "派发#%d 类目 0xa00804：任务=%#llx 序号=%u 值=%#llx\n",
+                 g_n_e33, (unsigned long long)f[FR_X0],
+                 (unsigned)(uint32_t)f[FR_X1], (unsigned long long)f[FR_X2]);
+        note_append("dm_gate.txt", l);
+    }
+    return 0;
+}
+
+// 0x9feb3c（F_wait 序言之后）：x0=等待对象，x30=调用者返回地址 ⇒ 谁在等、等的哪个对象
+static uint64_t hook_e34(uint64_t *f) {
+    if (++g_n_e34 <= 8) {
+        uint64_t lr = f[FR_X30];
+        uint64_t base = (uint64_t)(uintptr_t)g_k_m.base;
+        char l[176];
+        snprintf(l, sizeof l, "等待#%d F_wait 进入：等待对象=%#llx 调用者=%s%#llx\n",
+                 g_n_e34, (unsigned long long)f[FR_X0],
+                 (lr >= base && lr < base + DM_IMG_MAIN_END) ? "img+" : "外",
+                 (unsigned long long)((lr >= base && lr < base + DM_IMG_MAIN_END) ? lr - base : lr));
+        note_append("dm_gate.txt", l);
+    }
+    return 0;
+}
+
+// np185 实验 C v2：**每次都记**的路径计数器（bc6 的首次命中式回答不了"最后一次调用卡在哪"）。
+// 站点表与安装处 cpts[] 一致；按站点偏移分桶计数，每命中一行（上限 64 行防刷爆）。
+// 判读：日志末尾**最后出现的 C 点** = 主线程停车前最后一站；若某点计数比后点少 1 ⇒ 卡在两点之间。
+static int g_cpt_n[20];
+static uint64_t hook_cpt(uint64_t *f) {
+    uint64_t off = f[FR_SITE] - (uint64_t)(uintptr_t)g_k_m.base;
+    // np185 实验 E v2：主线程终卡点 = TextureArchiveWork 实体创建返回之后的路径。
+    //   路径：0x107e824 存对象 → vt+0x70(0xa0b150 getter) → vt+0x78(0xa0b158 锁+链表)
+    //   → 0x107e868 挂载(0xa112fc) → 0x107e890 通知(0x1086ed0 自身也加锁) → 0x107e894+
+    //   每命中都计；**最后停者即卡点**。另计 sead 锁族进出（0xa1d56c 进 / 0xa1d57c 出）：
+    //   进 > 出 ⇒ 卡在 SDK 的 nn::os::LockMutex（np133 白名单直连 sdk 实现，绕过宿主日志桩）。
+    static const uint32_t sites[20] = { 0xa1d69c, 0xa1d77c, 0xa1d79c,
+                                        0xa1d7b0, 0xa1d7d8, 0xa1d818,
+                                        0xa091b0, 0xa091fc, 0xa0923c, 0x1086ac8,
+                                        0xa1d56c, 0xa1d57c, 0xa0b188, 0x107e858,
+                                        0x107e86c, 0x1086efc, 0x107e894,
+                                        0, 0, 0 };
+    for (int i = 0; i < 17; i++) {
+        if (off == sites[i]) {
+            // 高频站点（锁族，本轮实证 3500 万次级）粗抽样：前 32 条全记，之后每 65536 条一次；
+            //   路径站点（<百次级）不受影响。判据是"最后一条 C 点是哪个"，不是精确总数。
+            int n = ++g_cpt_n[i];
+            int hot = (off == 0xa1d56c || off == 0xa1d57c);
+            if (n <= 32 || (n % (hot ? 65536 : 256)) == 0) {
+                char l[160];
+                if (off == 0xa1d69c || off == 0x1086ac8) {   // 入口/返回点：附 x30 = 调用者返回地址（定位是哪个调用者）
+                    uint64_t lr = f[FR_X30];
+                    uint64_t base = (uint64_t)(uintptr_t)g_k_m.base;
+                    snprintf(l, sizeof l, "C点 img+%#x 第 %d 次 调用者=%s%#llx\n",
+                             (unsigned)off, g_cpt_n[i],
+                             (lr >= base && lr < base + DM_IMG_MAIN_END) ? "img+" : "外",
+                             (unsigned long long)((lr >= base && lr < base + DM_IMG_MAIN_END) ? lr - base : lr));
+                } else {
+                    snprintf(l, sizeof l, "C点 img+%#x 第 %d 次\n", (unsigned)off, g_cpt_n[i]);
+                }
+                note_append("dm_gate.txt", l);
+            }
+            break;
+        }
+    }
+    return 0;
+}
+
+// np185 实验 D：KingSystem 落户观测。RootTask 周期 dump 读 [RootTask+0x358]（KingSystem）恒 0，
+// 而 RootTask::calc 内 0x726afc `str x20,[x19+0x358]` 理应把它写进去（0x726adc 注册调用的返回后）。
+// 本钩子挂在 0x726b00（存储已执行的安全指令）：打 x20（新对象）、写入后的 [x19+0x358]、
+// 新对象 [+0xd4]（phase1 放行条件 3|4 的那个字段）与虚表——回答"对象建出来没有/落户没有/状态推没推"。
+static int g_n_e36;
+static uint64_t hook_e36(uint64_t *f) {
+    if (++g_n_e36 <= 12) {
+        uint64_t obj = f[FR_X20], ks = 0, d4 = 0, vt = 0;
+        uint64_t base = (uint64_t)(uintptr_t)g_k_m.base;
+        // x19 不在帧里（桩只存 x0-x17/x29/x30 + x18-x28……实际有 x19-x28）——用 FR_X19 取
+        uint64_t rt = f[FR_X19];
+        if (rt > 0x10000ull) ks = *(const uint64_t *)(uintptr_t)(rt + 0x358);
+        if (obj > 0x10000ull) {
+            vt = *(const uint64_t *)(uintptr_t)obj;
+            uint32_t v = *(const uint32_t *)(uintptr_t)(obj + 0xd4);
+            d4 = v;
+        }
+        char l[224];
+        snprintf(l, sizeof l, "KingSystem#%d 新对象=%#llx 虚表=%s%#llx [+0xd4]=%llu 落户[+0x358]=%#llx\n",
+                 g_n_e36, (unsigned long long)obj,
+                 (vt >= base && vt < base + DM_IMG_MAIN_END) ? "img+" : "外",
+                 (unsigned long long)((vt >= base && vt < base + DM_IMG_MAIN_END) ? vt - base : vt),
+                 (unsigned long long)d4, (unsigned long long)ks);
+        note_append("dm_gate.txt", l);
+    }
+    return 0;
+}
+
 static int g_n_e20, g_n_e21;
 // 0xa0913c 是"按名字建/查管理器对象"的助手（x1 指向一个 {虚表?, 名字串} 结构）。
 // 真机日志 5100 行那次唯一的方法树创建就用了它，名字来自 0x1ba6xxx 那张表——
@@ -3474,7 +3728,7 @@ static int g_n_e20, g_n_e21;
 // RootDraw/SysDraw/AppDraw/AppDrawFinal、sead::MethodTreeMgr / ThreadMgr / SystemManagers …
 // ⇒ 只要把"被请求的名字 + 拿到的结果"打出来，就知道哪一环在宿主上没建起来。
 static uint64_t hook_e20(uint64_t *f) {   // 0xa0913c 入口
-    if (++g_n_e20 <= 40) {
+    if (++g_n_e20 <= 300) {
         uint64_t st = f[FR_X1];
         uint64_t nm = 0;
         char s[64] = {0};
@@ -3496,14 +3750,20 @@ static uint64_t hook_e21(uint64_t *f) {   // 0x9fe380：刚拿到 0xa0913c 的�
 //   只挂一个必然漏。两个都挂，才能拿到完整的"按名字建对象"序列。
 static int g_n_e22;
 static uint64_t hook_e22(uint64_t *f) {   // 0xa09144：同一 API 的实体入口
-    if (++g_n_e22 <= 40) {
+    if (++g_n_e22 <= 300) {
         uint64_t st = f[FR_X1];
         uint64_t nm = 0;
         char s[64] = {0};
         if (st) nm = *(const uint64_t *)(uintptr_t)(st + 8);
         if (nm) k_img_str(nm, s, sizeof s);
-        klog("[名字] 实体入口#%d 结构=%#llx 名字=%#llx 「%s」\n",
-             g_n_e22, (unsigned long long)st, (unsigned long long)nm, s);
+        {
+            uint64_t lr = f[FR_X30];
+            uint64_t base = (uint64_t)(uintptr_t)g_k_m.base;
+            klog("[名字] 实体入口#%d 结构=%#llx 名字=%#llx 「%s」 调用者=%s%#llx\n",
+                 g_n_e22, (unsigned long long)st, (unsigned long long)nm, s,
+                 (lr >= base && lr < base + DM_IMG_MAIN_END) ? "img+" : "外",
+                 (unsigned long long)((lr >= base && lr < base + DM_IMG_MAIN_END) ? lr - base : lr));
+        }
     }
     return 0;
 }
@@ -3519,7 +3779,7 @@ static uint64_t hook_e23(uint64_t *f) {
 // 它被调几次、每次名字是什么，直接回答"方法树有没有挂上去"。
 static int g_n_e24;
 static uint64_t hook_e24(uint64_t *f) {
-    if (++g_n_e24 <= 40) {
+    if (++g_n_e24 <= 300) {
         uint64_t st = f[FR_X1];
         uint64_t nm = st ? *(const uint64_t *)(uintptr_t)(st + 8) : 0;
         char s[64] = {0};
@@ -5232,6 +5492,27 @@ static void exp_k(const char *files_dir, char *out, size_t cap, size_t *used) {
             for (unsigned i = 0; i < sizeof bc5 / sizeof bc5[0]; i++)
                 k_install_hook(img, bc5[i], (void *)hook_bcrd, "面包屑5");
         }
+        // np185 实验 C v2：主线程终卡点定位（每次都记，不去重）。
+        //   背景：本轮实证主线程最后活动 = 第 120 次分配（[大分配] 站点 +0xa1d768，即
+        //   "注册缓冲区"函数 0xa1d67c 内 bl 0x9f3464 的返回点），此后再无分配/导入日志、
+        //   线程快照 R 态。bc6（首次命中式）已证明该路径能完整跑通，但回答不了"最后一次调用"
+        //   卡在哪——改用每次命中都计数的 C 点钩子：日志末尾最后出现的 C 点即卡点前最后一站。
+        //   路径：0xa1d69c 入口 → 0xa1d77c 分 0x1c0 返回 → 0xa1d79c SDK 注册(0x1632920)返回
+        //         → 0xa1d7b0 vt+0x18 返回 → 0xa1d7d8 SDK(0x1632930)+锁(+0x40)返回 → 0xa1d818 链表完
+        //   若某 C 点的计数停在比后点少 1 ⇒ 卡在这两点之间（如 0xa1d7d8 不进 ⇒ 卡在 0x1632930
+        //   或用户态互斥量自旋——M1 已知互斥量纯用户态自旋、不踩 svc 门）。
+        {
+            static const uint32_t cpts[] = { 0xa1d69c, 0xa1d77c, 0xa1d79c,
+                                             0xa1d7b0, 0xa1d7d8, 0xa1d818,
+                                             0xa091b0, 0xa091fc, 0xa0923c, 0x1086ac8,
+                                             0xa1d56c, 0xa1d57c, 0xa0b188, 0x107e858,
+                                             0x107e86c, 0x1086efc, 0x107e894 };
+            for (unsigned i = 0; i < sizeof cpts / sizeof cpts[0]; i++)
+                k_install_hook(img, cpts[i], (void *)hook_cpt, "np185 C点");
+        }
+        // np185 实验 D：KingSystem 落户观测（0x726b00 = RootTask::calc 内注册调用的存储后）。
+        //   周期 dump 读 [RootTask+0x358] 恒 0 ⇒ 打"新对象/落户结果/对象的 +0xd4"三件套。
+        k_install_hook(img, 0x726b00, (void *)hook_e36, "np185 KingSystem 落户 0x726b00");
         // np183：编排进度标记（早退补支路 / StarterPackMgr 段）
         k_install_hook(img, 0xdb9ae8, (void *)hook_pm_early, "编排 0xdb9ae8（堆空补支路）");
         k_install_hook(img, 0xdb99e4, (void *)hook_pm_spm, "编排 0xdb99e4（StarterPackMgr 段）");
@@ -5280,6 +5561,9 @@ static void exp_k(const char *files_dir, char *out, size_t cap, size_t *used) {
         k_install_hook(img, 0xa01cf0, (void *)hook_e9, "钉子8 runner 检查 0xa01cf0 入口");
         k_install_hook(img, 0x9fdccc, (void *)hook_e10, "钉子8 运行转发器 0x9fdccc 入口");
         k_install_hook(img, 0xa01fe0, (void *)hook_e11, "钉子8 runner 入口 0xa01fe0（链表遍历）");
+        // np186 实验 I：flags 补位挂在 runner 循环体内（0xa0202c，ldp 之后/ldrb 之前）。
+        //   开关默认关；实验轮把 NP186_FLAGS 改 1 重编，跑完改回。
+        k_install_hook(img, 0xa0202c, (void *)hook_flagsfix, "np186 flags 补位 0xa0202c（runner 外层门）");
         k_install_hook(img, 0xa01be8, (void *)hook_e12, "钉子8 销毁入口 0xa01be8（数组 dump）");
         // ★ 注册体/构造尾定位钩（见 hook_e13/e14 注释）
         k_install_hook(img, 0xa01928, (void *)hook_e13, "钉子8 注册体 0xa01928");
@@ -5339,6 +5623,12 @@ static void exp_k(const char *files_dir, char *out, size_t cap, size_t *used) {
         // ★ 崩溃点仪器（2026-10-20）：PostCalc 入口——本轮崩点就是它收到 NULL 句柄
         //   （ldr x20,[x0] 读 0）。记录 x0 + x30(LR=调用方返回址)，见 hook_pcalc 注释。
         k_install_hook(img, 0x103B1F0, (void *)hook_pcalc, "PostCalc 0x103b1f0 入口（NULL 句柄崩点）");
+        // ★ np185 实验 A（纯观测）：CTA 派发点显形 + F_wait 调用者。判据落 dm_gate.txt。
+        //   站点均为安全指令；0xa01570 是 bl（安装器按原站点 PC 重算 imm26）。
+        k_install_hook(img, 0xa014d8, (void *)hook_e31, "np185 [arg+0xb0] 回调 0xa014d8");
+        k_install_hook(img, 0xa01514, (void *)hook_e32, "np185 任务 vt+0x50 0xa01514");
+        k_install_hook(img, 0xa01570, (void *)hook_e33, "np185 类目 0xa00804 调用点 0xa01570");
+        k_install_hook(img, 0x9feb3c, (void *)hook_e34, "np185 F_wait 入口 0x9feb3c（打调用者 x30）");
         // np133：装载 sdk（M1）。失败不致命：装载不了就全走宿主实现，行为与之前一致。
         if (k_load_sdk() != 0)
             klog("[sdk] 未装载（继续用宿主实现，行为不变）\n");
