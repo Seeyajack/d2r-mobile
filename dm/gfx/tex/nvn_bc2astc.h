@@ -35,6 +35,19 @@ int nvn_bc2astc_block(uint32_t nvn_fmt, const uint8_t *src, uint8_t *dst);
 int nvn_bc2astc_region(uint32_t nvn_fmt, const uint8_t *src, size_t src_pitch,
                        uint32_t blocks_x, uint32_t blocks_y, uint8_t *dst, size_t dst_pitch);
 
+// 同上，但按**块行**多线程切分（每块独立、行间无依赖 ⇒ 切分不可能改变结果）。
+// nthreads <= 1 或平台没有 pthread 时自动退化为单线程。**判据：与单线程逐字节相同。**
+// 为什么要它：实测单线程 ≈6 MB/s（2048² 一张 0.7 s），运行时全量转码不可行；
+// 转码是天然可并行的（逐块独立），多线程是收益最大、风险最小的第一步。
+// Same as above but split across block rows (blocks are independent, so the split cannot change the
+// result). Falls back to single-threaded when nthreads <= 1 or pthreads are unavailable.
+int nvn_bc2astc_region_mt(uint32_t nvn_fmt, const uint8_t *src, size_t src_pitch,
+                          uint32_t blocks_x, uint32_t blocks_y, uint8_t *dst, size_t dst_pitch,
+                          int nthreads);
+
+// 建议线程数（0 = 读不到；调用方自己决定上限）
+int nvn_bc2astc_cpu_count(void);
+
 // 自测用：把一块 ASTC 4x4 解回 4×4 RGBA8（dst 每行 dpitch 字节）。返回 0 成功。
 // 只实现本模块编码器会产生的那两种配置（CEM8/CEM12、单分区、1 平面），供单测与误差评估用。
 // For self-test: decode one ASTC 4x4 block back to 4x4 RGBA8. Only the two configurations this

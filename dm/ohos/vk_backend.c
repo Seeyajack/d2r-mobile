@@ -3080,7 +3080,8 @@ int vk_backend_tex_c1(const char *dir, char *out, size_t cap) {
 //      它证明"我们写出的 16 字节块是合法 ASTC，且位域理解正确"
 //   ④ GPU 采样 vs CPU 的 BC 解码（理想图）：PSNR 不差于参考值 0.5 dB + 最大通道差 ≤ 32
 //   ⑤ 负向：跳过解排布直接转码 ⇒ 转码结果必须不同（否则解排布是空转）
-//   ⑥ 账：尺寸（BC3 → ASTC 几倍）+ 转码吞吐（决定"运行时转码"还是"离线转码"）
+//   ⑥ 账：尺寸（BC3 → ASTC 几倍）+ 吞吐（1024² 上量单线程 vs 多线程）
+//   ⑦ 多线程 vs 单线程**逐字节相同**（切分只按块行，块间无依赖 ⇒ 切分不该改变结果）
 //
 // 为什么借**共享上下文**而不是 vk_backend_init 自带的那个：生产路径（游戏贴图）走的是共享上下文，
 // 那条设备上的 ASTC 扩展才是真正要验的东西；用测试后端自建的设备验，等于验了另一台设备。
@@ -3358,7 +3359,7 @@ int vk_backend_tex_c3(const char *dir, char *out, size_t cap) {
         else OS_EMIT(em, "  ✅ 如预期地不同 —— 解排布这一步确实在干活");
     }
 
-    // ---- ⑥ 账：尺寸 + 吞吐 ----
+    // ---- ⑥ 账：尺寸 + 吞吐（单线程 vs 多线程）+ ⑦ 多线程与单线程逐字节一致 ----
     OS_EMIT(em, "");
     OS_EMIT(em, "---- ⑥ 账 ----");
     {
@@ -3366,18 +3367,60 @@ int vk_backend_tex_c3(const char *dir, char *out, size_t cap) {
         OS_EMIT(em, "  尺寸：BC3 %d 字节 → ASTC %zu 字节（×%.2f）；对照 RGBA8 %zu 字节 ⇒ ASTC 省 %.1f 倍",
                 ASTC_EXPECT_BC3_BYTES, astc_bytes, (double)astc_bytes / ASTC_EXPECT_BC3_BYTES,
                 rgba_bytes, (double)rgba_bytes / (double)astc_bytes);
-        // 吞吐：单次只有 60 块（微秒级），跑多轮取平均才稳
-        const int rounds = 200;
-        uint64_t tt0 = ms_now();
-        for (int r = 0; r < rounds; r++) nvn_bc2astc_region(0x44, bc_back, row_bytes, bx, by, astc_bad, (size_t)bx * 16);
-        uint64_t tt = ms_now() - tt0;
-        double per_block_us = tt ? (double)tt * 1000.0 / (double)(rounds * ASTC_EXPECT_BLOCKS) : 0.0;
-        double mbps = tt ? ((double)ASTC_EXPECT_BC3_BYTES * rounds / 1048576.0) / ((double)tt / 1000.0) : 0.0;
-        OS_EMIT(em, "  吞吐：%d 轮 × %d 块 = %d 块，用时 %llums ⇒ 每块 %.2f µs，源字节 %.2f MB/s",
-                rounds, ASTC_EXPECT_BLOCKS, rounds * ASTC_EXPECT_BLOCKS, (unsigned long long)tt, per_block_us, mbps);
-        OS_EMIT(em, "  换算（按此吞吐外推）：1024×1024 贴图（65536 块）≈ %.1f ms；"
-                    "2048×2048（262144 块）≈ %.0f ms —— 这个数决定运行时转码还是离线转码",
-                per_block_us * 65536.0 / 1000.0, per_block_us * 262144.0 / 1000.0);
+
+        // 吞吐在**1024×1024**上量（65536 块）：60 块的小图量不出多线程的意义（建线程的开销比活儿还大），
+        // 而真贴图正是这个量级。单线程一趟 ≈ 实测值，多线程一趟 ≈ 线程数分摊后的值。
+        const uint32_t BIG = 1024, BW = BIG / 4, BH = BIG / 4;          // 256×256 块
+        const size_t big_src = (size_t)BW * BH * 16, big_dst = (size_t)BW * BH * 16;
+        uint8_t *bs = (uint8_t *)malloc(big_src), *bd1 = (uint8_t *)malloc(big_dst), *bd2 = (uint8_t *)malloc(big_dst);
+        int ncpu = nvn_bc2astc_cpu_count();
+        int nth = ncpu > 8 ? 8 : (ncpu > 1 ? ncpu : 1);
+        if (!bs || !bd1 || !bd2) {
+            OS_EMIT(em, "  ⚠ 大图缓冲分配失败，吞吐只在 60 块小图上量");
+            const int rounds = 200;
+            uint64_t t0b = ms_now();
+            for (int r = 0; r < rounds; r++) nvn_bc2astc_region(0x44, bc_back, row_bytes, bx, by, astc_bad, (size_t)bx * 16);
+            uint64_t tt = ms_now() - t0b;
+            double per_block_us = tt ? (double)tt * 1000.0 / (double)(rounds * ASTC_EXPECT_BLOCKS) : 0.0;
+            OS_EMIT(em, "  单线程：每块 %.2f µs，源字节 %.2f MB/s",
+                    per_block_us, tt ? ((double)ASTC_EXPECT_BC3_BYTES * rounds / 1048576.0) / ((double)tt / 1000.0) : 0.0);
+        } else {
+            // 源数据：先整片填一个固定值（保证两条路读到完全相同的字节），再把 60 块图案铺进每行开头
+            memset(bs, 0x5A, big_src);
+            for (uint32_t y = 0; y < BH; y++)
+                memcpy(bs + (size_t)y * BW * 16, astc_expect_bc3, ASTC_EXPECT_BC3_BYTES);
+            // 预热（页错误、缓存冷启动都算进第一趟会失真）
+            nvn_bc2astc_region(0x44, bs, (size_t)BW * 16, BW, BH, bd1, (size_t)BW * 16);
+
+            uint64_t a0 = ms_now();
+            nvn_bc2astc_region(0x44, bs, (size_t)BW * 16, BW, BH, bd1, (size_t)BW * 16);
+            uint64_t single_ms = ms_now() - a0;
+
+            uint64_t b0 = ms_now();
+            int rc = nvn_bc2astc_region_mt(0x44, bs, (size_t)BW * 16, BW, BH, bd2, (size_t)BW * 16, nth);
+            uint64_t mt_ms = ms_now() - b0;
+
+            int same = rc == 0 && memcmp(bd1, bd2, big_dst) == 0;
+            double blocks = (double)BW * BH;
+            double s_us = single_ms ? single_ms * 1000.0 / blocks : 0.0;
+            double m_us = mt_ms ? mt_ms * 1000.0 / blocks : 0.0;
+            double s_mb = single_ms ? (big_src / 1048576.0) / (single_ms / 1000.0) : 0.0;
+            double m_mb = mt_ms ? (big_src / 1048576.0) / (mt_ms / 1000.0) : 0.0;
+
+            OS_EMIT(em, "  1024×1024（%u 块）单线程：%llums ⇒ 每块 %.2f µs、源字节 %.2f MB/s",
+                    BW * BH, (unsigned long long)single_ms, s_us, s_mb);
+            OS_EMIT(em, "  同图 %d 线程（CPU %d 核）：%llums ⇒ 每块 %.2f µs、源字节 %.2f MB/s，加速 %.1f×",
+                    nth, ncpu, (unsigned long long)mt_ms, m_us, m_mb, mt_ms ? (double)single_ms / (double)mt_ms : 0.0);
+            OS_EMIT(em, "  换算：2048×2048（262144 块）单线程 ≈ %.0f ms，%d 线程 ≈ %.0f ms",
+                    s_us * 262144.0 / 1000.0, nth, m_us * 262144.0 / 1000.0);
+
+            OS_EMIT(em, "");
+            OS_EMIT(em, "---- ⑦ 多线程 vs 单线程（1024×1024 逐字节）----");
+            OS_EMIT(em, "  %s：%d 线程的输出与单线程%s（切分只按块行，块间无依赖）",
+                    same ? "✅" : "❌", nth, same ? "**逐字节相同**" : "**不同 —— 切分有 bug**");
+            if (!same) fails++;
+            free(bs); free(bd1); free(bd2);
+        }
     }
 
     free(bl); free(bc_back); free(astc_out); free(astc_bad); free(ref_bc); free(ref_astc); free(pix);

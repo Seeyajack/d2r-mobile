@@ -19,13 +19,28 @@
 #include "nvn_bcdec.h"
 #include <string.h>
 
-// ── 位读写（ASTC 块按小端位序，bit 0 = 第 0 字节最低位）──
-// Bit access: little-endian bit order, bit 0 = LSB of byte 0.
-static void put_bits(uint8_t *b, int pos, int n, uint32_t v) {
-    for (int i = 0; i < n; i++) {
-        int p = pos + i;
-        if ((v >> i) & 1u) b[p >> 3] |= (uint8_t)(1u << (p & 7));
-        else               b[p >> 3] &= (uint8_t)~(1u << (p & 7));
+// 多线程转码只在 POSIX 上开（鸿蒙/安卓/iOS 都有 pthread；Windows 侧走单线程即可）。
+// Multi-threaded transcoding is enabled on POSIX only (HarmonyOS/Android/iOS all have pthreads).
+#if defined(__unix__) || defined(__APPLE__) || defined(__OHOS__) || defined(__linux__)
+#include <pthread.h>
+#include <unistd.h>
+#define DM_HAVE_PTHREADS 1
+#endif
+
+// ── 位写入：按**字**操作（两个 64 位字 = 128 位块）──
+// 原先逐位读改写（每块 113 个 bit，每个 bit 一次分支 + 字节 RMW），实测是转码的热点之一；
+// 改成整字或运算后每块只需十几次移位。字节序按小端拼（ARM/x86 都是小端，最后按字节落盘）。
+// Word-level bit packing: the old code did 113 branchy byte read-modify-writes per block; this does a
+// dozen shifts. Bytes are emitted little-endian explicitly, so no endianness assumption leaks out.
+static void put64(uint64_t *w, int pos, int n, uint32_t v) {
+    uint64_t mask = ((uint64_t)1 << n) - 1;
+    uint64_t val = (uint64_t)v & mask;
+    if (pos < 64) {
+        w[0] |= val << pos;
+        int room = 64 - pos;
+        if (n > room) w[1] |= val >> room;      // 跨字的高位部分
+    } else {
+        w[1] |= val << (pos - 64);
     }
 }
 static uint32_t get_bits(const uint8_t *b, int pos, int n) {
@@ -87,7 +102,6 @@ static int recon8(int p0, int p1, int w) {
 
 // ── 一块 4×4 RGBA8 → ASTC 4x4 ──
 static void astc_encode_block(const uint8_t *px, uint8_t *blk) {
-    memset(blk, 0, 16);
     int has_alpha = 0;
     for (int i = 0; i < 16; i++) if (px[i * 4 + 3] != 255) { has_alpha = 1; break; }
     const int cem  = has_alpha ? 12 : 8;         // CEM12 = RGBA 直存，CEM8 = RGB 直存（a 恒 255）
@@ -107,19 +121,27 @@ static void astc_encode_block(const uint8_t *px, uint8_t *blk) {
     // 权重：把每像素投影到 (hi-lo) 这条线上（最小二乘），再量化到最近的档位
     int d[4], dd = 0;
     for (int c = 0; c < nch; c++) { d[c] = hi[c] - lo[c]; dd += d[c] * d[c]; }
-    int nlev = 1 << wbits;
+    const int nlev = 1 << wbits;
+    // ⭐ 档位表**每块只算一次**：原先在内层循环里对每个像素的每个候选反复调 weight_unquant，
+    // 128 次/块（每次还带一个 while 循环），实测占了转码耗时的绝大部分。预生成后内外层只是查表。
+    // The level table is built once per block: calling weight_unquant for every pixel x candidate
+    // (128 calls/block, each with a loop) used to dominate the transcode cost.
+    int lv[32];
+    for (int k = 0; k < nlev; k++) lv[k] = weight_unquant(k, wbits);
     int wq[16];
     for (int i = 0; i < 16; i++) {
         int num = 0;
         for (int c = 0; c < nch; c++) num += (px[i * 4 + c] - lo[c]) * d[c];
-        // t ∈ [0,1] 用定点：t64 = 64 * num / dd
-        int t64 = dd ? (int)(((long long)num * 64 + dd / 2) / dd) : 0;
+        // t ∈ [0,1] 用定点：t64 = round(64 * num / dd)。
+        // ⚠ 这里**故意用 32 位除法**：num*64+dd/2 <= 1664 万、dd <= 260100，都在 int 范围内。
+        // 原先写成了 long long ⇒ 每像素一次 64 位除法（ARM 上是库调用，30-40 拍）；改成 int 除法是
+        // 单条指令、且**结果逐位不变**（试过倒数乘，误差 0.4% 会让个别块的权重档差 1 ⇒ 破坏逐字节判据）。
+        int t64 = dd ? (num * 64 + dd / 2) / dd : 0;
         if (t64 < 0) t64 = 0;
         if (t64 > 64) t64 = 64;
         int best = 0, bestd = 1 << 30;
         for (int k = 0; k < nlev; k++) {
-            int u = weight_unquant(k, wbits);
-            int diff = u - t64;
+            int diff = lv[k] - t64;
             if (diff < 0) diff = -diff;
             if (diff < bestd) { bestd = diff; best = k; }
         }
@@ -132,21 +154,22 @@ static void astc_encode_block(const uint8_t *px, uint8_t *blk) {
     //   height = bits[6:5] + 2 → 4  ⇒ bits[6:5] = 2
     //   权重范围索引 = (bit9<<3) | (bit4 | (bits[1:0]<<1))，表 {-1,-1,1,2,3,4,5,7,...}
     //     R=3 → 索引 4 ⇒ bits[1:0]=2、bit4=0；R=7 → 索引 7 ⇒ bits[1:0]=3、bit4=1
-    put_bits(blk, 0, 2, (rng == 7) ? 3u : 2u);
-    put_bits(blk, 2, 2, 0);                       // bits[3:2] = 0
-    put_bits(blk, 4, 1, (rng == 7) ? 1u : 0u);    // bit 4
-    put_bits(blk, 5, 2, 2);                       // height = 4
-    put_bits(blk, 7, 2, 0);                       // width = 4
-    put_bits(blk, 9, 1, 0);                       // 权重范围高位
-    put_bits(blk, 10, 1, 0);                      // 无 dual plane
-    put_bits(blk, 11, 2, 0);                      // 分区数 = 1
-    put_bits(blk, 13, 4, (uint32_t)cem);
+    uint64_t w[2] = { 0, 0 };
+    put64(w, 0, 2, (rng == 7) ? 3u : 2u);
+    put64(w, 2, 2, 0);                       // bits[3:2] = 0
+    put64(w, 4, 1, (rng == 7) ? 1u : 0u);    // bit 4
+    put64(w, 5, 2, 2);                       // height = 4
+    put64(w, 7, 2, 0);                       // width = 4
+    put64(w, 9, 1, 0);                       // 权重范围高位
+    put64(w, 10, 1, 0);                      // 无 dual plane
+    put64(w, 11, 2, 0);                      // 分区数 = 1
+    put64(w, 13, 4, (uint32_t)cem);
 
     // 端点：按通道交错 R0,R1,G0,G1,B0,B1[,A0,A1]，各 8 位，从 bit 17 起
     int pos = 17;
     for (int c = 0; c < nch; c++) {
-        put_bits(blk, pos, 8, (uint32_t)lo[c]); pos += 8;
-        put_bits(blk, pos, 8, (uint32_t)hi[c]); pos += 8;
+        put64(w, pos, 8, (uint32_t)lo[c]); pos += 8;
+        put64(w, pos, 8, (uint32_t)hi[c]); pos += 8;
     }
     // 权重：**从块顶往下填**——第 0 个纹素的权重 LSB 在 bit(128-wbits)，第 15 个在最低那段。
     // ⚠ 这里写反过一次：原先从 bit(128-wtotal) 往上填（第 0 个在最低），本地解码器照着同一套写，
@@ -158,8 +181,12 @@ static void astc_encode_block(const uint8_t *px, uint8_t *blk) {
     // passed, and only the GPU (3.4-E) exposed the reversed texel order.
     int wpos = 128 - wbits;
     for (int i = 0; i < 16; i++) {
-        put_bits(blk, wpos, wbits, (uint32_t)wq[i]);
+        put64(w, wpos, wbits, (uint32_t)wq[i]);
         wpos -= wbits;
+    }
+    for (int i = 0; i < 8; i++) {
+        blk[i]     = (uint8_t)(w[0] >> (8 * i));
+        blk[8 + i] = (uint8_t)(w[1] >> (8 * i));
     }
 }
 
@@ -179,10 +206,19 @@ int nvn_bc2astc_block(uint32_t f, const uint8_t *src, uint8_t *dst) {
     return 0;
 }
 
+// 一块 BC 多少字节：BC1/BC4 是 8，其余（BC2/3/5/6H/7）是 16。
+// 与 nvn_bcdec.c 顶部那张格式分组保持一致（改一处要改两处）。
+static int bc_bpb_bytes(uint32_t f) {
+    switch (f) {
+    case 0x41: case 0x42: case 0x45: case 0x46: case 0x49: case 0x4a: return 8;
+    default: return 16;
+    }
+}
+
 int nvn_bc2astc_region(uint32_t f, const uint8_t *src, size_t src_pitch,
                        uint32_t bx, uint32_t by, uint8_t *dst, size_t dst_pitch) {
     if (!nvn_bc2astc_ok(f)) return -1;
-    int bb = (f == 0x41 || f == 0x42 || f == 0x45 || f == 0x46 || f == 0x49 || f == 0x4a) ? 8 : 16;
+    int bb = bc_bpb_bytes(f);
     for (uint32_t y = 0; y < by; y++)
         for (uint32_t x = 0; x < bx; x++) {
             if (nvn_bc2astc_block(f, src + (size_t)y * src_pitch + (size_t)x * bb,
@@ -190,6 +226,70 @@ int nvn_bc2astc_region(uint32_t f, const uint8_t *src, size_t src_pitch,
                 return -1;
         }
     return 0;
+}
+
+// ── 多线程：按**块行**切分（每块独立、行间无依赖，所以切分不影响结果）──
+// 判据：与单线程**逐字节相同**（3.4-E 的判据⑦）。块行是最自然的粒度：不需要锁、不需要原子量。
+// Split by block rows: blocks are independent and rows share nothing, so the split cannot change
+// the result. The judge is byte-identical output vs the single-threaded path (3.4-E judge 7).
+int nvn_bc2astc_cpu_count(void) {
+#if defined(DM_HAVE_PTHREADS)
+    long n = sysconf(_SC_NPROCESSORS_ONLN);
+    return n > 0 ? (int)n : 0;
+#else
+    return 0;
+#endif
+}
+
+#if defined(DM_HAVE_PTHREADS)
+typedef struct {
+    uint32_t f, bx, y0, y1;
+    const uint8_t *src; size_t sp;
+    uint8_t *dst; size_t dp;
+} bc2astc_job;
+
+static void *bc2astc_worker(void *p) {
+    bc2astc_job *j = (bc2astc_job *)p;
+    int bb = bc_bpb_bytes(j->f);
+    for (uint32_t y = j->y0; y < j->y1; y++)
+        for (uint32_t x = 0; x < j->bx; x++)
+            nvn_bc2astc_block(j->f, j->src + (size_t)y * j->sp + (size_t)x * bb,
+                              j->dst + (size_t)y * j->dp + (size_t)x * 16);
+    return NULL;
+}
+#endif
+
+int nvn_bc2astc_region_mt(uint32_t f, const uint8_t *src, size_t src_pitch,
+                          uint32_t bx, uint32_t by, uint8_t *dst, size_t dst_pitch,
+                          int nthreads) {
+    if (!nvn_bc2astc_ok(f)) return -1;
+#if defined(DM_HAVE_PTHREADS)
+    if (nthreads > (int)by) nthreads = (int)by;      // 行数不够就别开那么多线程
+    if (nthreads > 1 && by > 0) {
+        pthread_t th[16];
+        bc2astc_job job[16];
+        int n = nthreads > 16 ? 16 : nthreads;
+        uint32_t per = by / (uint32_t)n, rem = by % (uint32_t)n, y = 0;
+        int started = 0;
+        for (int i = 0; i < n; i++) {
+            uint32_t cnt = per + (i < (int)rem ? 1u : 0u);
+            job[i] = (bc2astc_job){ f, bx, y, y + cnt, src, src_pitch, dst, dst_pitch };
+            y += cnt;
+            // 最后一段留给本线程做，省一次建线程/等待
+            if (i < n - 1) {
+                if (pthread_create(&th[i], NULL, bc2astc_worker, &job[i]) == 0) started++;
+                else { bc2astc_worker(&job[i]); th[i] = 0; }
+            }
+        }
+        bc2astc_worker(&job[n - 1]);
+        for (int i = 0; i < n - 1; i++) if (th[i]) pthread_join(th[i], NULL);
+        (void)started;
+        return 0;
+    }
+#else
+    (void)nthreads;
+#endif
+    return nvn_bc2astc_region(f, src, src_pitch, bx, by, dst, dst_pitch);
 }
 
 // ── 自测解码器：只认本编码器产出的两种配置 ──
