@@ -272,7 +272,7 @@ static napi_value RunVkTex(napi_env env, napi_callback_info info) {
     napi_value ret = NULL;
     char *buf = (char *)malloc(VKSMOKE_BUF);
     if (!buf) { napi_create_string_utf8(env, "内存不足", NAPI_AUTO_LENGTH, &ret); return ret; }
-    vk_backend_tex(buf, VKSMOKE_BUF);
+    vk_backend_tex(files_dir, buf, VKSMOKE_BUF);
     napi_create_string_utf8(env, buf, NAPI_AUTO_LENGTH, &ret);
     free(buf);
     return ret;
@@ -298,7 +298,20 @@ static napi_value RunVkTexC1(napi_env env, napi_callback_info info) {
     napi_value ret = NULL;
     char *buf = (char *)malloc(VKSMOKE_BUF);
     if (!buf) { napi_create_string_utf8(env, "内存不足", NAPI_AUTO_LENGTH, &ret); return ret; }
-    vk_backend_tex_c1(buf, VKSMOKE_BUF);
+    vk_backend_tex_c1(files_dir, buf, VKSMOKE_BUF);
+    napi_create_string_utf8(env, buf, NAPI_AUTO_LENGTH, &ret);
+    free(buf);
+    return ret;
+}
+
+static napi_value RunVkTexC3(napi_env env, napi_callback_info info) {
+    // 阶段 4（3.4-E）：C3 设备接线 —— BC3 转 ASTC 4x4 → 上传 → 采样。
+    char files_dir[1024];
+    Arg0String(env, info, files_dir, sizeof files_dir);
+    napi_value ret = NULL;
+    char *buf = (char *)malloc(VKSMOKE_BUF);
+    if (!buf) { napi_create_string_utf8(env, "内存不足", NAPI_AUTO_LENGTH, &ret); return ret; }
+    vk_backend_tex_c3(files_dir, buf, VKSMOKE_BUF);
     napi_create_string_utf8(env, buf, NAPI_AUTO_LENGTH, &ret);
     free(buf);
     return ret;
@@ -389,6 +402,7 @@ static napi_value Init(napi_env env, napi_value exports) {
         { "runVkTex",       NULL, RunVkTex,       NULL, NULL, NULL, napi_default, NULL },
         { "runVkTexLayout", NULL, RunVkTexLayout, NULL, NULL, NULL, napi_default, NULL },
         { "runVkTexC1",     NULL, RunVkTexC1,     NULL, NULL, NULL, napi_default, NULL },
+        { "runVkTexC3",     NULL, RunVkTexC3,     NULL, NULL, NULL, napi_default, NULL },
         { "runVkOnScreenReplay", NULL, RunVkOnScreenReplay, NULL, NULL, NULL, napi_default, NULL },
         { "runVkZeroCost",  NULL, RunVkZeroCost,  NULL, NULL, NULL, napi_default, NULL },
         { "runVkPaceTest",  NULL, RunVkPaceTest,  NULL, NULL, NULL, napi_default, NULL },

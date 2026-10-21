@@ -123,7 +123,7 @@ int     vk_backend_pace_xc(char *out, size_t cap);
 // CPU 用上游 `gfx/tex/nvn_bcdec.c`（就是写给"没有 BC 的 GPU"用的那份，平台中立）解一张 BC1 贴图当**参照**；
 // GPU 侧自建 `VkImage` + 暂存上传 + 采样器/描述符 + 全屏 1:1 采样，读回后**逐像素对照**（±1）。
 // 偏心地讲：无论后续选"CPU 解→未压缩"（C1）还是"GPU 转码"（C3），这条参照链都绕不开。
-int     vk_backend_tex(char *out, size_t cap);
+int     vk_backend_tex(const char *dir, char *out, size_t cap);
 
 // 阶段 4（3.4-B）：**块线性解排布**（Tegra GOB）—— 直接收编上游单测 `dm/gfx/tex/tests/t_tex.c`
 // （A 往返 / B 手算地址 / C·D 真数据对拍+错块高负对照 / E 手工 3D 标记），
@@ -138,7 +138,15 @@ int     vk_backend_tex_layout(const char *dir, char *out, size_t cap);
 // 三条判据：① 解排布往返逐字节一致 + 越界哨兵完好；② 上传/采样结果与 CPU 解码逐像素一致（±1）；
 // ③ **负向判据**：跳过解排布直接解码 ⇒ 结果必须不同（证明解排布不是空转）。
 // 报告里另附 C1 的代价：BC1 0.5 B/px → RGBA8 4 B/px（显存与带宽 ×8）。
-int     vk_backend_tex_c1(char *out, size_t cap);
+int     vk_backend_tex_c1(const char *dir, char *out, size_t cap);
+
+// 阶段 4（3.4-E）：**C3 设备接线** —— BC3 转 ASTC 4x4 → 上传 → 采样。
+// C3 第 1 步只证明了算法离线自洽，这一步证明**设备认**：能力怎么查、选哪条路（BC 直传 / ASTC 转码 /
+// 未压缩回落）、ASTC 图像建不建得出来、GPU 解出来的像素对不对。转码有损，判据因此换成一套：
+//   ⓪ 能力表 + 选路   ① 解排布往返   ② 转码块字节 vs 参考（逐字节）
+//   ③ GPU 采样 vs 本地 ASTC 解码（±1，最锋利）  ④ GPU 采样 vs CPU 的 BC 解码（PSNR + 最大差）
+//   ⑤ 跳过解排布的负向   ⑥ 尺寸与吞吐（决定运行时转码还是离线转码）
+int     vk_backend_tex_c3(const char *dir, char *out, size_t cap);   // dir：报告落盘目录（可空）
 
 // 阶段 4（3.4-D）：**出图与回放层合流** —— 手写命令流 → `nvn_vk_exec` 回放 → 画进**交换链图像** → 上屏。
 // 3.3-A 的上屏走的是探针自己搭的最小管线，3.2 的回放只画到离屏目标；这一步把两条接起来

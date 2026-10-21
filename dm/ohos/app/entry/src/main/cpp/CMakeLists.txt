@@ -34,6 +34,11 @@ add_library(dmprobe SHARED
     ${DM_DIR}/gfx/nvn/nvn_tex.c
     # C3：BC → ASTC 4x4 转码（BC 贴图不再解成 RGBA8 上传，省 4~8 倍显存与带宽）
     ${DM_DIR}/gfx/tex/nvn_bc2astc.c
+    # C3 第 2 步：贴图上传路径的选路（平台中立）+ 鸿蒙侧的能力查询/格式映射。
+    # 为什么分两个文件：选路逻辑与平台无关（苹果侧将来填自己的能力表就能复用），
+    # 而"设备认不认某个格式"只有平台知道（Vulkan 查 formatProperties）。
+    ${DM_DIR}/gfx/tex/nvn_tex_path.c
+    ${DM_DIR}/ohos/dm_tex_ohos.c
     # 宿主单测跑测框架 + 统一日志（框架靠 dlopen 去载入各单测 .so，所以它自己很薄）
     ${DM_DIR}/ohos/host_tests.c
     ${DM_DIR}/ohos/host_tests_gen.c   # 生成：单测清单（哪些 .so、叫什么名字）
@@ -87,7 +92,7 @@ target_include_directories(dmprobe PRIVATE
 # libnative_display_soloist.so 是 3.3-B 的报时员（OH_DisplaySoloist，头文件 native_display_soloist/）：
 # 系统每拍 VSync 调一次回调，用来量真实帧间隔、设期望帧率。
 target_link_libraries(dmprobe PUBLIC libace_napi.z.so libace_ndk.z.so libhilog_ndk.z.so libvulkan.so
-    libnative_display_soloist.so)
+    libnative_display_soloist.so m)   # m：3.4-E 用 log10 算 PSNR（bionic 里数学函数在独立 libm 里）
 
 # ---- 宿主单测：每个单测一个 .so（由 tools/gen_host_tests.py 从上游 Makefile 生成）----
 # 结构照上游"每个单测一个可执行文件"。跑测框架按名字 dlopen 它们、取各自的 main 来调。

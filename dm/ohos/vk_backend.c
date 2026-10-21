@@ -17,7 +17,10 @@
 #include "vk_surface_ohos.h"
 
 #include "../gfx/tex/nvn_bcdec.h"       // 3.4-A：上游那份"给没有 BC 的 GPU 用"的 CPU 解码器（平台中立）
+#include "../gfx/tex/nvn_bc2astc.h"     // 3.4-E（C3）：BC → ASTC 4x4 转码（含自测解码器）
 #include "../gfx/tex/nvn_deswizzle.h"   // 3.4-C：块线性 ↔ 线性（含 nvn_tex.h 的布局类型 nvn_texdesc/nvn_texlayout）
+#include "astc_expect.h"                // 3.4-E：期望块字节（生成文件，见 tools/astc_ref.py --emit-header）
+#include "dm_tex_ohos.h"                // 3.4-E：能力查询 + 选路（生产路径也走这里）
 
 #include <dlfcn.h>         // 3.4-B：按名字载入上游贴图单测的 .so（与宿主单测同一套做法）
 #include <pthread.h>
@@ -27,6 +30,7 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>          // usleep：轮询等拍、等回调退出
+#include <math.h>            // 3.4-E：log10 算 PSNR（转码有损，判据要用 dB）
 
 #include <vulkan/vulkan.h>
 
@@ -2623,11 +2627,18 @@ static void rec_tex_draw(VkCommandBuffer cb, void *ud) {
     vkCmdCopyImageToBuffer(cb, t->img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, t->rb, 1, &reg);
 }
 
-// 把一张 w×h 的 RGBA8 图上传成纹理、用 NEAREST 1:1 采样画满离屏目标 t、再读回 out_pix。
-// 调用方负责：t 已经按 **同一个 w×h** 建好；out_pix 至少 w*h*4 字节。
+// 把一张 w×h 的贴图（任意 VkFormat，字节已按该格式紧凑排好）上传成纹理、用 NEAREST 1:1 采样
+// 画满离屏目标 t、再读回 out_pix。调用方负责：t 已经按 **同一个 w×h** 建好；out_pix 至少 w*h*4 字节。
 // 返回 0 成功；非 0 失败（失败原因已打进报告）。
-static int tex_gpu_render(os_emit *em, vk_ctx *c, vk_rt *t, const uint8_t *rgba, uint32_t w, uint32_t h, uint8_t *out_pix) {
-    const size_t nbytes = (size_t)w * h * 4;
+//
+// 为什么参数化格式：3.4-A/C 传的是 RGBA8，C3（3.4-E）要传 **ASTC 4x4**——两者只差"图像/视图的格式"
+// 和"暂存字节数"，其余（暂存、布局转换、采样器、描述符、管线、读回）一字不差。各写一份的话，
+// 以后改一处就会漏另一处（这条教训在 3.4-C 抽共用管道时已经吃过一次）。
+// Why the format is a parameter: 3.4-A/C upload RGBA8 while C3 (3.4-E) uploads ASTC 4x4; only the
+// image/view format and the staging size differ -- everything else is identical.
+static int tex_gpu_render_fmt(os_emit *em, vk_ctx *c, vk_rt *t, VkFormat fmt,
+                              const void *bytes, size_t nbytes,
+                              uint32_t w, uint32_t h, uint8_t *out_pix) {
     VkImage img = NULL; VkDeviceMemory img_mem = NULL; VkBuffer stg = NULL; VkDeviceMemory stg_mem = NULL;
     VkSampler smp = NULL; VkImageView view = NULL;
     VkDescriptorSetLayout dsl = NULL; VkDescriptorPool dpool = NULL; VkDescriptorSet dset = NULL;
@@ -2637,7 +2648,7 @@ static int tex_gpu_render(os_emit *em, vk_ctx *c, vk_rt *t, const uint8_t *rgba,
 
     {
         VkImageCreateInfo ii = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
-        ii.imageType = VK_IMAGE_TYPE_2D; ii.format = VK_FORMAT_R8G8B8A8_UNORM;
+        ii.imageType = VK_IMAGE_TYPE_2D; ii.format = fmt;
         ii.extent = (VkExtent3D){ w, h, 1 };
         ii.mipLevels = 1; ii.arrayLayers = 1; ii.samples = VK_SAMPLE_COUNT_1_BIT;
         ii.tiling = VK_IMAGE_TILING_OPTIMAL;
@@ -2673,9 +2684,9 @@ static int tex_gpu_render(os_emit *em, vk_ctx *c, vk_rt *t, const uint8_t *rgba,
         if (vkMapMemory(c->dev, stg_mem, 0, nbytes, 0, &mp) != VK_SUCCESS) {
             OS_EMIT(em, "❌ 暂存缓冲映射失败"); goto fail;
         }
-        memcpy(mp, rgba, nbytes); vkUnmapMemory(c->dev, stg_mem);
+        memcpy(mp, bytes, nbytes); vkUnmapMemory(c->dev, stg_mem);
     }
-    OS_EMIT(em, "✓ 自建纹理图像（RGBA8 UNORM %ux%u，device-local）+ 暂存缓冲就绪", w, h);
+    OS_EMIT(em, "✓ 自建纹理图像（格式 #%d，%ux%u，device-local）+ 暂存缓冲 %zu 字节", (int)fmt, w, h, nbytes);
 
     {
         tex_up_pack u = { img, stg, w, h };
@@ -2695,7 +2706,7 @@ static int tex_gpu_render(os_emit *em, vk_ctx *c, vk_rt *t, const uint8_t *rgba,
         if (r != VK_SUCCESS) { set_err(err, sizeof err, "vkCreateSampler", r); goto fail; }
 
         VkImageViewCreateInfo vi = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
-        vi.image = img; vi.viewType = VK_IMAGE_VIEW_TYPE_2D; vi.format = VK_FORMAT_R8G8B8A8_UNORM;
+        vi.image = img; vi.viewType = VK_IMAGE_VIEW_TYPE_2D; vi.format = fmt;
         vi.subresourceRange = (VkImageSubresourceRange){ VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
         r = vkCreateImageView(c->dev, &vi, NULL, &view);
         if (r != VK_SUCCESS) { set_err(err, sizeof err, "vkCreateImageView(tex)", r); goto fail; }
@@ -2776,7 +2787,8 @@ static int tex_gpu_render(os_emit *em, vk_ctx *c, vk_rt *t, const uint8_t *rgba,
     {
         tex_draw_pack dp = { t, pl, lay, dset, w, h };
         if (one_shot(c, rec_tex_draw, &dp) != 0) { OS_EMIT(em, "❌ 绘制提交失败"); fails++; goto done; }
-        if (vk_backend_readback(c, t, out_pix, nbytes) < 0) { OS_EMIT(em, "❌ 读回失败"); fails++; goto done; }
+        // 读回的是**离屏目标的像素**（RGBA8），与源贴图的格式无关 ⇒ 长度按 w*h*4 算，不能用 nbytes。
+        if (vk_backend_readback(c, t, out_pix, (size_t)w * h * 4) < 0) { OS_EMIT(em, "❌ 读回失败"); fails++; goto done; }
     }
 
 done:
@@ -2797,6 +2809,14 @@ fail:
     goto done;
 }
 
+// 3.4-A / 3.4-C 走的那条：RGBA8 未压缩上传。保留这个名字与签名，是为了"改通道前后逐项对账"——
+// 那两个测试的判据（逐像素差 0）必须一字不变地仍然成立，否则说明泛化时改坏了。
+// The RGBA8 route used by 3.4-A / 3.4-C; keeping this wrapper lets those two tests be re-run
+// unchanged after the generalisation, which is exactly the reconciliation this refactor needs.
+static int tex_gpu_render(os_emit *em, vk_ctx *c, vk_rt *t, const uint8_t *rgba, uint32_t w, uint32_t h, uint8_t *out_pix) {
+    return tex_gpu_render_fmt(em, c, t, VK_FORMAT_R8G8B8A8_UNORM, rgba, (size_t)w * h * 4, w, h, out_pix);
+}
+
 // 逐像素比对：返回"差 >1 的像素数"，并把最大通道差写进 *worst_out
 static int tex_diff(const uint8_t *a, const uint8_t *b, uint32_t npix, int *worst_out, int *first_out) {
     int mismatch = 0, worst = 0, first = -1;
@@ -2815,7 +2835,19 @@ static int tex_diff(const uint8_t *a, const uint8_t *b, uint32_t npix, int *wors
     return mismatch;
 }
 
-int vk_backend_tex(char *out, size_t cap) {
+// 报告落盘（dir 为空则只回显）：界面上的文本框只有一屏，而这条报告的判据有六组，
+// 用截图去读既费劲又容易漏行 —— 与 3.4-B 一样，写一份文件，`hdc shell cat` 直接取全文。
+static void dump_report(const char *dir, const char *name, const char *text) {
+    if (!dir || !*dir) return;
+    char path[1024];
+    snprintf(path, sizeof path, "%s/%s", dir, name);
+    FILE *f = fopen(path, "wb");
+    if (!f) return;
+    fwrite(text, 1, strlen(text), f);
+    fclose(f);
+}
+
+int vk_backend_tex(const char *dir, char *out, size_t cap) {
     if (!out || cap < 256) return -1;
     os_emit *em = &(os_emit){ out, out + cap - 1 };
     int fails = 0;
@@ -2893,6 +2925,7 @@ int vk_backend_tex(char *out, size_t cap) {
     OS_EMIT(em, "===== 3.4-A %s：失败 %d 项（总耗时 %llums）=====",
             fails ? "未全通过" : "全部通过", fails, (unsigned long long)(ms_now() - t0));
     *em->p = 0;
+    dump_report(dir, "dm_tex_a.log", out);
     return fails;
 }
 
@@ -2913,7 +2946,7 @@ int vk_backend_tex(char *out, size_t cap) {
 #define TEXC_W 40
 #define TEXC_H 24
 
-int vk_backend_tex_c1(char *out, size_t cap) {
+int vk_backend_tex_c1(const char *dir, char *out, size_t cap) {
     if (!out || cap < 256) return -1;
     os_emit *em = &(os_emit){ out, out + cap - 1 };
     int fails = 0;
@@ -3029,6 +3062,330 @@ int vk_backend_tex_c1(char *out, size_t cap) {
     OS_EMIT(em, "===== 3.4-C（C1）%s：失败 %d 项（总耗时 %llums）=====",
             fails ? "未全通过" : "全部通过", fails, (unsigned long long)(ms_now() - t0));
     *em->p = 0;
+    dump_report(dir, "dm_tex_c1.log", out);
+    return fails;
+}
+
+// ================= 阶段 4（3.4-E）：C3 设备接线 —— BC3 → ASTC 4x4 → 上传 → 采样 =================
+// C3 的第 1 步（`gfx/tex/nvn_bc2astc.c` + `tools/astc_ref.py`）只证明了算法离线自洽；这一步证明
+// **设备认**：能力怎么查、选哪条路、ASTC 图像建不建得出来、GPU 解出来的像素对不对。
+// Step 1 of C3 proved the algorithm offline; this step proves the device accepts it.
+//
+// 与 3.4-C（C1）的区别只有一处：C1 把 BC 解成 RGBA8（4 B/px），这里转成 ASTC 4x4（1 B/px）。
+// 所以判据也换了一套 —— 转码**有损**，不能再要求"逐像素 0 差"：
+//   ⓪ 能力表 + 选路：逐个格式报 sampled/transfer 支持 + ASTC 扩展是否启用 ⇒ 给出走哪条路
+//   ① 解排布往返逐字节一致 + 哨兵完好（与 3.4-C 同款：转码的输入必须是**解排布后**的线性块序）
+//   ② 转码块字节 vs `tools/astc_ref.py` 生成的期望表：**逐字节**（这条把"算法错"与"实现错"分开）
+//   ③ GPU 采样 vs 本地 ASTC 解码（nvn_astc4x4_decode）：**±1 逐像素** ← 最锋利的一条，
+//      它证明"我们写出的 16 字节块是合法 ASTC，且位域理解正确"
+//   ④ GPU 采样 vs CPU 的 BC 解码（理想图）：PSNR 不差于参考值 0.5 dB + 最大通道差 ≤ 32
+//   ⑤ 负向：跳过解排布直接转码 ⇒ 转码结果必须不同（否则解排布是空转）
+//   ⑥ 账：尺寸（BC3 → ASTC 几倍）+ 转码吞吐（决定"运行时转码"还是"离线转码"）
+//
+// 为什么借**共享上下文**而不是 vk_backend_init 自带的那个：生产路径（游戏贴图）走的是共享上下文，
+// 那条设备上的 ASTC 扩展才是真正要验的东西；用测试后端自建的设备验，等于验了另一台设备。
+// Why borrow the shared context: production textures go through it, so its device (and its ASTC
+// extension) is what must be validated -- probing a separate test device would prove the wrong thing.
+static void vk_ctx_borrow_shared(vk_ctx *c) {
+    memset(c, 0, sizeof *c);
+    c->inst  = dm_ohos_vk_instance();
+    c->phy   = dm_ohos_vk_phys();
+    c->dev   = dm_ohos_vk_device();
+    c->queue = dm_ohos_vk_queue();
+    c->qfam  = dm_ohos_vk_qfam();
+    c->pool  = dm_ohos_vk_pool();
+    snprintf(c->devname, sizeof c->devname, "%s", dm_ohos_vk_devname());
+}
+
+// PSNR（只算 RGB 三通道：alpha 在真贴图里多是遮罩，混进来会掩盖颜色误差；需要时单独报）
+static double tex_psnr_rgb(const uint8_t *a, const uint8_t *b, uint32_t npix) {
+    double se = 0.0;
+    for (uint32_t i = 0; i < npix; i++)
+        for (int k = 0; k < 3; k++) {
+            double d = (double)a[(size_t)i * 4 + k] - (double)b[(size_t)i * 4 + k];
+            se += d * d;
+        }
+    if (se == 0.0) return 99.0;
+    double mse = se / ((double)npix * 3.0);
+    return 10.0 * log10((255.0 * 255.0) / mse);
+}
+
+int vk_backend_tex_c3(const char *dir, char *out, size_t cap) {
+    if (!out || cap < 256) return -1;
+    os_emit *em = &(os_emit){ out, out + cap - 1 };
+    int fails = 0;
+    uint64_t t0 = ms_now();
+
+    OS_EMIT(em, "=== 阶段 4（3.4-E）：C3 设备接线 —— BC3 转 ASTC 4x4 → 上传 → 采样 ===");
+    OS_EMIT(em, "贴图 %d×%d BC3（NVN 0x44 DXT5，%d 块），转码成 ASTC 4x4（同样 %d 块、每块 16 字节）",
+            ASTC_EXPECT_W, ASTC_EXPECT_H, ASTC_EXPECT_BLOCKS, ASTC_EXPECT_BLOCKS);
+
+    // ---- ⓪ 能力表与选路 ----
+    OS_EMIT(em, "");
+    OS_EMIT(em, "---- ⓪ 设备能力（optimal tiling：能采样 + 能当上传目标）----");
+    OS_EMIT(em, "  ASTC 已启用（特性位/扩展）：%s", dm_ohos_tex_astc_enabled() ? "是" : "**否**（ASTC 格式不合法，选路会回落）");
+    {
+        struct { VkFormat f; const char *name; } fmts[] = {
+            { VK_FORMAT_BC1_RGBA_UNORM_BLOCK,   "BC1 (DXT1)" },
+            { VK_FORMAT_BC3_UNORM_BLOCK,        "BC3 (DXT5)" },
+            { VK_FORMAT_BC7_UNORM_BLOCK,        "BC7" },
+            { VK_FORMAT_ASTC_4x4_UNORM_BLOCK,   "ASTC 4x4" },
+            { VK_FORMAT_ASTC_4x4_SRGB_BLOCK,    "ASTC 4x4 sRGB" },
+            { VK_FORMAT_R8G8B8A8_UNORM,         "RGBA8" },
+        };
+        for (size_t i = 0; i < sizeof fmts / sizeof fmts[0]; i++) {
+            VkFormatFeatureFlags opt = 0, lin = 0;
+            dm_ohos_fmt_features(fmts[i].f, &opt, &lin);
+            OS_EMIT(em, "  %-14s optimal: 采样=%s 上传目标=%s%s", fmts[i].name,
+                    (opt & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) ? "有" : "无",
+                    (opt & VK_FORMAT_FEATURE_TRANSFER_DST_BIT) ? "有" : "无",
+                    dm_ohos_fmt_ok(fmts[i].f) ? "  ⇒ 可用" : "  ⇒ 不可用");
+        }
+    }
+    dm_tex_plan plan;
+    if (dm_ohos_tex_plan(0x44, &plan) != 0) {
+        OS_EMIT(em, "❌ 选路失败：0x44（BC3）没有可用路径");
+        OS_EMIT(em, "===== 3.4-E 未通过：失败 1 项 =====");
+        *em->p = 0;
+        return 1;
+    }
+    OS_EMIT(em, "  ⇒ 选路（NVN 0x44 BC3）：**%s**，上传格式 #%d（BC 原生=%d、ASTC=%d）",
+            nvn_tex_path_name(plan.path), (int)plan.fmt, plan.bc_native, plan.astc_ok);
+    if (plan.path != NVN_TEX_PATH_ASTC) {
+        // 不是失败：设备若有 BC 原生支持，直传更省，那也算"接线成功"。但本机预期是 ASTC。
+        OS_EMIT(em, "  ⚠ 本次选路没走 ASTC（设备原生支持 BC，或 ASTC 没启用）—— 下面**强制按 ASTC 走一遍**以验通道");
+    }
+    // 强制验证用哪个格式：选路走 ASTC 就用它的格式；否则显式用 ASTC 4x4 UNORM，
+    // 这样"ASTC 通道到底通不通"与"选路对不对"是两件事，报告里能分开看。
+    const VkFormat up_fmt = (plan.path == NVN_TEX_PATH_ASTC) ? plan.fmt : VK_FORMAT_ASTC_4x4_UNORM_BLOCK;
+
+    // ---- 布局与缓冲区 ----
+    nvn_texdesc d;
+    memset(&d, 0, sizeof d);
+    d.target = 1; d.format = 0x44; d.width = ASTC_EXPECT_W; d.height = ASTC_EXPECT_H;
+    d.depth = 1; d.levels = 1;
+    nvn_texlayout L;
+    nvn_tex_layout(&d, &L);
+    const uint32_t bx = ASTC_EXPECT_W / 4, by = ASTC_EXPECT_H / 4;
+    const size_t row_bytes = (size_t)bx * 16;                 // BC3 每块行字节（与 ASTC 相同）
+    const size_t astc_bytes = (size_t)bx * by * 16;
+
+    uint8_t *bl       = (uint8_t *)malloc((size_t)L.size + 4096);
+    uint8_t *bc_back  = (uint8_t *)malloc(ASTC_EXPECT_BC3_BYTES);
+    uint8_t *astc_out = (uint8_t *)malloc(astc_bytes);
+    uint8_t *astc_bad = (uint8_t *)malloc(astc_bytes);
+    uint8_t *ref_bc   = (uint8_t *)malloc((size_t)ASTC_EXPECT_W * ASTC_EXPECT_H * 4);
+    uint8_t *ref_astc = (uint8_t *)malloc((size_t)ASTC_EXPECT_W * ASTC_EXPECT_H * 4);
+    uint8_t *pix      = (uint8_t *)malloc((size_t)ASTC_EXPECT_W * ASTC_EXPECT_H * 4);
+    if (!bl || !bc_back || !astc_out || !astc_bad || !ref_bc || !ref_astc || !pix) {
+        OS_EMIT(em, "❌ 内存不足");
+        free(bl); free(bc_back); free(astc_out); free(astc_bad); free(ref_bc); free(ref_astc); free(pix);
+        *em->p = 0;
+        return 1;
+    }
+    memset(bl, 0xAB, (size_t)L.size + 4096);
+    OS_EMIT(em, "");
+    OS_EMIT(em, "  布局（上游 nvn_tex_layout）：块线性 %llu 字节、每块 %u 字节、块高 %u GOB；"
+                "线性 BC3 = %d 字节，ASTC 4x4 = %zu 字节",
+            (unsigned long long)L.size, L.bpb, L.tileH, ASTC_EXPECT_BC3_BYTES, astc_bytes);
+
+    // ---- ① 解排布往返（转码的输入必须是解排布后的线性块序）----
+    if (nvn_swizzle(&d, 0, 0, astc_expect_bc3, row_bytes, bl) != 0) {
+        OS_EMIT(em, "❌ nvn_swizzle 失败"); fails++;
+    } else if (nvn_deswizzle(&d, 0, 0, bl, bc_back, row_bytes) != 0) {
+        OS_EMIT(em, "❌ nvn_deswizzle 失败"); fails++;
+    } else {
+        int same = memcmp(astc_expect_bc3, bc_back, ASTC_EXPECT_BC3_BYTES) == 0;
+        int guard_ok = 1;
+        for (size_t i = 0; i < 4096; i++) if (bl[L.size + i] != 0xAB) { guard_ok = 0; break; }
+        OS_EMIT(em, "");
+        OS_EMIT(em, "---- ① 解排布往返 ----");
+        OS_EMIT(em, "  %s 线性 → 块线性 → 线性：%s", same ? "✅" : "❌", same ? "逐字节一致" : "**不一致**");
+        OS_EMIT(em, "  %s 存储末尾 4096 字节哨兵%s", guard_ok ? "✅" : "❌", guard_ok ? "完好" : "**被破坏**");
+        if (!same || !guard_ok) fails++;
+    }
+
+    // ---- ② 转码块字节 vs 参考实现（逐字节）----
+    if (!fails) {
+        if (nvn_bc2astc_region(0x44, bc_back, row_bytes, bx, by, astc_out, (size_t)bx * 16) != 0) {
+            OS_EMIT(em, "❌ nvn_bc2astc_region 失败"); fails++;
+        } else {
+            int ndiff = 0, firstblk = -1, firstbyte = -1;
+            for (int i = 0; i < ASTC_EXPECT_BLOCKS; i++) {
+                if (memcmp(astc_out + (size_t)i * 16, astc_expect_astc + (size_t)i * 16, 16) != 0) {
+                    if (firstblk < 0) {
+                        firstblk = i;
+                        for (int k = 0; k < 16; k++)
+                            if (astc_out[(size_t)i * 16 + k] != astc_expect_astc[(size_t)i * 16 + k]) { firstbyte = k; break; }
+                    }
+                    ndiff++;
+                }
+            }
+            OS_EMIT(em, "");
+            OS_EMIT(em, "---- ② 转码块字节 vs tools/astc_ref.py 的期望（%d 块 × 16 字节）----", ASTC_EXPECT_BLOCKS);
+            OS_EMIT(em, "  不同的块：%d / %d", ndiff, ASTC_EXPECT_BLOCKS);
+            if (!ndiff) {
+                OS_EMIT(em, "  ✅ 逐字节一致 —— C 版实现与参考算法同源（算法错/实现错由此分开）");
+            } else {
+                fails++;
+                OS_EMIT(em, "  ❌ 首个不同的块 #%d 第 %d 字节：设备=%02X 参考=%02X", firstblk, firstbyte,
+                        astc_out[(size_t)firstblk * 16 + firstbyte], astc_expect_astc[(size_t)firstblk * 16 + firstbyte]);
+            }
+        }
+    }
+
+    // ---- ③④ GPU 采样：ASTC 图像上传 → NEAREST 1:1 采样 → 读回 ----
+    if (!fails) {
+        // 参照一：本地 ASTC 解码（本模块只认自己产出的两种配置）
+        int dec_ok = 1;
+        for (uint32_t byi = 0; byi < by && dec_ok; byi++)
+            for (uint32_t bxi = 0; bxi < bx && dec_ok; bxi++) {
+                uint8_t *dst = ref_astc + ((size_t)byi * 4 * ASTC_EXPECT_W + bxi * 4) * 4;
+                if (nvn_astc4x4_decode(astc_out + ((size_t)byi * bx + bxi) * 16, dst, (size_t)ASTC_EXPECT_W * 4) != 0)
+                    dec_ok = 0;
+            }
+        // 参照二：CPU 的 BC 解码（理想图，转码前的样子）
+        if (nvn_bc_decode(0x44, bc_back, row_bytes, ASTC_EXPECT_W, ASTC_EXPECT_H, ref_bc, ASTC_EXPECT_W * 4) != 0)
+            dec_ok = 0;
+        if (!dec_ok) {
+            OS_EMIT(em, "❌ 参照解码失败（ASTC 或 BC）"); fails++;
+        } else {
+            vk_ctx sc; vk_ctx_borrow_shared(&sc);
+            char err[256] = "";
+            vk_rt *t = sc.dev ? vk_backend_target(&sc, ASTC_EXPECT_W, ASTC_EXPECT_H, err, sizeof err) : NULL;
+            if (!t) {
+                OS_EMIT(em, "❌ 建离屏目标失败：%s", err); fails++;
+            } else {
+                OS_EMIT(em, "");
+                OS_EMIT(em, "---- ③④ 上传 ASTC 图像并采样（格式 #%d）----", (int)up_fmt);
+                if (tex_gpu_render_fmt(em, &sc, t, up_fmt, astc_out, astc_bytes,
+                                       ASTC_EXPECT_W, ASTC_EXPECT_H, pix) == 0) {
+                    // ③ GPU vs 本地 ASTC 解码（严格：±1）
+                    int worst3 = 0, first3 = -1;
+                    int mismatch3 = tex_diff(ref_astc, pix, ASTC_EXPECT_W * ASTC_EXPECT_H, &worst3, &first3);
+                    OS_EMIT(em, "");
+                    OS_EMIT(em, "---- ③ GPU 采样 vs 本地 ASTC 解码（%u 像素逐点比）----", ASTC_EXPECT_W * ASTC_EXPECT_H);
+                    OS_EMIT(em, "  差 >1 的像素：%d / %u；最大通道差：%d", mismatch3, ASTC_EXPECT_W * ASTC_EXPECT_H, worst3);
+                    if (!mismatch3) {
+                        OS_EMIT(em, "  ✅ 一致 —— 我们写的 16 字节块是**合法 ASTC**，GPU 与本地解码器读法相同");
+                    } else {
+                        fails++;
+                        OS_EMIT(em, "  ❌ 首个不符的像素 #%d：本地=(%u,%u,%u,%u) GPU=(%u,%u,%u,%u)", first3,
+                                ref_astc[(size_t)first3 * 4], ref_astc[(size_t)first3 * 4 + 1],
+                                ref_astc[(size_t)first3 * 4 + 2], ref_astc[(size_t)first3 * 4 + 3],
+                                pix[(size_t)first3 * 4], pix[(size_t)first3 * 4 + 1],
+                                pix[(size_t)first3 * 4 + 2], pix[(size_t)first3 * 4 + 3]);
+                        // 诊断：哪些块错、错块用的是什么编码配置（CEM 位）、头一个错块的两组像素
+                        int nb_fail = 0, cem8 = 0, cem12 = 0, firstbad = -1;
+                        char idxs[512]; size_t ip = 0;
+                        idxs[0] = 0;
+                        for (uint32_t byi = 0; byi < by; byi++)
+                            for (uint32_t bxi = 0; bxi < bx; bxi++) {
+                                int bi = (int)(byi * bx + bxi);
+                                int bad = 0;
+                                for (int k = 0; k < 16; k++) {
+                                    uint32_t px_i = (byi * 4 + (uint32_t)k / 4) * ASTC_EXPECT_W + bxi * 4 + (uint32_t)k % 4;
+                                    int d = 0;
+                                    for (int ch = 0; ch < 4; ch++) {
+                                        int e = (int)ref_astc[(size_t)px_i * 4 + ch] - (int)pix[(size_t)px_i * 4 + ch];
+                                        if (e < 0) e = -e;
+                                        if (e > d) d = e;
+                                    }
+                                    if (d > 1) bad++;
+                                }
+                                if (bad) {
+                                    nb_fail++;
+                                    if (firstbad < 0) firstbad = bi;
+                                    int cem = (astc_out[(size_t)bi * 16 + 1] >> 5) | ((astc_out[(size_t)bi * 16 + 2] & 1) << 3);
+                                    if (cem == 8) cem8++; else if (cem == 12) cem12++;
+                                    if (ip + 8 < sizeof idxs) ip += (size_t)snprintf(idxs + ip, sizeof idxs - ip, "%d ", bi);
+                                }
+                            }
+                        OS_EMIT(em, "  （诊断）出错的块：%d / %d（其中 CEM8 %d 块、CEM12 %d 块）；块号：%s",
+                                nb_fail, ASTC_EXPECT_BLOCKS, cem8, cem12, idxs);
+                        if (firstbad >= 0) {
+                            const uint8_t *b16 = astc_out + (size_t)firstbad * 16;
+                            OS_EMIT(em, "  （诊断）首个错块 #%d 的 16 字节：%02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X",
+                                    firstbad, b16[0], b16[1], b16[2], b16[3], b16[4], b16[5], b16[6], b16[7],
+                                    b16[8], b16[9], b16[10], b16[11], b16[12], b16[13], b16[14], b16[15]);
+                            uint32_t bxx = (uint32_t)firstbad % bx, byy = (uint32_t)firstbad / bx;
+                            for (int k = 0; k < 16; k++) {
+                                uint32_t px_i = (byy * 4 + (uint32_t)k / 4) * ASTC_EXPECT_W + bxx * 4 + (uint32_t)k % 4;
+                                OS_EMIT(em, "    px%2d 本地=(%3u,%3u,%3u,%3u) GPU=(%3u,%3u,%3u,%3u)", k,
+                                        ref_astc[(size_t)px_i * 4], ref_astc[(size_t)px_i * 4 + 1],
+                                        ref_astc[(size_t)px_i * 4 + 2], ref_astc[(size_t)px_i * 4 + 3],
+                                        pix[(size_t)px_i * 4], pix[(size_t)px_i * 4 + 1],
+                                        pix[(size_t)px_i * 4 + 2], pix[(size_t)px_i * 4 + 3]);
+                            }
+                        }
+                    }
+                    // ④ GPU vs CPU BC 解码（有损：PSNR + 最大差）
+                    {
+                        double p = tex_psnr_rgb(pix, ref_bc, ASTC_EXPECT_W * ASTC_EXPECT_H);
+                        int worst4 = 0, first4 = -1;
+                        tex_diff(ref_bc, pix, ASTC_EXPECT_W * ASTC_EXPECT_H, &worst4, &first4);   // 只取最大差
+                        OS_EMIT(em, "");
+                        OS_EMIT(em, "---- ④ GPU 采样 vs CPU 的 BC 解码（转码前的理想图）----");
+                        OS_EMIT(em, "  PSNR（RGB）：%.2f dB（参考实现 %.2f dB，允许低 0.5 dB）；最大通道差：%d（上限 32）",
+                                p, (double)ASTC_EXPECT_REF_PSNR, worst4);
+                        if (p + 0.5 < (double)ASTC_EXPECT_REF_PSNR || worst4 > 32) {
+                            fails++;
+                            OS_EMIT(em, "  ❌ 转码质量不达参考值 —— 先查 ②（字节是否一致）");
+                        } else {
+                            OS_EMIT(em, "  ✅ 转码质量达标（两色块无损、渐变块有损但幅度符合参考）");
+                        }
+                    }
+                } else {
+                    fails++;
+                }
+                vk_backend_target_free(&sc, t);
+            }
+            // 共享上下文是借的：**不能** shutdown（会销毁生产路径的实例/设备）
+        }
+    }
+
+    // ---- ⑤ 负向：跳过解排布直接转码 ----
+    if (!fails) {
+        int rc = nvn_bc2astc_region(0x44, bl, row_bytes, bx, by, astc_bad, (size_t)bx * 16);
+        int nbad = 0;
+        if (rc == 0) for (int i = 0; i < ASTC_EXPECT_BLOCKS; i++)
+            if (memcmp(astc_bad + (size_t)i * 16, astc_out + (size_t)i * 16, 16) != 0) nbad++;
+        OS_EMIT(em, "");
+        OS_EMIT(em, "---- ⑤ 负向判据：跳过解排布，直接拿块线性字节去转码 ----");
+        OS_EMIT(em, "  与正确转码结果不同的块：%d / %d", nbad, ASTC_EXPECT_BLOCKS);
+        if (rc != 0) { OS_EMIT(em, "❌ 转码拒绝"); fails++; }
+        else if (!nbad) { OS_EMIT(em, "❌ 竟然一样 —— 说明解排布没起作用，要查"); fails++; }
+        else OS_EMIT(em, "  ✅ 如预期地不同 —— 解排布这一步确实在干活");
+    }
+
+    // ---- ⑥ 账：尺寸 + 吞吐 ----
+    OS_EMIT(em, "");
+    OS_EMIT(em, "---- ⑥ 账 ----");
+    {
+        size_t rgba_bytes = (size_t)ASTC_EXPECT_W * ASTC_EXPECT_H * 4;
+        OS_EMIT(em, "  尺寸：BC3 %d 字节 → ASTC %zu 字节（×%.2f）；对照 RGBA8 %zu 字节 ⇒ ASTC 省 %.1f 倍",
+                ASTC_EXPECT_BC3_BYTES, astc_bytes, (double)astc_bytes / ASTC_EXPECT_BC3_BYTES,
+                rgba_bytes, (double)rgba_bytes / (double)astc_bytes);
+        // 吞吐：单次只有 60 块（微秒级），跑多轮取平均才稳
+        const int rounds = 200;
+        uint64_t tt0 = ms_now();
+        for (int r = 0; r < rounds; r++) nvn_bc2astc_region(0x44, bc_back, row_bytes, bx, by, astc_bad, (size_t)bx * 16);
+        uint64_t tt = ms_now() - tt0;
+        double per_block_us = tt ? (double)tt * 1000.0 / (double)(rounds * ASTC_EXPECT_BLOCKS) : 0.0;
+        double mbps = tt ? ((double)ASTC_EXPECT_BC3_BYTES * rounds / 1048576.0) / ((double)tt / 1000.0) : 0.0;
+        OS_EMIT(em, "  吞吐：%d 轮 × %d 块 = %d 块，用时 %llums ⇒ 每块 %.2f µs，源字节 %.2f MB/s",
+                rounds, ASTC_EXPECT_BLOCKS, rounds * ASTC_EXPECT_BLOCKS, (unsigned long long)tt, per_block_us, mbps);
+        OS_EMIT(em, "  换算（按此吞吐外推）：1024×1024 贴图（65536 块）≈ %.1f ms；"
+                    "2048×2048（262144 块）≈ %.0f ms —— 这个数决定运行时转码还是离线转码",
+                per_block_us * 65536.0 / 1000.0, per_block_us * 262144.0 / 1000.0);
+    }
+
+    free(bl); free(bc_back); free(astc_out); free(astc_bad); free(ref_bc); free(ref_astc); free(pix);
+    OS_EMIT(em, "");
+    OS_EMIT(em, "===== 3.4-E %s：失败 %d 项（总耗时 %llums）=====",
+            fails ? "未全通过" : "全部通过", fails, (unsigned long long)(ms_now() - t0));
+    *em->p = 0;
+    dump_report(dir, "dm_tex_c3.log", out);
     return fails;
 }
 

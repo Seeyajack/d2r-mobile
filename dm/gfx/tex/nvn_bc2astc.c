@@ -94,7 +94,6 @@ static void astc_encode_block(const uint8_t *px, uint8_t *blk) {
     const int rng  = has_alpha ? 3 : 7;          // 权重范围：3 → 2 位，7 → 3 位
     const int nch  = has_alpha ? 4 : 3;
     const int wbits = weight_nbits(rng);
-    const int wtotal = 16 * wbits;
 
     // 端点：每通道 min/max
     int lo[4] = {255, 255, 255, 255}, hi[4] = {0, 0, 0, 0};
@@ -149,11 +148,18 @@ static void astc_encode_block(const uint8_t *px, uint8_t *blk) {
         put_bits(blk, pos, 8, (uint32_t)lo[c]); pos += 8;
         put_bits(blk, pos, 8, (uint32_t)hi[c]); pos += 8;
     }
-    // 权重：从块顶（bit 128 - wtotal）起，逐像素 LSB 优先
-    int wpos = 128 - wtotal;
+    // 权重：**从块顶往下填**——第 0 个纹素的权重 LSB 在 bit(128-wbits)，第 15 个在最低那段。
+    // ⚠ 这里写反过一次：原先从 bit(128-wtotal) 往上填（第 0 个在最低），本地解码器照着同一套写，
+    // 于是离线自测全绿；真机 3.4-E 才发现 GPU 读出来是**像素顺序整体反转**——两色棋盘块因为
+    // 180° 旋转不变而"侥幸"通过，只有渐变块（块号 2,5,8,…）露馅（20/60 块错、最大差 57）。
+    // 教训：编码器与自家解码器同源，**离线自洽不等于对**；必须有第三方（GPU）当判据。
+    // Weights are filled from the TOP of the block down: texel 0's weight starts at bit (128-wbits).
+    // We had it the other way round once; the local decoder mirrored the same mistake so offline tests
+    // passed, and only the GPU (3.4-E) exposed the reversed texel order.
+    int wpos = 128 - wbits;
     for (int i = 0; i < 16; i++) {
         put_bits(blk, wpos, wbits, (uint32_t)wq[i]);
-        wpos += wbits;
+        wpos -= wbits;
     }
 }
 
@@ -199,7 +205,7 @@ int nvn_astc4x4_decode(const uint8_t *blk, uint8_t *dst, size_t dpitch) {
     static const int kRange[16] = {-1, -1, 1, 2, 3, 4, 5, 7, -1, -1, 9, 11, 15, 19, 23, 31};
     int rng = kRange[(h << 3) | r];
     if (rng != 3 && rng != 7) return -1;
-    int wbits = weight_nbits(rng), wtotal = 16 * wbits;
+    int wbits = weight_nbits(rng);
     int nch = (cem == 12) ? 4 : 3;
 
     int lo[4] = {0, 0, 0, 255}, hi[4] = {0, 0, 0, 255};
@@ -212,10 +218,10 @@ int nvn_astc4x4_decode(const uint8_t *blk, uint8_t *dst, size_t dpitch) {
     // 真遇到就按规范做（先交换端点，再对结果的 R/G 做 (R+B)/2、(G+B)/2），免得自测掩盖问题。
     int s0 = lo[0] + lo[1] + lo[2], s1 = hi[0] + hi[1] + hi[2];
     int swapped = s1 < s0;
-    int wpos = 128 - wtotal;
+    int wpos = 128 - wbits;          // 与编码器同一条约定：第 0 个纹素的权重在块顶
     for (int i = 0; i < 16; i++) {
         int k = (int)get_bits(blk, wpos, wbits);
-        wpos += wbits;
+        wpos -= wbits;
         int w = weight_unquant(k, wbits);
         int v[4] = {255, 255, 255, 255};
         for (int c = 0; c < nch; c++) {

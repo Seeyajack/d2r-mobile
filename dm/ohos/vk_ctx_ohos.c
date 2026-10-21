@@ -28,6 +28,7 @@ typedef struct {
     void            *heap;
     uint64_t         heap_size;
     uint32_t         heap_mt;        // 客体堆用的内存类型序号
+    int              astc_on;       // ASTC 已启用（特性位 textureCompressionASTC_LDR 或那条扩展）
 } vk_ctx_ohos_t;
 
 static vk_ctx_ohos_t g_ctx;
@@ -100,16 +101,26 @@ static int ensure(void) {
     VkPhysicalDeviceVulkan13Features f13 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES };
     f13.dynamicRendering = VK_TRUE;
     f13.pNext = &f12;
-    // 出图要用 VK_KHR_swapchain（设备级扩展）：有就开
-    const char *dev_ext[1]; uint32_t ndev = 0;
+    // 设备级扩展：有就开。
+    //   · VK_KHR_swapchain —— 出图要用；
+    //   · VK_EXT_texture_compression_astc_ldr —— **用 ASTC 格式的前提**。Vulkan 1.0–1.3 上 ASTC 是
+    //     设备级扩展，不启用就 `vkCreateImage(VK_FORMAT_ASTC_4x4_*)`（未定义行为/直接失败）。
+    //     能力探测里的 textureCompressionASTC_LDR=有 只是**物理设备**的能力，还得在这里声明要用。
+    //     C3（BC→ASTC 转码）没有它就用不了，所以按需开、开了记一笔（dm_ohos_vk_astc_enabled 会读）。
+    const char *dev_ext[2]; uint32_t ndev = 0;
     {
         uint32_t ne = 0;
         vkEnumerateDeviceExtensionProperties(g_ctx.phys, NULL, &ne, NULL);
         if (ne) {
             VkExtensionProperties *es = calloc(ne, sizeof *es);
             if (es && vkEnumerateDeviceExtensionProperties(g_ctx.phys, NULL, &ne, es) == VK_SUCCESS) {
-                for (uint32_t i = 0; i < ne; i++)
-                    if (!strcmp(es[i].extensionName, "VK_KHR_swapchain")) { dev_ext[ndev++] = "VK_KHR_swapchain"; break; }
+                for (uint32_t i = 0; i < ne; i++) {
+                    if (!strcmp(es[i].extensionName, "VK_KHR_swapchain")) { dev_ext[ndev++] = "VK_KHR_swapchain"; }
+                    else if (!strcmp(es[i].extensionName, "VK_EXT_texture_compression_astc_ldr")) {
+                        dev_ext[ndev++] = "VK_EXT_texture_compression_astc_ldr";
+                        g_ctx.astc_on = 1;
+                    }
+                }
             }
             free(es);
         }
@@ -142,9 +153,28 @@ static int ensure(void) {
     VkDeviceCreateInfo di = { VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO };
     di.queueCreateInfoCount = g_ctx.nqfam; di.pQueueCreateInfos = qs; di.pNext = &f13;
     di.enabledExtensionCount = ndev; di.ppEnabledExtensionNames = ndev ? dev_ext : NULL;
+    // ⚠ 特性位：**ASTC 是一个 VkPhysicalDeviceFeatures 位**（`textureCompressionASTC_LDR`，Vulkan 1.0 起
+    // 就在核心里），不是那条同名扩展——扩展只是 1.0 设备上的另一条开法，本机驱动没advertise它。
+    // 以前这里没传 pEnabledFeatures ⇒ **所有特性位都是关的** ⇒ 即便格式属性报"ASTC 可用"，用它建图像
+    // 依然是不合法的（真机 3.4-E 第一轮就撞上：选路直接落到"解成未压缩"，ASTC 那条路根本进不去）。
+    // 只开这一位：其余位保持原来的"全关"状态，行为不变（改地基要能逐项对账）。
+    // ASTC is a *feature bit* (textureCompressionASTC_LDR, core since Vulkan 1.0), not that extension.
+    // We used to pass no pEnabledFeatures, so every feature was off -- which made ASTC images illegal
+    // even though the format properties reported support. Only this one bit is turned on.
+    VkPhysicalDeviceFeatures feats, sup;
+    memset(&feats, 0, sizeof feats);
+    vkGetPhysicalDeviceFeatures(g_ctx.phys, &sup);
+    if (sup.textureCompressionASTC_LDR) {
+        feats.textureCompressionASTC_LDR = VK_TRUE;
+        g_ctx.astc_on = 1;
+    }
+    di.pEnabledFeatures = &feats;
     r = vkCreateDevice(g_ctx.phys, &di, NULL, &g_ctx.dev);
     if (r != VK_SUCCESS) { set_err("vkCreateDevice", r); return 0; }
-    if (!ndev) LOG("【提示】设备扩展里没有 VK_KHR_swapchain —— 出图那一步会失败（离屏不受影响）");
+    int has_swap = 0;
+    for (uint32_t i = 0; i < ndev; i++) if (!strcmp(dev_ext[i], "VK_KHR_swapchain")) has_swap = 1;
+    if (!has_swap) LOG("【提示】设备扩展里没有 VK_KHR_swapchain —— 出图那一步会失败（离屏不受影响）");
+    if (!g_ctx.astc_on) LOG("【提示】ASTC 没启用（特性位 textureCompressionASTC_LDR 与那条扩展都没有）—— C3 会回落到未压缩");
 
     for (uint32_t i = 0; i < g_ctx.nqfam; i++)
         vkGetDeviceQueue(g_ctx.dev, g_ctx.qfam_idx[i], 0, &g_ctx.qfam_q[i]);
@@ -171,8 +201,8 @@ static int ensure(void) {
     r = vkCreateCommandPool(g_ctx.dev, &pi, NULL, &g_ctx.pool);
     if (r != VK_SUCCESS) { set_err("vkCreateCommandPool", r); return 0; }
 
-    LOG("共享 Vulkan 上下文就绪：%s（主队列族 %u，共 %u 个族有队列，实例扩展 %u 个）",
-        g_ctx.devname, g_ctx.qfam, g_ctx.nqfam, ninst);
+    LOG("共享 Vulkan 上下文就绪：%s（主队列族 %u，共 %u 个族有队列，实例扩展 %u 个，设备扩展 %u 个：swapchain=%d astc_ldr=%d）",
+        g_ctx.devname, g_ctx.qfam, g_ctx.nqfam, ninst, ndev, has_swap, g_ctx.astc_on);
     return 1;
 }
 
@@ -187,6 +217,9 @@ const char      *dm_ohos_vk_devname(void)  { return g_ctx.devname; }
 uint32_t         dm_ohos_vk_qfam_count(void) { return g_ctx.nqfam; }
 uint32_t         dm_ohos_vk_qfam_at(uint32_t i) { return i < g_ctx.nqfam ? g_ctx.qfam_idx[i] : 0; }
 VkQueue          dm_ohos_vk_queue_at(uint32_t i) { return i < g_ctx.nqfam ? g_ctx.qfam_q[i] : VK_NULL_HANDLE; }
+
+// 设备创建时是否启用了 ASTC LDR 扩展（用 ASTC 格式的前提；见 dm_tex_ohos.h 的说明）。
+int dm_ohos_vk_astc_enabled(void) { ensure(); return g_ctx.astc_on; }
 
 int dm_ohos_vk_oneshot(void (*record)(VkCommandBuffer, void *), void *ud) {
     if (!ensure()) return -1;

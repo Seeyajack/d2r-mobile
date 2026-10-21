@@ -95,6 +95,17 @@ struct Index {
         }
       })
 
+    Button('贴图转码 C3（3.4-E：BC3→ASTC→上传→采样）')
+      .width('100%')
+      .onClick(() => {
+        try {
+          const ctx = getContext(this) as common.UIAbilityContext;
+          this.result = dmprobe.runVkTexC3(ctx.filesDir);
+        } catch (err) {
+          this.result = '调用原生模块失败：' + JSON.stringify(err);
+        }
+      })
+
   }
 
   // ---- 历史探针：做回归时才展开 ----

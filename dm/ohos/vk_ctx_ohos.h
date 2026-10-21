@@ -40,6 +40,10 @@ VkQueue          dm_ohos_vk_queue_at(uint32_t i);     // 第 i 个族的队列
 const char      *dm_ohos_vk_err(void);        // 创建失败的原因（没失败就是空串）
 const char      *dm_ohos_vk_devname(void);
 
+// 建设备时有没有启用 `VK_EXT_texture_compression_astc_ldr`（Vulkan 1.0–1.3 上用 ASTC 格式的前提）。
+// 1 = 已启用，0 = 设备没有这条扩展（或还没创建）。C3 的 ASTC 贴图依赖它，报告里要打出来。
+int              dm_ohos_vk_astc_enabled(void);
+
 // 一次性命令缓冲：record 里录命令，提交并等完成。0 = 成功。
 int dm_ohos_vk_oneshot(void (*record)(VkCommandBuffer, void *), void *ud);
 
