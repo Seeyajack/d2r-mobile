@@ -61,14 +61,20 @@ if (-not $NoBuild) {
 }
 
 # ---- 2) 装机（连一次、装一次；失败再连一次重试——真机实测过"传到一半连接掉了"）----
+# ⚠ 2026-10-21 实证：**app 还在运行时 `hdc install -r` 会长时间挂住**（今天挂了 6 分半，
+#   最后仍失败）。所以装机前先 force-stop；重试也**不要 hdc kill/start**（那会把无线连接也断掉，
+#   之后 tconn 直接 Connect failed）。
 Write-Host "[2/6] 装机…" -ForegroundColor Cyan
+hdc tconn $Device | Out-Null
+hdc shell "aa force-stop $bundle" 2>&1 | Out-Null
 $inst = ""
-for ($try = 1; $try -le 2; $try++) {
-    hdc tconn $Device | Out-Null
+for ($try = 1; $try -le 3; $try++) {
     $inst = (hdc install -r $hap 2>&1 | Out-String)
     if ($inst -match "successfully") { break }
     Write-Host "       第 $try 次装机没成功，重连后重试…" -ForegroundColor DarkYellow
-    hdc kill 2>&1 | Out-Null; Start-Sleep -Seconds 2; hdc start 2>&1 | Out-Null
+    Start-Sleep -Seconds 2
+    hdc tconn $Device 2>&1 | Out-Null
+    hdc shell "aa force-stop $bundle" 2>&1 | Out-Null
 }
 if ($inst -notmatch "successfully") {
     Write-Host "[失败] 装机没有成功：" -ForegroundColor Red

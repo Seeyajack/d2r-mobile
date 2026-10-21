@@ -3596,15 +3596,60 @@ static uint64_t hook_bufcopy(uint64_t *f) {
     return 0;
 }
 
+// ⭐ np184：任务"运行"虚方法 `0xa0078c` 的生命周期链（已实测它永不返回）：
+//   `blr [vt+0x78]` → `blr [vt+0x80]` → `blr [vt+0x20](w1=0)` → `blr [vt+0x28](w1=0)` → `br [vt+0x60]`（尾调）。
+//   这里把 5 个目标一次性记下来，离线逐个反汇编即可找出真正死循环的那个。
+static int g_taskrun_n;
+static uint64_t hook_taskrun(uint64_t *f) {   // 0xa00794（序言之后，安全指令）
+    if (++g_taskrun_n <= 3) {
+        char l[320];
+        uint64_t t = f[FR_X0], vt = 0;
+        uint64_t s[5] = {0, 0, 0, 0, 0};
+        if (t > 0x10000ull) vt = *(const uint64_t *)(uintptr_t)t;
+        if (vt > 0x10000ull)
+            for (int i = 0; i < 5; i++)
+                s[i] = *(const uint64_t *)(uintptr_t)(vt + (const uint32_t[]){0x78, 0x80, 0x20, 0x28, 0x60}[i]);
+        uint64_t b = (uint64_t)(uintptr_t)g_k_m.base;
+        snprintf(l, sizeof l, "run#%d task=%#llx vt=%#llx  78=%s%#llx 80=%s%#llx 20=%s%#llx 28=%s%#llx 60=%s%#llx\n",
+                 g_taskrun_n, (unsigned long long)t, (unsigned long long)vt,
+                 s[0] >= b && s[0] < b + DM_IMG_MAIN_END ? "img+" : "外", (unsigned long long)(s[0] >= b && s[0] < b + DM_IMG_MAIN_END ? s[0] - b : s[0]),
+                 s[1] >= b && s[1] < b + DM_IMG_MAIN_END ? "img+" : "外", (unsigned long long)(s[1] >= b && s[1] < b + DM_IMG_MAIN_END ? s[1] - b : s[1]),
+                 s[2] >= b && s[2] < b + DM_IMG_MAIN_END ? "img+" : "外", (unsigned long long)(s[2] >= b && s[2] < b + DM_IMG_MAIN_END ? s[2] - b : s[2]),
+                 s[3] >= b && s[3] < b + DM_IMG_MAIN_END ? "img+" : "外", (unsigned long long)(s[3] >= b && s[3] < b + DM_IMG_MAIN_END ? s[3] - b : s[3]),
+                 s[4] >= b && s[4] < b + DM_IMG_MAIN_END ? "img+" : "外", (unsigned long long)(s[4] >= b && s[4] < b + DM_IMG_MAIN_END ? s[4] - b : s[4]));
+        note_append("dm_gate.txt", l);
+    }
+    return 0;
+}
+
 // ⭐ np183b：**面包屑**——在 PreInitializeApp（0xdb9284..0xdb9ae8）内部布 8 个标记点，
 //   每个只在首次命中时写一行 `bcrd img+<offset>`。跑一轮就能看出"它停在哪一段之后"。
 //   站点都是安全指令（非 PC 相对/不动 SP）；cbz/bl 由安装器重算位移。
-static uint64_t g_bcrd_seen[8];
+static uint64_t g_bcrd_seen[48];
 static int g_bcrd_n;
 static uint64_t hook_bcrd(uint64_t *f) {
     uint64_t off = f[FR_SITE] - (uint64_t)(uintptr_t)g_k_m.base;
+    // ⭐ np184：`0xa01620` 是 `blr [vt+0x58]`（任务虚方法）之前的那条——已实测它**永不返回**。
+    //   这里把任务对象、虚表、以及 0x58 槽的方法地址一起记下来，离线直接反汇编那个方法。
+    if (off == 0xa01620ull) {
+        char l[192];
+        uint64_t task = f[FR_X21];
+        uint64_t vt = 0, m = 0;
+        if (task > 0x10000ull) {
+            vt = *(const uint64_t *)(uintptr_t)task;
+            if (vt > 0x10000ull) m = *(const uint64_t *)(uintptr_t)(vt + 0x58);
+        }
+        uint64_t b = (uint64_t)(uintptr_t)g_k_m.base;
+        snprintf(l, sizeof l, "vcall58# task=%#llx vt=%s%#llx m=%s%#llx\n",
+                 (unsigned long long)task,
+                 (vt >= b && vt < b + DM_IMG_MAIN_END) ? "img+" : "外",
+                 (unsigned long long)((vt >= b && vt < b + DM_IMG_MAIN_END) ? vt - b : vt),
+                 (m >= b && m < b + DM_IMG_MAIN_END) ? "img+" : "外",
+                 (unsigned long long)((m >= b && m < b + DM_IMG_MAIN_END) ? m - b : m));
+        note_append("dm_gate.txt", l);
+    }
     for (int i = 0; i < g_bcrd_n; i++) if (g_bcrd_seen[i] == off) return 0;
-    if (g_bcrd_n < 8) {
+    if (g_bcrd_n < 48) {
         char l[96];
         g_bcrd_seen[g_bcrd_n++] = off;
         snprintf(l, sizeof l, "bcrd img+%#llx（第 %d 个）\n",
@@ -5152,9 +5197,46 @@ static void exp_k(const char *files_dir, char *out, size_t cap, size_t *used) {
             for (unsigned i = 0; i < sizeof bc / sizeof bc[0]; i++)
                 k_install_hook(img, bc[i], (void *)hook_bcrd, "面包屑");
         }
+        // np183c：**0xdb7684（ResourceMgrTask 启动）内部面包屑**——上一轮已证明主线程停在该函数内，
+        //   这层用来定位它到底停在"建任务/等完成/别的分支"哪一句。
+        {
+            static const uint32_t bc2[] = { 0xdb7704, 0xdb7780, 0xdb7800, 0xdb7880,
+                                            0xdb7904, 0xdb7980, 0xdb7a04, 0xdb7a80,
+                                            // np183d：再细一档——建任务之后的三条关键指令
+                                            0xdb7a24,   // CreateTaskImmediate 返回点之后
+                                            0xdb7a60,   // guard 判断之后
+                                            0xdb7a78 }; // 对任务对象做虚调用（vtable+0x10）之前
+            for (unsigned i = 0; i < sizeof bc2 / sizeof bc2[0]; i++)
+                k_install_hook(img, bc2[i], (void *)hook_bcrd, "面包屑2");
+        }
+        // np183e：**CreateTaskImmediate（0xa0143c）内部面包屑**——上一层已证明主线程从不返回它，
+        //   这一层直接定位它内部自旋/等待的那一句。
+        {
+            static const uint32_t bc3[] = {
+                0xa01460, 0xa014a0, 0xa014e0, 0xa01520, 0xa01560, 0xa015a0, 0xa015e0,
+                0xa01620, 0xa01660, 0xa016a0, 0xa016e0, 0xa01720, 0xa01760 };
+            for (unsigned i = 0; i < sizeof bc3 / sizeof bc3[0]; i++)
+                k_install_hook(img, bc3[i], (void *)hook_bcrd, "面包屑3");
+        }
+        // np184：任务运行链内部面包屑（4 个 blr 之后的返回点）——定位到底哪个虚调用不返回
+        {
+            static const uint32_t bc4[] = { 0xa007a8, 0xa007b8, 0xa007cc, 0xa007e0 };
+            for (unsigned i = 0; i < sizeof bc4 / sizeof bc4[0]; i++)
+                k_install_hook(img, bc4[i], (void *)hook_bcrd, "面包屑4");
+        }
+        // np184：任务 run 实现（0x708be4）内部面包屑——上一层已把"卡死"收窄到这条尾调，
+        //   而三个候选里只有它不是 `ret`。
+        {
+            static const uint32_t bc5[] = { 0x708c28, 0x708c60, 0x708ca0, 0x708ce4,
+                                            0x708d20, 0x708d60, 0x708da0, 0x708de0 };
+            for (unsigned i = 0; i < sizeof bc5 / sizeof bc5[0]; i++)
+                k_install_hook(img, bc5[i], (void *)hook_bcrd, "面包屑5");
+        }
         // np183：编排进度标记（早退补支路 / StarterPackMgr 段）
         k_install_hook(img, 0xdb9ae8, (void *)hook_pm_early, "编排 0xdb9ae8（堆空补支路）");
         k_install_hook(img, 0xdb99e4, (void *)hook_pm_spm, "编排 0xdb99e4（StarterPackMgr 段）");
+        // np184：任务"运行"虚方法的生命周期链（0xa0078c 永不返回）
+        k_install_hook(img, 0xa00794, (void *)hook_taskrun, "任务运行 0xa0078c 的 5 个虚槽");
         // np113：查"建出来就被销毁"（见 hook_list_ins/hook_task_exit 的注释）
         //   ⚠ 0xa01fe0 已由 hook_e11 挂着（同一站点不能挂两次），那边加了调用计数与 [+0xe0] 表。
         k_install_hook(img, 0xa01aec, (void *)hook_list_ins, "任务链 链表插入 0xa01aec");
