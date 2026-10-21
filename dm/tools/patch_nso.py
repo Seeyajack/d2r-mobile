@@ -910,8 +910,11 @@ P = lambda ext: os.path.join(outdir, f'{NAME}.{ext}')
 #   （当时是未提交的本地改动，提交里一直留着 0x4000）——探针 dm_main_layout.h 的
 #   DM_IMG_MAIN_CAVE_SIZE=0x10000、洞内步长 0x1C0（146 格）都按它设计；用 0x4000
 #   重出会让 main 产物与探针/已测产物都不一致（16KB 只放得下 28 格，本轮已用 84 格）。
-#   两个模块必须用同一版本工具重出，否则就是"不同源"。
-CAVE_SIZE = 0x10000
+# ⚠ 2026-10-21 深夜再加到 0x18000（204 格）：钩子重定位修好（adrp/ldr/条件分支超程
+#   都能挂了）以后，安装数从 ~84 涨到 157，146 格被填满 ⇒ 关键的"键解析·替身
+#   0x9fa4c8"等 8 个钩子被挤出，游戏在静态初始化 #0/1087 就挂住（回归）。
+#   204 格给将来也留了余量。两个模块必须用同一版本工具重出，否则就是"不同源"。
+CAVE_SIZE = 0x18000
 CAVE_OFF = (PATCH_OFF + len(patch) + 0xF) & ~0xF
 open(P('patched.bin'), 'wb').write(IMG + bytearray(PATCH_OFF - len(IMG)) + patch + bytearray(CAVE_OFF - (PATCH_OFF + len(patch))) + bytearray(CAVE_SIZE))
 with open(os.path.join(outdir, f'{NAME}.unresolved.tsv'), 'w', encoding='utf-8') as f:
