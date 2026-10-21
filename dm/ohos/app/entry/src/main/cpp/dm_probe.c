@@ -4971,6 +4971,39 @@ static void k_inject_heap(uint8_t *img) {
 // 若确认无用可改回 return i == 206。
 static int k_skip_ctor(size_t i) { (void)i; return 0; }
 
+// ───────── 通用：跑某个模块自己的 init_array（S1，2026-10-22）─────────
+// 与 k_run_module_init 的区别：那个用**生成头里的 main 常量**，这个用模块动态段里的
+// DT_INIT_ARRAY/DT_INIT_ARRAYSZ ⇒ 任何模块都能跑。逐个武装 + 逐个编号 + 崩了跳过继续，
+// 这样一轮就能看到"能走多远、第一个崩的是谁"。
+// Generic ctor runner driven by the module's own dynamic tags (works for any module).
+static void k_run_ctors(const char *tag, module_t *m) {
+    if (!m || !m->base || !m->init_array || !m->init_arraysz) {
+        klog("[%s 构造] 没有 init_array（跳过）\n", tag);
+        return;
+    }
+    uint8_t *b = m->base;
+    typedef void (*ctor_t)(int, char **, char **);
+    ctor_t *arr = (ctor_t *)(b + m->init_array);
+    size_t n = m->init_arraysz / 8, ran = 0, skipped = 0, faulted = 0;
+    klog("[%s 构造] DT_INIT_ARRAY=%#llx 共 %zu 个\n", tag,
+         (unsigned long long)(uintptr_t)m->init_array, n);
+    for (size_t i = 0; i < n; i++) {
+        if (!arr[i]) { skipped++; continue; }
+        if (sigsetjmp(g_gate_jmp, 1) == 0) {
+            g_gate_armed = 1;
+            arr[i](0, NULL, NULL);
+            g_gate_armed = 0;
+            ran++;
+        } else {
+            g_gate_armed = 0;
+            faulted++;
+            klog("[%s 构造] #%zu 崩了（pc %#llx sig %d）—— 跳过继续\n", tag, i,
+                 (unsigned long long)g_gate_fault_pc, g_gate_fault_sig);
+        }
+    }
+    klog("[%s 构造] 跑完：成功 %zu / 空槽 %zu / 崩 %zu（共 %zu）\n", tag, ran, skipped, faulted, n);
+}
+
 static void k_run_module_init(const module_t *m) {
     uint8_t *b = m->base;
     size_t n = DM_IMG_MAIN_INIT_ARRAY_SIZE / 8;
@@ -5108,6 +5141,13 @@ static void *k_thread(void *arg) {
     // ★ 影子「当前堆」：必须在静态初始化与 nnMain **之前**挂上——
     //   nnMain 一开始就要"取当前堆"，取不到就跳过 7 个初始化（见 §24/§25）。
     k_fake_heap_install((uint8_t *)g_k_m.base);
+    // ★ 2026-10-22（通用化第一步）：先跑 **sdk 自己的 78 个构造函数**。
+    //   以前只把 sdk 当"符号来源"，它的构造函数一次都没跑 ⇒ SDK 的系统（任务/内存/服务）
+    //   从未初始化，这也是"任务 runner 的 flags 没人置位"最可能的解释。
+    //   开关 NP_SDK_CTORS 默认开；要回到旧行为就设 0。
+    if (getenv("NP_SDK_CTORS") == NULL || atoi(getenv("NP_SDK_CTORS")) != 0)
+        k_run_ctors("sdk", &g_k_s);
+
     k_run_module_init(&g_k_m);   // ★ 先跑模块自己的静态初始化（否则 data 段的全局对象全是空的）
     {   // 崩点归属用：把本进程映射抄进日志（模块区 / 探针 .so / 宿主堆 各自范围）
         FILE *mp = fopen("/proc/self/maps", "r");
@@ -5349,6 +5389,11 @@ static int k_load_sdk(void) {
         else if (tag == 6) DT_SYMTAB = val;
         else if (tag == 5) DT_STRTAB = val;
         else if (tag == 4) DT_HASH = val;
+        // 25/27 = DT_INIT_ARRAY / DT_INIT_ARRAYSZ：**sdk 自己的 78 个构造函数**就挂在这里。
+        // 以前只拿 sdk 当"符号来源"，从没跑过它的构造函数 —— 而 SDK 的系统（任务/内存/文件服务）
+        // 正是在这些构造函数里初始化的。这正是"SDK 自己的系统跑起来"缺的那一步。
+        else if (tag == 25) g_k_s.init_array = val;
+        else if (tag == 27) g_k_s.init_arraysz = val;
     }
     uint64_t n_rel = 0;
     for (uint64_t off = 0; off + 24 <= DT_RELASZ; off += 24) {
