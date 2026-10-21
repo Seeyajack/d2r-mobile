@@ -29,7 +29,12 @@
 
 DM_IMG_SYMS(main)
 DM_IMG_SYMS(sdk)
+// S2（2026-10-22）：装全 7 个模块。rtld / subsdk1-3 是这一轮新增的（subsdk0 早就声明了但一直没嵌入）。
+DM_IMG_SYMS(rtld)
 DM_IMG_SYMS(subsdk0)
+DM_IMG_SYMS(subsdk1)
+DM_IMG_SYMS(subsdk2)
+DM_IMG_SYMS(subsdk3)
 DM_IMG_SYMS(probe)      // 实验 D 的自造测试映像（test_image.S；与真实模块 main 分开命名）
 
 // 强制接管表所在的段（上游 hle.h 的 HLE_FORCE 宏在鸿蒙侧改写到这个段名）
@@ -47,7 +52,8 @@ static const img_sections g_imgs[] = {
     __start_dm##nm##x0, __stop_dm##nm##x0, \
     __start_dm##nm##w,  __stop_dm##nm##w,  \
     __start_dm##nm##x1, __stop_dm##nm##x1 }
-    IMG(main), IMG(sdk), IMG(subsdk0), IMG(probe),
+    // S2（2026-10-22）：装全 7 个模块 —— rtld 最先、subsdk0-3 次之（顺序由探针的装载表决定）
+    IMG(main), IMG(sdk), IMG(rtld), IMG(subsdk0), IMG(subsdk1), IMG(subsdk2), IMG(subsdk3), IMG(probe),
 #undef IMG
 };
 

@@ -1391,7 +1391,7 @@ static pthread_key_t g_s_key[8];
 struct sdk_sym { const char *name; uint64_t addr; };
 // np135：512 → 16384。M1 第二步要做 PLT 自解析，导出表必须收**全量**——
 //   离线实证 sdk 有 14,834 个导出（dynsym 14,849），原先只收 nn::os 一族不够用。
-#define SDK_OS_MAX 16384
+#define SDK_OS_MAX 40000   // 7 模块合计导出 ≈ 26,865（原 16384 只够 sdk 自己）
 static struct sdk_sym g_sdk_os[SDK_OS_MAX];
 static int g_n_sdk_os;
 static uint64_t sdk_ret0(uint64_t a, uint64_t b) { (void)a; (void)b; return 0; }   // sdk 未识别导入的兜底
@@ -4989,6 +4989,9 @@ static void k_run_ctors(const char *tag, module_t *m) {
          (unsigned long long)(uintptr_t)m->init_array, n);
     for (size_t i = 0; i < n; i++) {
         if (!arr[i]) { skipped++; continue; }
+        // **逐条先记再调**：构造函数可能不是"崩"而是"卡死"（setjmp 抓不到卡死），
+        // 那样日志的最后一行就是卡住的那条——这是唯一能定位它的手段。
+        klog("[%s 构造] #%zu/%zu → %#llx\n", tag, i, n, (unsigned long long)(uintptr_t)arr[i]);
         if (sigsetjmp(g_gate_jmp, 1) == 0) {
             g_gate_armed = 1;
             arr[i](0, NULL, NULL);
@@ -5467,6 +5470,164 @@ static int k_load_sdk(void) {
     return 0;
 }
 
+
+// ───────── S2（2026-10-22）：**通用模块装载** —— 把 rtld / subsdk0-3 也装进来 ─────────
+// 为什么：用户定调"先通用化、让游戏跑起来"。nxnative 的做法是**装全部模块**，让 SDK 自己的
+//   系统跑起来，宿主只留 svc/IPC/图形。勘察数据支持这一点：装全之后 main 的 418 条导入里
+//   406 条能在模块内部解析（剩下的是 __rel_* 伪符号 + 8 个 glslc*）。
+// 与 k_load_sdk 的区别：那个是给 sdk 定制的（键页/导出/PLT 都写死）；这里是**表驱动**：
+//   一个描述符表 + 一个通用的 映射/重定位/收集导出 流程，任何模块都能装。
+// Why table-driven: k_load_sdk was bespoke for sdk; this loads any module from a descriptor table.
+#define EXTRA_MAX 5
+static module_t      g_k_x[EXTRA_MAX];
+static pthread_key_t g_x_key[EXTRA_MAX][8];
+static int           g_n_x;
+
+typedef struct {
+    const char *name; module_t *m;
+    uint64_t text_end, patch_off, ro_off, data_off, key_page_off, key_page_size, x0_end, img_end;
+} xmod_t;
+
+// 装载顺序 = 依赖顺序：rtld 最先（0 导出），然后 subsdk0/1/2/3。
+// （sdk 已经在前面装好了，它的 14,833 个导出在 g_sdk_os 里，后装的模块能解析到它。）
+static xmod_t g_xmods[] = {
+    { "rtld",    &g_k_x[0], DM_IMG_RTLD_TEXT_END,    DM_IMG_RTLD_PATCH_OFF,    DM_IMG_RTLD_RO_OFF,
+      DM_IMG_RTLD_DATA_OFF,    DM_IMG_RTLD_KEY_PAGE_OFF,    DM_IMG_RTLD_KEY_PAGE_SIZE,
+      DM_IMG_RTLD_X0_END,    DM_IMG_RTLD_END },
+    { "subsdk0", &g_k_x[1], DM_IMG_SUBSDK0_TEXT_END, DM_IMG_SUBSDK0_PATCH_OFF, DM_IMG_SUBSDK0_RO_OFF,
+      DM_IMG_SUBSDK0_DATA_OFF, DM_IMG_SUBSDK0_KEY_PAGE_OFF, DM_IMG_SUBSDK0_KEY_PAGE_SIZE,
+      DM_IMG_SUBSDK0_X0_END, DM_IMG_SUBSDK0_END },
+    { "subsdk1", &g_k_x[2], DM_IMG_SUBSDK1_TEXT_END, DM_IMG_SUBSDK1_PATCH_OFF, DM_IMG_SUBSDK1_RO_OFF,
+      DM_IMG_SUBSDK1_DATA_OFF, DM_IMG_SUBSDK1_KEY_PAGE_OFF, DM_IMG_SUBSDK1_KEY_PAGE_SIZE,
+      DM_IMG_SUBSDK1_X0_END, DM_IMG_SUBSDK1_END },
+    { "subsdk2", &g_k_x[3], DM_IMG_SUBSDK2_TEXT_END, DM_IMG_SUBSDK2_PATCH_OFF, DM_IMG_SUBSDK2_RO_OFF,
+      DM_IMG_SUBSDK2_DATA_OFF, DM_IMG_SUBSDK2_KEY_PAGE_OFF, DM_IMG_SUBSDK2_KEY_PAGE_SIZE,
+      DM_IMG_SUBSDK2_X0_END, DM_IMG_SUBSDK2_END },
+    { "subsdk3", &g_k_x[4], DM_IMG_SUBSDK3_TEXT_END, DM_IMG_SUBSDK3_PATCH_OFF, DM_IMG_SUBSDK3_RO_OFF,
+      DM_IMG_SUBSDK3_DATA_OFF, DM_IMG_SUBSDK3_KEY_PAGE_OFF, DM_IMG_SUBSDK3_KEY_PAGE_SIZE,
+      DM_IMG_SUBSDK3_X0_END, DM_IMG_SUBSDK3_END },
+};
+#define N_XMODS ((int)(sizeof g_xmods / sizeof g_xmods[0]))
+
+// 每个模块的动态段位置（装载时记下，填 PLT 时用）
+static struct { uint64_t rela, relasz, jmprel, pltrelsz, symtab, strtab, hash, dyn; int nexp, nrel; } g_xs[EXTRA_MAX];
+
+// MOD0 的位置**不固定**：main/sdk 在映像很前面，但 rtld 在 0x441C（踩过：按 0x100 扫会找不到）。
+// 全映像搜"MOD0 + dynamic 偏移落在映像内"的第一处。
+static uint64_t k_find_dyn(uint8_t *img, size_t size) {
+    for (size_t o = 0; o + 8 <= size; o += 4) {
+        if (*(uint32_t *)(img + o) != 0x30444F4Du) continue;      // "MOD0"
+        uint32_t off = *(uint32_t *)(img + o + 4);
+        if (off && o + off + 16 < size) return (uint64_t)(uintptr_t)(img + o + off);
+    }
+    return 0;
+}
+
+// 装载一个模块：映射 → 键页 → RELATIVE 重定位 → 收集导出（追加到全局表）→ 封 R+X。
+// 不在这里填 PLT：等**全部模块的导出都收齐**再统一填（否则 subsdk3 引 subsdk0 时会漏）。
+static int k_load_extra(xmod_t *x, int idx) {
+    module_t *m = x->m;
+    memset(m, 0, sizeof *m);
+    strncpy(m->name, x->name, sizeof m->name - 1);
+    m->text_end = x->text_end; m->patch_off = x->patch_off;
+    m->ro_off = x->ro_off; m->data_off = x->data_off;
+    m->key_page_off = x->key_page_off; m->key_page_size = x->key_page_size;
+    m->x0_end = x->x0_end; m->img_end = x->img_end;
+    if (dm_ohos_map_image_alloc(m)) { klog("[%s] ✗ 映射失败\n", x->name); return -1; }
+
+    // 键页：每个模块有自己的 8 个宿主键（各模块的改写产物按自己的键号寻址）
+    for (int i = 0; i < 8; i++)
+        if (pthread_key_create(&g_x_key[idx][i], NULL)) { klog("[%s] ✗ 建键失败\n", x->name); return -1; }
+    uint64_t *page = (uint64_t *)(m->base + m->key_page_off);
+    memset(page, 0, (size_t)m->key_page_size);
+    for (int i = 0; i < 8; i++) page[i] = (uint64_t)g_x_key[idx][i] * 8;
+
+    uint8_t *img = m->base;
+    uint64_t dyn = k_find_dyn(img, (size_t)m->img_end);
+    if (!dyn) { klog("[%s] ✗ 找不到 MOD0\n", x->name); return -1; }
+    uint64_t rela = 0, relasz = 0, symtab = 0, strtab = 0, hash = 0, jmprel = 0, pltrelsz = 0;
+    for (int i = 0; i < 64; i++) {
+        uint64_t tag = *(uint64_t *)(dyn + (uint64_t)i * 16);
+        uint64_t val = *(uint64_t *)(dyn + (uint64_t)i * 16 + 8);
+        if (!tag) break;
+        if (tag == 7) rela = val; else if (tag == 8) relasz = val;
+        else if (tag == 6) symtab = val; else if (tag == 5) strtab = val;
+        else if (tag == 4) hash = val; else if (tag == 0x17) jmprel = val;
+        else if (tag == 2) pltrelsz = val;
+        else if (tag == 25) m->init_array = val;
+        else if (tag == 27) m->init_arraysz = val;
+    }
+    uint64_t nrel = 0;
+    for (uint64_t off = 0; off + 24 <= relasz; off += 24) {
+        uint64_t r_off = *(uint64_t *)(img + rela + off);
+        uint64_t r_info = *(uint64_t *)(img + rela + off + 8);
+        int64_t r_add = *(int64_t *)(img + rela + off + 16);
+        if ((uint32_t)r_info == 1027) { *(uint64_t *)(img + r_off) = (uint64_t)img + (uint64_t)r_add; nrel++; }
+    }
+    // 导出 → 追加到**全局**表（g_sdk_os）：后面装的模块、以及 main 的 PLT 都能查到
+    int nexp = 0;
+    uint32_t nsym = hash ? *(uint32_t *)(img + hash + 4) : 0;
+    for (uint32_t i = 1; hash && i < nsym && g_n_sdk_os < SDK_OS_MAX; i++) {
+        uint64_t st = symtab + (uint64_t)i * 24;
+        uint32_t name_off = *(uint32_t *)(img + st);
+        uint16_t shndx = *(uint16_t *)(img + st + 6);
+        uint64_t value = *(uint64_t *)(img + st + 8);
+        if (!name_off || !shndx || !value) continue;
+        g_sdk_os[g_n_sdk_os].name = (const char *)(img + strtab + name_off);
+        g_sdk_os[g_n_sdk_os].addr = (uint64_t)img + value;
+        g_n_sdk_os++; nexp++;
+    }
+    if (dm_ohos_map_image_seal(m)) { klog("[%s] ✗ 封 R+X 失败\n", x->name); return -1; }
+    g_xs[idx].rela = rela; g_xs[idx].relasz = relasz; g_xs[idx].jmprel = jmprel;
+    g_xs[idx].pltrelsz = pltrelsz; g_xs[idx].symtab = symtab; g_xs[idx].strtab = strtab;
+    g_xs[idx].hash = hash; g_xs[idx].dyn = dyn; g_xs[idx].nexp = nexp; g_xs[idx].nrel = (int)nrel;
+    klog("[%s] 已装载：base=%p RELATIVE %d 条，导出 +%d（全局表累计 %d），构造 %llu 个\n",
+         x->name, (void *)m->base, (int)nrel, nexp, g_n_sdk_os,
+         (unsigned long long)(m->init_arraysz / 8));
+    return 0;
+}
+
+// 统一填某个模块的 PLT：优先解析到**任何已装模块的导出**，其次宿主 libc，最后兜底桩。
+static void k_fill_plts_extra(xmod_t *x, int idx) {
+    module_t *m = x->m; uint8_t *img = m->base;
+    uint64_t self = 0, cross = 0, libc = 0, stub = 0;
+    for (uint64_t off = 0; off + 24 <= g_xs[idx].pltrelsz; off += 24) {
+        uint64_t r_off = *(uint64_t *)(img + g_xs[idx].jmprel + off);
+        uint64_t r_info = *(uint64_t *)(img + g_xs[idx].jmprel + off + 8);
+        uint32_t symi = (uint32_t)(r_info >> 32);
+        uint64_t st = g_xs[idx].symtab + (uint64_t)symi * 24;
+        uint32_t name_off = *(uint32_t *)(img + st);
+        const char *nm = (const char *)(img + g_xs[idx].strtab + name_off);
+        void *p = k_sdk_lookup(nm);
+        uint64_t target;
+        if (p) { target = (uint64_t)(uintptr_t)p; if ((uint8_t *)p >= img && (uint8_t *)p < img + m->img_end) self++; else cross++; }
+        else if (!strcmp(nm, "malloc"))  { target = (uint64_t)(uintptr_t)malloc;  libc++; }
+        else if (!strcmp(nm, "calloc"))  { target = (uint64_t)(uintptr_t)calloc;  libc++; }
+        else if (!strcmp(nm, "realloc")) { target = (uint64_t)(uintptr_t)realloc; libc++; }
+        else if (!strcmp(nm, "free"))    { target = (uint64_t)(uintptr_t)free;    libc++; }
+        else { target = (uint64_t)(uintptr_t)sdk_ret0; stub++; }
+        *(uint64_t *)(img + r_off) = target;
+    }
+    klog("[%s] PLT 填好：自解析 %llu / 跨模块 %llu / libc %llu / 桩 %llu\n",
+         x->name, (unsigned long long)self, (unsigned long long)cross,
+         (unsigned long long)libc, (unsigned long long)stub);
+}
+
+// 总入口：装全部额外模块 → 统一填 PLT →（可选）跑它们的构造函数。
+static void k_load_extras(void) {
+    g_n_x = 0;
+    for (int i = 0; i < N_XMODS; i++)
+        if (k_load_extra(&g_xmods[i], i) == 0) g_n_x++;
+    for (int i = 0; i < N_XMODS; i++)
+        if (g_xmods[i].m->base) k_fill_plts_extra(&g_xmods[i], i);
+    // 跑构造函数：**默认开**（S3）。GUI 进程拿不到环境变量（`aa start` 不传 env），所以只能靠
+    // 编译期默认；要回到"只装载不跑构造"，设 NP_EXTRA_CTORS=0 或把这行改成 == 判断。
+    // 逐个 setjmp 保护：某个构造函数崩了只记账、继续下一个（先看整体能走多远）。
+    if (getenv("NP_EXTRA_CTORS") == NULL || atoi(getenv("NP_EXTRA_CTORS")) != 0)
+        for (int i = 0; i < N_XMODS; i++)
+            if (g_xmods[i].m->base) k_run_ctors(g_xmods[i].name, g_xmods[i].m);
+}
+
 // 第一批白名单：只开互斥量（Initialize/Lock/Unlock/TryLock/Finalize）。
 // 为什么只开它：它只用 ArbitrateLock/Unlock，不创建句柄、不碰线程；出问题也最容易回退。
 //
@@ -5765,6 +5926,8 @@ static void exp_k(const char *files_dir, char *out, size_t cap, size_t *used) {
         // np133：装载 sdk（M1）。失败不致命：装载不了就全走宿主实现，行为与之前一致。
         if (k_load_sdk() != 0)
             klog("[sdk] 未装载（继续用宿主实现，行为不变）\n");
+        // S2：把 rtld / subsdk0-3 也装进来（NP_EXTRA=0 可关）。失败只记账，不影响已有链路。
+        if (getenv("NP_EXTRA") == NULL || atoi(getenv("NP_EXTRA")) != 0) k_load_extras();
         // np146：把 main 映像的 R+X 封区告知胶水层（写 guest 内存前的可写性判据）。
         //   ⚠ 必须在写任何 guard 字节之前——否则拿 /proc/self/maps 兜底，
         //   而本进程 maps 有上千行，缓冲区一截断就"查无此页"（np146 实测 27 个全被误判）。

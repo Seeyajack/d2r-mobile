@@ -24,7 +24,7 @@
 # Output: <name>.patched.bin (key page and patch area appended after the image at PATCH_OFF), <name>.fixups.tsv (layout and key page index header), <name>.gates.tsv, <name>.sites.tsv, <name>.cuts.tsv, <name>.obs.tsv
 import struct, re, sys, os
 from itertools import combinations
-import lz4.block
+import lz4lite   # 纯 Python LZ4（零依赖：一键工具链不该要求用户 pip）
 from capstone import *
 
 src, outdir, NAME = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -37,7 +37,7 @@ csz = struct.unpack_from('<III', d, 0x60)
 IMG = bytearray(segs[2][1] + segs[2][2] + bss)
 for i, (fo, mo, sz) in enumerate(segs):
     raw = d[fo:fo + csz[i]]
-    if flags >> i & 1: raw = lz4.block.decompress(raw, uncompressed_size=sz)
+    if flags >> i & 1: raw = lz4lite.decompress_block(raw, sz)
     IMG[mo:mo + sz] = raw
 TEXT_END = segs[0][2]
 RO_OFF, DATA_OFF = segs[1][1], segs[2][1]
