@@ -60,21 +60,39 @@ if (-not $NoBuild) {
     Write-Host "       构建成功（HAP $b）" -ForegroundColor Green
 }
 
+# ⚠ 2026-10-21 深夜实证：设备同时挂 USB+无线时，裸 hdc 命令报 need connect-key
+#   （多目标不限定）。所有 hdc 命令显式 -t $Device。
 # ---- 2) 装机（连一次、装一次；失败再连一次重试——真机实测过"传到一半连接掉了"）----
 # ⚠ 2026-10-21 实证：**app 还在运行时 `hdc install -r` 会长时间挂住**（今天挂了 6 分半，
 #   最后仍失败）。所以装机前先 force-stop；重试也**不要 hdc kill/start**（那会把无线连接也断掉，
 #   之后 tconn 直接 Connect failed）。
 Write-Host "[2/6] 装机…" -ForegroundColor Cyan
 hdc tconn $Device | Out-Null
-hdc shell "aa force-stop $bundle" 2>&1 | Out-Null
+# ⚠ 2026-10-21 深夜实证：force-stop 会**静默失败**（无线抖动），app 进程熬过整轮
+#   ⇒ exp_k 在同一进程里跑第二遍，静态初始化挂在构造器 #0（跨轮状态污染，
+#   表现为"游戏比上轮死得还早"）。杀完必须验证，没死干净就重杀 + 报错。
+function Stop-App($b) {
+    for ($i = 1; $i -le 3; $i++) {
+        hdc -t $Device shell "aa force-stop $b" 2>&1 | Out-Null
+        Start-Sleep -Seconds 1
+        $alive = (hdc -t $Device shell "ps -ef | grep $b | grep -v grep" 2>&1 | Out-String).Trim()
+        if (-not $alive) { return $true }
+        Write-Host "       第 $i 次 force-stop 后进程仍在，重杀…" -ForegroundColor DarkYellow
+    }
+    return $false
+}
+if (-not (Stop-App $bundle)) {
+    Write-Host "[失败] force-stop 杀不净 app（进程熬过轮次会污染跨轮状态），中止" -ForegroundColor Red
+    exit 1
+}
 $inst = ""
 for ($try = 1; $try -le 3; $try++) {
-    $inst = (hdc install -r $hap 2>&1 | Out-String)
+    $inst = (hdc -t $Device install -r $hap 2>&1 | Out-String)
     if ($inst -match "successfully") { break }
     Write-Host "       第 $try 次装机没成功，重连后重试…" -ForegroundColor DarkYellow
     Start-Sleep -Seconds 2
     hdc tconn $Device 2>&1 | Out-Null
-    hdc shell "aa force-stop $bundle" 2>&1 | Out-Null
+    hdc -t $Device shell "aa force-stop $bundle" 2>&1 | Out-Null
 }
 if ($inst -notmatch "successfully") {
     Write-Host "[失败] 装机没有成功：" -ForegroundColor Red
@@ -84,21 +102,21 @@ if ($inst -notmatch "successfully") {
 
 # ---- 3) 启动 ----
 Write-Host "[3/6] 启动…" -ForegroundColor Cyan
-hdc shell "aa force-stop $bundle" | Out-Null
-hdc shell "power-shell wakeup" | Out-Null
-hdc shell "aa start -a EntryAbility -b $bundle" | Out-Null
+hdc -t $Device shell "aa force-stop $bundle" | Out-Null
+hdc -t $Device shell "power-shell wakeup" | Out-Null
+hdc -t $Device shell "aa start -a EntryAbility -b $bundle" | Out-Null
 Start-Sleep -Seconds 5
 
 # ---- 4) 点击跑测 ----
 Write-Host "[4/6] 点击探针按钮…" -ForegroundColor Cyan
-hdc shell "uinput -T -c 658 1217" | Out-Null
+hdc -t $Device shell "uinput -T -c 658 1217" | Out-Null
 
 # ---- 5) 等跑完 + 抓产物 ----
 Write-Host "[5/6] 等 $WaitSec 秒并抓日志/轨迹…" -ForegroundColor Cyan
 Start-Sleep -Seconds $WaitSec
-hdc file recv $devLog  (Join-Path $out "last.log")       2>&1 | Out-Null
-hdc file recv "$devDir/dm_trace.bin"      (Join-Path $out "dm_trace.bin")     2>&1 | Out-Null
-hdc file recv "$devDir/dm_plt_names.txt"  (Join-Path $out "dm_plt_names.txt") 2>&1 | Out-Null
+hdc -t $Device file recv $devLog  (Join-Path $out "last.log")       2>&1 | Out-Null
+hdc -t $Device file recv "$devDir/dm_trace.bin"      (Join-Path $out "dm_trace.bin")     2>&1 | Out-Null
+hdc -t $Device file recv "$devDir/dm_plt_names.txt"  (Join-Path $out "dm_plt_names.txt") 2>&1 | Out-Null
 
 # ---- 6) 判据摘要 ----
 $logPath = Join-Path $out "last.log"
@@ -107,6 +125,15 @@ $log = Get-Content $logPath -Encoding UTF8
 
 Write-Host ""
 Write-Host "===== 判据摘要 =====" -ForegroundColor Yellow
+# ⚠ 2026-10-21 深夜实证：进程没杀干净时 exp_k 会跑第二遍，静态初始化挂在构造器 #0，
+#   整轮数据作废。判据：日志**第一行**的阶段标签必须是「准备」（新鲜进程）；
+#   若是「nnMain」⇒ 上一轮的状态漏过来了，本轮结论不可信。
+$firstStage = ($log | Select-String -Pattern "^\[阶段 (\w+)\]" | Select-Object -First 1)
+if ($firstStage -and $firstStage.Matches.Groups[1].Value -ne "准备") {
+    Write-Host "【红】首行阶段=$($firstStage.Matches.Groups[1].Value)（应为「准备」）⇒ 进程不新鲜、本轮数据作废！" -ForegroundColor Red
+} else {
+    Write-Host "进程新鲜度  ✓ 首行阶段=准备" -ForegroundColor Green
+}
 # 构建戳（注意：只改 dm_nvn_ohos.c 等其它文件时，这个戳不会更新——它来自 dm_probe.c 的 __TIME__）
 ($log | Select-String -Pattern "探针构建" | Select-Object -First 1) | ForEach-Object { Write-Host "构建戳  $($_.Line.Trim())" }
 

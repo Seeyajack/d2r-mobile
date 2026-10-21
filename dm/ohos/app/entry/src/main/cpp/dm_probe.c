@@ -3486,10 +3486,12 @@ static uint64_t hook_e11(uint64_t *f) {  // runner 0xa01fe0 入口：x0 = mgr
 //   我们的任务 flags 恒 0 ⇒ 0xa01cf0 激活检查从未真命中、任务永不执行。
 //   flags 置位器已全部找到（bit2=0xa00960 经 vt+0xa8；bit1=0x28e830/0xf5e248 大函数内联）
 //   但从未被调——藏在游戏逻辑深处，静态追不动。
-// 干预设计：挂在 **0xa0202c**（`ldp x24,x22,[x24+8]` 之后、`ldrb [x22+0x60]` 之前）：
-//   洞内先执行原 ldp ⇒ x22 = 当前任务；钩子把 state==4 且 flags&6!=6 的任务**仅补**
-//   `[task+0x60] |= 6`（按字节 OR，检查用 ldrb 读，别碰 +0x61 起的邻居字节）；
-//   随后原 ldrb 读到的就是新值 ⇒ 外层门通过，游戏自己的激活检查/执行逻辑原样跑。
+// 干预设计：挂在 **0xa02030**（`ldrb w8,[x22+0x60]` 站点，**不是**前面的 ldp 0xa0202c）：
+//   桩的次序是"先调宿主、后执行原指令"——挂 ldp 站点的话，钩子看到的是 ldp **之前**的
+//   旧 x22（2026-10-22 首轮实验就这么翻的车：补位补到了错误对象上，随后野指针崩）。
+//   挂 ldrb 站点时 x22 已被上面的 ldp 装好（= 当前任务），钩子把 state==4 且
+//   flags&6!=6 的任务**仅按字节 OR 6**；随后原 ldrb 读到的就是新值 ⇒ 外层门通过，
+//   游戏自己的激活检查/执行逻辑原样跑。
 //   **不推 state**——np113 的崩已归因于"状态 1→2 补推"（被 prepare 当待销毁），
 //   flags 单因从未单独试过；本实验就是补上这一课。
 // 判据：hook_e9（0xa01cf0）首次真命中 = 门过了；hook_e10（0x9fdccc）命中 = 任务真执行；
@@ -3497,10 +3499,10 @@ static uint64_t hook_e11(uint64_t *f) {  // runner 0xa01fe0 入口：x0 = mgr
 //   崩 ⇒ 崩点即"任务执行还缺什么"的精确答案。
 // ⚠ 纪律：编译期开关、**默认关**；实验轮临时改 1，跑完立即改回。
 #ifndef NP186_FLAGS
-#define NP186_FLAGS 0
+#define NP186_FLAGS 0   // ⚠ 实验 I 已跑完（2026-10-22 凌晨，结论见日报 §1.20）：恢复默认关
 #endif
 static int g_n_flagsfix;
-static uint64_t hook_flagsfix(uint64_t *f) {   // 0xa0202c：x22 = 当前遍历到的任务
+static uint64_t hook_flagsfix(uint64_t *f) {   // 0xa02030：x22 = ldp 已装好的当前任务
 #if NP186_FLAGS
     uint64_t t = f[FR_X22];
     if (t > 0x10000ull && t < 0x800000000000ull) {
@@ -5646,9 +5648,10 @@ static void exp_k(const char *files_dir, char *out, size_t cap, size_t *used) {
         k_install_hook(img, 0xa01cf0, (void *)hook_e9, "钉子8 runner 检查 0xa01cf0 入口");
         k_install_hook(img, 0x9fdccc, (void *)hook_e10, "钉子8 运行转发器 0x9fdccc 入口");
         k_install_hook(img, 0xa01fe0, (void *)hook_e11, "钉子8 runner 入口 0xa01fe0（链表遍历）");
-        // np186 实验 I：flags 补位挂在 runner 循环体内（0xa0202c，ldp 之后/ldrb 之前）。
+        // np186 实验 I：flags 补位挂在 runner 循环体的 ldrb 站点（0xa02030）——
+        //   挂 ldp(0xa0202c) 会读到旧 x22 补错对象（2026-10-22 首轮翻车实证）。
         //   开关默认关；实验轮把 NP186_FLAGS 改 1 重编，跑完改回。
-        k_install_hook(img, 0xa0202c, (void *)hook_flagsfix, "np186 flags 补位 0xa0202c（runner 外层门）");
+        k_install_hook(img, 0xa02030, (void *)hook_flagsfix, "np186 flags 补位 0xa02030（runner 外层门 ldrb）");
         k_install_hook(img, 0xa01be8, (void *)hook_e12, "钉子8 销毁入口 0xa01be8（数组 dump）");
         // ★ 注册体/构造尾定位钩（见 hook_e13/e14 注释）
         k_install_hook(img, 0xa01928, (void *)hook_e13, "钉子8 注册体 0xa01928");
