@@ -758,6 +758,16 @@ static int svc_account_open_user(uint64_t out, uint64_t b, uint64_t c, uint64_t 
     if (out) *(uint64_t *)(uintptr_t)out = 0x1000000000000001ull;
     return 0;
 }
+// GetDebugPadState(DebugPadState *out)：**必须把结构体写满**，否则调用方读未初始化栈。
+// 大小是离线量出来的：detail::GetDebugPadState 里对结构体指针的最大写是 `str xzr,[x20,#0x38]`
+// （8 字节）⇒ 结构体 ≥ 0x40，且 NN 的结构体 8 字节对齐 ⇒ 按 0x40 清零。
+// Size measured offline: the deepest store is `str xzr,[x20,#0x38]` (8 bytes) ⇒ struct is 0x40.
+#define DEBUG_PAD_STATE_BYTES 0x40
+static int svc_hid_debug_pad_state(uint64_t out, uint64_t b, uint64_t c, uint64_t d) {
+    (void)b;(void)c;(void)d;
+    if (out) memset((void *)(uintptr_t)out, 0, DEBUG_PAD_STATE_BYTES);   // 全零 = 没有按键/摇杆居中
+    return 0;
+}
 static int svc_ret_ok(uint64_t a, uint64_t b, uint64_t c, uint64_t d) {
     (void)a;(void)b;(void)c;(void)d; return 0;                // pctl / aoc 的 Initialize
 }
@@ -772,6 +782,7 @@ static const dm_sdk_ent g_tab[] = {
     E("_ZN2nn3hid24SetSupportedNpadStyleSetENS_4util10BitFlagSetILi32ENS0_12NpadStyleTagEEE", svc_hid_set_npad),
     E("_ZN2nn3hid22SetSupportedNpadIdTypeEPKjm", svc_hid_set_npad),
     E("_ZN2nn3hid15GetNpadStyleSetERKj",     svc_hid_get_style),
+    E("_ZN2nn3hid16GetDebugPadStateEPNS0_13DebugPadStateE", svc_hid_debug_pad_state),
     E("_ZN2nn7account10InitializeEv",        svc_account_init),
     E("_ZN2nn7account19OpenPreselectedUserEPNS0_10UserHandleE", svc_account_open_user),
     E("_ZN2nn4pctl10InitializeEv",           svc_ret_ok),
