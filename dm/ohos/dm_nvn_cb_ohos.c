@@ -177,334 +177,334 @@ static const char *const g_cb_names[127] = {
 };
 
 static uint64_t cb_2(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 2, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 2, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_4(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 4, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 4, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_5(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 5, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 5, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_6(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 6, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 6, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_7(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 7, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 7, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_8(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 8, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 8, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_9(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 9, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 9, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_10(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 10, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 10, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_11(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 11, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 11, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_12(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 12, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 12, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_13(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 13, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 13, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_14(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 14, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 14, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_15(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 15, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 15, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_16(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 16, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 16, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_17(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 17, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 17, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_18(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 18, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 18, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_19(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 19, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 19, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_20(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 20, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 20, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_21(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 21, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 21, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_22(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 22, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 22, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_23(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 23, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 23, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_24(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 24, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 24, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_25(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 25, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 25, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_26(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 26, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 26, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_27(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 27, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 27, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_28(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 28, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 28, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_29(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 29, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 29, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_30(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 30, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 30, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_31(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 31, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 31, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_32(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 32, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 32, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_33(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 33, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 33, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_34(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 34, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 34, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_35(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 35, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 35, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_36(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 36, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 36, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_37(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 37, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 37, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_38(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 38, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 38, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_39(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 39, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 39, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_40(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 40, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 40, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_41(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 41, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 41, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_42(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 42, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 42, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_43(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 43, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 43, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_44(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 44, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 44, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_45(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 45, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 45, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_46(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 46, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 46, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_47(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 47, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 47, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_48(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 48, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 48, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_49(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 49, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 49, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_50(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 50, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 50, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_51(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 51, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 51, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_52(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 52, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 52, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_53(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 53, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 53, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_54(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 54, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 54, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_56(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 56, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 56, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_57(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 57, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 57, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_65(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 65, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 65, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_66(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 66, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 66, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_70(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 70, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 70, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_72(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 72, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 72, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_73(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 73, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 73, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_74(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 74, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 74, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_75(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 75, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 75, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_76(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 76, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 76, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_77(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 77, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 77, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_78(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 78, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 78, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_79(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 79, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 79, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_80(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 80, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 80, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_81(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 81, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 81, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_82(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 82, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 82, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_83(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 83, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 83, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_84(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 84, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 84, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_85(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 85, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 85, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_86(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 86, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 86, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_87(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 87, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 87, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_88(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 88, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 88, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_89(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 89, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 89, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_90(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 90, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 90, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_91(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 91, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 91, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_92(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 92, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 92, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_93(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 93, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 93, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_94(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 94, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 94, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_95(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 95, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 95, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_96(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 96, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 96, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_99(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 99, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 99, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_100(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 100, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 100, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_101(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 101, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 101, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_102(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 102, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 102, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_103(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 103, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 103, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_104(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 104, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 104, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_105(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 105, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 105, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_106(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 106, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 106, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_107(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 107, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 107, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_108(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 108, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 108, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_109(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 109, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 109, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_110(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 110, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 110, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_111(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 111, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 111, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_112(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 112, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 112, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_113(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 113, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 113, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_114(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 114, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 114, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_115(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 115, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 115, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_116(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 116, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 116, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_117(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 117, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 117, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_118(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 118, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 118, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_119(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 119, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 119, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_120(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 120, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 120, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_121(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 121, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 121, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_122(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 122, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 122, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_123(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 123, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 123, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_124(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 124, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 124, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_125(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 125, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 125, a1, a2, a3, a4); return 0;
 }
 static uint64_t cb_126(uint64_t cb, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4; cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 126, a1, a2, a3, 0); return 0;
+    cb_obj *o = cb_get((const void *)(uintptr_t)cb, 1); cb_push(o, 126, a1, a2, a3, a4); return 0;
 }
 
 // ── 生命周期 ──
@@ -749,6 +749,31 @@ void *dm_nvn_cb_lookup(const char *name) {
     return NULL;
 }
 int dm_nvn_cb_count(void) { return 127; }
+
+// ── 回放接口（M4 真执行）──
+// 为什么这样设计：命令流的具体结构（cb_op）留在这个文件里，执行层只拿到"名字 + 参数"。
+// 这样加新命令不用改执行层的数据结构，执行层也不必知道我们的记录格式。
+int dm_nvn_cb_replay(void *cb, int (*emit)(int id, const char *name,
+                                           uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, void *ud),
+                     void *ud) {
+    cb_obj *o = cb_get(cb, 0);
+    if (!o || !emit) return 0;
+    for (uint32_t i = 0; i < o->nops; i++) {
+        const cb_op *e = &o->ops[i];
+        int id = e->id;
+        if (id < 0 || id >= 127) continue;
+        int stop = emit(id, g_cb_names[id], e->a[0], e->a[1], e->a[2], e->a[3], ud);
+        if (stop) return (int)i + 1;
+    }
+    return (int)o->nops;
+}
+
+// 查某条命令在名字表里的下标（执行层按名字取 id 用）
+int dm_nvn_cb_index(const char *short_name) {
+    if (!short_name) return -1;
+    for (int i = 0; i < 127; i++) if (!strcmp(g_cb_names[i], short_name)) return i;
+    return -1;
+}
 
 // 摘要：把"这个 CB 记了哪些命令、各几次"写进 out（队列提交时打点用）
 void dm_nvn_cb_summary(void *cb, char *out, int cap) {

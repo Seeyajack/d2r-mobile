@@ -291,6 +291,10 @@ vk_rt *vk_backend_target(vk_ctx *ctx, uint32_t w, uint32_t h, char *err, size_t 
 
 void vk_backend_target_free(vk_ctx *ctx, vk_rt *rt) { destroy_target(ctx, rt); }
 
+uint32_t vk_backend_rt_w(vk_rt *rt) { return rt ? rt->w : 0; }
+uint32_t vk_backend_rt_h(vk_rt *rt) { return rt ? rt->h : 0; }
+size_t   vk_backend_rt_rb_size(vk_rt *rt) { return rt ? (size_t)rt->rb_size : 0; }
+
 // 布局推进。阶段 1 只在 transfer 通道用；阶段 2 起颜色附件的推进阶段是 COLOR_ATTACHMENT_OUTPUT，
 // 所以阶段参数也开放出来。
 static void layout_barrier(VkCommandBuffer cb, VkImage img, VkImageLayout from, VkImageLayout to,

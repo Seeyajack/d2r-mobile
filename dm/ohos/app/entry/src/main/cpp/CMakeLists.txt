@@ -61,6 +61,7 @@ add_library(dmprobe SHARED
     ${DM_DIR}/ohos/dm_nvn_dev_ohos.c
     ${DM_DIR}/ohos/dm_nvn_cb_ohos.c
     ${DM_DIR}/ohos/dm_nvn_tex_ohos.c
+    ${DM_DIR}/ohos/dm_nvn_exec_ohos.c
     # 通用 NVN 内存池/缓冲胶水层（L1，UMA 直通；从探针搬出）。
     ${DM_DIR}/ohos/dm_nvn_vk.c
     # romfs 启动子集的内嵌归档（段 dmromfs，.incbin 一份 .pack；打档工具 mk_romfs_pack.py）。

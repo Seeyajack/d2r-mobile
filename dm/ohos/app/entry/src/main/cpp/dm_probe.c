@@ -35,6 +35,7 @@
 #include "dm_nvn_dev_ohos.h"
 #include "dm_nvn_cb_ohos.h"
 #include "dm_nvn_tex_ohos.h"
+#include "dm_nvn_exec_ohos.h"
 #include "dm_nvn_ohos.h"        // 通用 NVN 胶水层（设备族等平台中立语义）
 #include "dm_nvn_vk.h"         // 通用 NVN 内存池/缓冲胶水层（UMA 直通）
 #include "dm_main_layout.h"     // 旷野之息 main 的布局常数（fixups 表头生成）
@@ -6216,6 +6217,11 @@ static void exp_k(const char *files_dir, char *out, size_t cap, size_t *used) {
                      dm_nvn_cb_selftest(), dm_nvn_tex_selftest(),
                      dm_nvn_state_count(), dm_nvn_dev_count(),
                      dm_nvn_cb_count(), dm_nvn_tex_count());
+            note_append("dm_selftest.txt", l);
+            // M4 真执行：合成冒烟（走 NVN 分发 → 记录 → 提交 → 读回）
+            int st = dm_nvn_exec_smoketest();
+            snprintf(l, sizeof l, "[真执行] 合成冒烟：%s（verdict=%d）\n",
+                     dm_nvn_exec_report(), st);
             note_append("dm_selftest.txt", l);
         }
         // np146：把 main 映像的 R+X 封区告知胶水层（写 guest 内存前的可写性判据）。

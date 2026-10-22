@@ -35,6 +35,12 @@ void    vk_backend_target_free(vk_ctx *ctx, vk_rt *rt);
 // 清成指定颜色；0 = 成功，非 0 = 失败
 int     vk_backend_clear(vk_ctx *ctx, vk_rt *rt, float r, float g, float b, float a);
 
+// vk_rt 是不透明类型：外部（比如 NVN 执行层）要读尺寸/读回长度，只能走这三个访问器。
+// 别把这些字段直接暴露到 .h 里——那会让所有调用方依赖内部分布。
+uint32_t vk_backend_rt_w(vk_rt *rt);
+uint32_t vk_backend_rt_h(vk_rt *rt);
+size_t   vk_backend_rt_rb_size(vk_rt *rt);
+
 // 把目标读回内存（RGBA8，按行紧密）；返回写入字节数，<0 = 失败
 long    vk_backend_readback(vk_ctx *ctx, vk_rt *rt, void *buf, size_t cap);
 

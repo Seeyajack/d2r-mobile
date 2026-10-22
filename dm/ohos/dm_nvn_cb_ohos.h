@@ -16,3 +16,12 @@ int   dm_nvn_cb_selftest(void);
 // Queue::SubmitCommands 调它：把一个 CB 记下的命令流汇总成一个摘要（每条命令几次）
 void dm_nvn_cb_summary(void *cb, char *out, int cap);
 
+// 回放（M4 真执行）：按记录顺序回调。emit 返回非 0 表示提前停（要停在那条命令之前）。
+// 执行层据此把命令翻译成 Vulkan 调用，不用知道 cb_op 的结构。
+int dm_nvn_cb_replay(void *cb, int (*emit)(int id, const char *name,
+                                           uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, void *ud),
+                     void *ud);
+
+// 名字（去掉 nvnCommandBuffer 前缀）→ 下标；找不到返回 -1
+int dm_nvn_cb_index(const char *short_name);
+

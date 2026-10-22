@@ -19,6 +19,7 @@
 #include <stdint.h>
 #include "dm_nvn_dev_ohos.h"
 #include "dm_nvn_cb_ohos.h"   // 提交时取 CB 摘要
+#include "dm_nvn_exec_ohos.h"  // M4 真执行：记录流 → Vulkan
 
 // ── 旁表：一个对象一条记录，字段按对象类型各自解释 ──
 #define OBJ_MAX 96
@@ -249,6 +250,8 @@ static uint64_t q_submit(uint64_t q, uint64_t num, uint64_t bufs, uint64_t d) {
             uint64_t cb = *(uint64_t *)(uintptr_t)(bufs + i * 8);
             dm_nvn_cb_summary((void *)(uintptr_t)cb, g_nvn_submit_log[g_nvn_submit_n % 8], 160);
             g_nvn_submit_n++;
+            // ★ M4 真执行（2026-10-22）：同一个 CB 的记录流，翻译并执行一遍
+            dm_nvn_exec_submit_cb((void *)(uintptr_t)cb);
         }
     }
     return 0;
@@ -257,6 +260,8 @@ static uint64_t q_submit(uint64_t q, uint64_t num, uint64_t bufs, uint64_t d) {
 static uint64_t q_present(uint64_t q, uint64_t w, uint64_t slot, uint64_t d) {
     (void)q; (void)w; (void)slot; (void)d;
     g_nvn_q_present++;
+    // 呈现 = 读回并判定（真交换链等接 VI 时再补 vkQueuePresentKHR）
+    dm_nvn_exec_frame_done();
     return 0;
 }
 static uint64_t q_flush(uint64_t q, uint64_t b, uint64_t c, uint64_t d) {
