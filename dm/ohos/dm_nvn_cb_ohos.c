@@ -772,9 +772,12 @@ int dm_nvn_cb_selftest(void) {
     if (cb_Initialize(cb, 0, 0, 0, 0) != 0) fail++;
     if (cb_BeginRecording(cb, 0, 0, 0, 0) != 0) fail++;
     if (cb_IsRecording(cb, 0, 0, 0, 0) != 1) fail++;
-    // 记两条 Draw + 一条 Clear（用生成的 handler，取名字表里第一个匹配）
-    if (dm_nvn_cb_lookup("nvnCommandBufferDrawArrays")) fail++;
-    cb_push(cb_get((const void *)(uintptr_t)cb, 1), 40, 0, 3, 0, 0);
+    // 记一条 Draw：**通过真实 handler**（这样 per_id 记到的是它自己的下标，摘要里能打出真名）。
+    // ⚠ 这里原来写的是 `if (dm_nvn_cb_lookup(...)) fail++;` —— 查到了反而记失败，是自测自身的 bug
+    //   （真机第一次跑就报 cb=1，正好把这行揪出来）。已改成查不到才算失败。
+    void *fdraw = dm_nvn_cb_lookup("nvnCommandBufferDrawArrays");
+    if (!fdraw) fail++;
+    else ((uint64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t))fdraw)(cb, 0, 3, 0, 0);
     if (cb_EndRecording(cb, 0, 0, 0, 0) != 0) fail++;
     if (cb_IsRecording(cb, 0, 0, 0, 0) != 0) fail++;
     if (cb_AddCommandMemory(cb, 0x1000, 0, 0, 0) != 0) fail++;

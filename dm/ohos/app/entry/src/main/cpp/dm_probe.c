@@ -31,6 +31,10 @@
 #include "dm_sdk_ohos.h"        // 通用 SDK 胶水层（vi/oe 等轻量语义；与游戏无关）
 #include "dm_libc_ohos.h"       // 通用 libc 胶水层（memcpy/str*/math 按符号名直连宿主）
 #include "dm_svc_sync.h"        // 通用 svc 同步原语（事件/仲裁锁/进程级 key/多对象等待）
+#include "dm_nvn_state_ohos.h"
+#include "dm_nvn_dev_ohos.h"
+#include "dm_nvn_cb_ohos.h"
+#include "dm_nvn_tex_ohos.h"
 #include "dm_nvn_ohos.h"        // 通用 NVN 胶水层（设备族等平台中立语义）
 #include "dm_nvn_vk.h"         // 通用 NVN 内存池/缓冲胶水层（UMA 直通）
 #include "dm_main_layout.h"     // 旷野之息 main 的布局常数（fixups 表头生成）
@@ -3740,16 +3744,64 @@ static uint64_t hook_e33(uint64_t *f) {
 }
 
 // 0x9feb3c（F_wait 序言之后）：x0=等待对象，x30=调用者返回地址 ⇒ 谁在等、等的哪个对象
+// 受保护读：客体指针可能是垃圾，直接解引用会把探针自己读崩。
+// 用门跳转缓冲（g_gate_jmp，已改 __thread）兜住：读失败返回 0，调用方据此跳过。
+static int k_read_ok(const void *p, void *dst, size_t n) {
+    if (!p) return 0;
+    if (sigsetjmp(g_gate_jmp, 1) == 0) {
+        g_gate_armed = 1;
+        memcpy(dst, p, n);
+        g_gate_armed = 0;
+        return 1;
+    }
+    g_gate_armed = 0;
+    return 0;
+}
+
 static uint64_t hook_e34(uint64_t *f) {
     if (++g_n_e34 <= 8) {
         uint64_t lr = f[FR_X30];
         uint64_t base = (uint64_t)(uintptr_t)g_k_m.base;
-        char l[176];
+        uint64_t waiter = f[FR_X0];
+        char l[256];
         snprintf(l, sizeof l, "等待#%d F_wait 进入：等待对象=%#llx 调用者=%s%#llx\n",
-                 g_n_e34, (unsigned long long)f[FR_X0],
+                 g_n_e34, (unsigned long long)waiter,
                  (lr >= base && lr < base + DM_IMG_MAIN_END) ? "img+" : "外",
                  (unsigned long long)((lr >= base && lr < base + DM_IMG_MAIN_END) ? lr - base : lr));
         note_append("dm_gate.txt", l);
+
+        // ★ 2026-10-22（M3 关键一问）：F_wait 的退出条件是 [waiter+0x38]→[+0x128] 或 [waiter+0x50]。
+        //   **前两次进入**就把这两条读出来，并把 [waiter+0x38] 指向的对象头 dump 16 个字——
+        //   目的是"定类"：它到底是哪一类对象，决定了 +0x128 该由谁写。
+        if (g_n_e34 <= 2) {
+            uint64_t sub = 0, v128 = 0;
+            uint32_t v50 = 0;
+            int ok_sub = k_read_ok((const void *)(uintptr_t)(waiter + 0x38), &sub, 8);
+            int ok_50  = k_read_ok((const void *)(uintptr_t)(waiter + 0x50), &v50, 4);
+            if (ok_sub && sub) ok_sub = k_read_ok((const void *)(uintptr_t)(sub + 0x128), &v128, 8);
+            snprintf(l, sizeof l, "  → [waiter+0x38]=%#llx（读%s）  [[+0x38]+0x128]=%#llx  [waiter+0x50]=%#x（读%s）\n",
+                     (unsigned long long)sub, ok_sub ? "成功" : "失败",
+                     (unsigned long long)v128, v50, ok_50 ? "成功" : "失败");
+            note_append("dm_gate.txt", l);
+            if (sub) {
+                uint64_t hdr[16];
+                if (k_read_ok((const void *)(uintptr_t)sub, hdr, sizeof hdr)) {
+                    snprintf(l, sizeof l,
+                             "  obj@%#llx: %#llx %#llx %#llx %#llx | %#llx %#llx %#llx %#llx\n"
+                             "              %#llx %#llx %#llx %#llx | %#llx %#llx %#llx %#llx\n",
+                             (unsigned long long)sub,
+                             (unsigned long long)hdr[0], (unsigned long long)hdr[1],
+                             (unsigned long long)hdr[2], (unsigned long long)hdr[3],
+                             (unsigned long long)hdr[4], (unsigned long long)hdr[5],
+                             (unsigned long long)hdr[6], (unsigned long long)hdr[7],
+                             (unsigned long long)hdr[8], (unsigned long long)hdr[9],
+                             (unsigned long long)hdr[10], (unsigned long long)hdr[11],
+                             (unsigned long long)hdr[12], (unsigned long long)hdr[13],
+                             (unsigned long long)hdr[14], (unsigned long long)hdr[15]);
+                    note_append("dm_gate.txt", l);
+                }
+            }
+        }
     }
     return 0;
 }
@@ -6155,6 +6207,17 @@ static void exp_k(const char *files_dir, char *out, size_t cap, size_t *used) {
             klog("[sdk] 未装载（继续用宿主实现，行为不变）\n");
         // S2：把 rtld / subsdk0-3 也装进来（NP_EXTRA=0 可关）。失败只记账，不影响已有链路。
         if (getenv("NP_EXTRA") == NULL || atoi(getenv("NP_EXTRA")) != 0) k_load_extras();
+        // M4 自测四连（2026-10-22 真机档）：状态/设备/命令缓冲/纹理 四层的 Set→Get 往返。
+        // 判据：四个失败数**全 0**。落独立文件，不受日志预算影响。
+        {
+            char l[192];
+            snprintf(l, sizeof l, "[自测] NVN 四层：state=%d dev=%d cb=%d tex=%d（全 0 才算过；函数数 %d/%d/%d/%d）\n",
+                     dm_nvn_state_selftest(), dm_nvn_dev_selftest(),
+                     dm_nvn_cb_selftest(), dm_nvn_tex_selftest(),
+                     dm_nvn_state_count(), dm_nvn_dev_count(),
+                     dm_nvn_cb_count(), dm_nvn_tex_count());
+            note_append("dm_selftest.txt", l);
+        }
         // np146：把 main 映像的 R+X 封区告知胶水层（写 guest 内存前的可写性判据）。
         //   ⚠ 必须在写任何 guard 字节之前——否则拿 /proc/self/maps 兜底，
         //   而本进程 maps 有上千行，缓冲区一截断就"查无此页"（np146 实测 27 个全被误判）。
