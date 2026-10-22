@@ -143,6 +143,8 @@ enum { I_CoreMask=0, I_PriorityMask=1, I_AliasAddr=2, I_AliasSize=3, I_HeapAddr=
        I_ProgramId=18, I_InitProcIdRange=19, I_UserExcAddr=20, I_TotalNonSys=21, I_UsedNonSys=22, I_IsApplication=23 };
 
 static uint8_t g_seen[256];
+// IPC 记账（M2 第一步）：连接次数 / 请求次数。用 unsigned long 是为了在日志被截断时也能看出量级。
+static unsigned long g_nport, g_nipc;
 
 // 已映射区间登记（MapMemory 栈、MapPhysicalMemory alias 页），QueryMemory 据此回报；SDK 靠它找空位
 // Registry of mapped ranges (MapMemory stacks, MapPhysicalMemory alias pages), QueryMemory reports from it; the SDK relies on it to find free space
@@ -317,6 +319,28 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         default: v = 0; break;
         }
         regs[0] = 0; regs[1] = v; return 0;
+    }
+    // ── IPC 段（2026-10-22，M2 第一步）──
+    // 离线发现：0x1F（ConnectToNamedPort）/ 0x20（SendSyncRequest）以前**没有 case**，落到 default：
+    // "返回 0 = 成功，但什么都不写"。后果不是"失败"，而是更糟：
+    //   · ConnectToNamedPort(out_handle*, name)：out_handle **从没被写过** ⇒ 客户端拿的是**栈上垃圾**当会话句柄；
+    //   · SendSyncRequest(handle)：应答缓冲区原封不动 ⇒ 客户端解析的是**未初始化的栈**，返回值随栈内容漂。
+    // 这正是"M2 那 7 个构造函数崩在空指针上 / hid 静默返回 0"的机制。
+    // 这一步先做到"确定化"：写一个**确定的假句柄** + 记账（谁在连、连了几次、发了多少请求）。
+    // 依然不实现 CMIF 协议（真协议要对齐 nn::sf 的应答头，属下一步），但行为不再随机。
+    case 0x1F: {   // ConnectToNamedPort(Handle *out, const char *name)
+        uint64_t out = regs[0];
+        if (out) *(uint64_t *)(uintptr_t)out = 0x49430000ull + (uint64_t)g_nport;   // 确定的假句柄（'IC' 前缀）
+        g_nport++;
+        if (g_nport <= 32 || (g_nport % 64) == 0) LOG("[IPC] ConnectToNamedPort #%d → 句柄 %#llx（name 指针 %#llx，未解析）",
+                                                     g_nport, 0x49430000ull + (uint64_t)g_nport - 1, (unsigned long long)regs[1]);
+        regs[0] = 0; return 0;
+    }
+    case 0x20: {   // SendSyncRequest(Handle)
+        g_nipc++;
+        if (g_nipc <= 8 || (g_nipc % 256) == 0) LOG("[IPC] SendSyncRequest #%d（句柄 %#llx）—— 应答缓冲区未实现，客户端会读到未初始化数据",
+                                                   g_nipc, (unsigned long long)regs[0]);
+        regs[0] = 0; return 0;
     }
     default:
         if (!g_seen[num & 0xff]) { g_seen[num & 0xff] = 1; LOG("SVC %#x x0=%#llx x1=%#llx x2=%#llx (占位返回成功)", num, regs[0], regs[1], regs[2]); }

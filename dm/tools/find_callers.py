@@ -48,6 +48,35 @@ def scan_ptrs(img, lo, hi, targets):
     return hits
 
 
+
+def scan_plt_stubs(img, text_end, got):
+    """扫 PLT 桩：`adrp x16,page` + `ldr x17,[x16,#off]`（opcode 0xF9400000，Rn=16，Rt=17）
+    ⇒ 桩地址 → GOT 槽地址（再查 got 得符号名）。
+    ⚠ 为什么必须有它：NX 里调用**本模块导出**是走 PLT 桩的，直接 `bl <函数体>` 会得到 0 调用者——
+    2026-10-22 踩过：据此误判"sm::Initialize 没人调"。"""
+    stubs = {}
+    prev_adrp = None
+    for off in range(0, text_end - 4, 4):
+        w = struct.unpack_from('<I', img, off)[0]
+        if (w & 0x9F00001F) == 0x90000010:              # adrp x16, ...
+            immlo = (w >> 29) & 3
+            immhi = (w >> 5) & 0x7FFFF
+            imm = (immhi << 2) | immlo
+            if imm & (1 << 20):
+                imm -= (1 << 21)
+            prev_adrp = ((off & ~0xFFF) + (imm << 12)) & 0xFFFFFFFFFFFF
+            prev_at = off
+            continue
+        if (w & 0xFFC0001F) == 0xF9400011 and prev_adrp is not None and off - prev_at <= 8:
+            imm12 = (w >> 10) & 0xFFF
+            got_addr = prev_adrp + imm12 * 8
+            nm = got.get(got_addr)
+            if nm:
+                stubs[prev_at] = nm
+        prev_adrp = None
+    return stubs
+
+
 def main():
     if len(sys.argv) < 3:
         print(__doc__)
@@ -68,6 +97,37 @@ def main():
     text_end = min(len(img), tags.get('INIT_ARRAY', len(img)) or len(img))
 
     calls = scan_calls(img, text_end, targets)
+    # PLT 桩感知：给每个"有导出的目标"加上"经 PLT 桩调用"的计数
+    if '--plt' in sys.argv:
+        got = {}
+        if 'JMPREL' in tags:
+            symtab, strtab = tags['SYMTAB'], tags['STRTAB']
+            for off in range(0, tags.get('PLTRELSZ', 0), 24):
+                r_off, r_info, _ = struct.unpack_from('<QQq', img, tags['JMPREL'] + off)
+                symi = r_info >> 32
+                if not symi:
+                    continue
+                nm_off = struct.unpack_from('<I', img, symtab + symi * 24)[0]
+                e = img.index(b'\0', strtab + nm_off)
+                got[r_off] = img[strtab + nm_off:e].decode('utf-8', 'replace')
+        stubs = scan_plt_stubs(img, text_end, got)
+        # 目标函数名 → 桩地址列表
+        nsym = struct.unpack_from('<I', img, tags['HASH'] + 4)[0] if 'HASH' in tags else 0
+        name_of = {}
+        for i in range(1, nsym):
+            st_off = tags['SYMTAB'] + i * 24
+            n_off, info, other, shndx, val, size = struct.unpack_from('<IBBHQQ', img, st_off)
+            if n_off and shndx and val in targets:
+                e = img.index(b'\0', tags['STRTAB'] + n_off)
+                name_of.setdefault(val, img[tags['STRTAB'] + n_off:e].decode('utf-8', 'replace'))
+        for tname, addr in list(name_of.items()):
+            stub_addrs = {a for a, nm in stubs.items() if nm == addr}
+            if not stub_addrs:
+                continue
+            pc = scan_calls(img, text_end, stub_addrs)
+            n = sum(len(v) for v in pc.values())
+            print(f'  [PLT] {addr} 经 {len(stub_addrs)} 个桩被调用 {n} 处'
+                  + ('' if not n else '：' + ', '.join(f'+{o:#x}' for v in pc.values() for o, _ in v[:4])))
     print(f'=== {path.split("/")[-1]}：扫 {text_end/1048576:.2f} MB 文本 ===')
     for t in sorted(targets):
         h = calls.get(t, [])
