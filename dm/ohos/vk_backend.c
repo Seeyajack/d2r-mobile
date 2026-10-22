@@ -291,6 +291,8 @@ vk_rt *vk_backend_target(vk_ctx *ctx, uint32_t w, uint32_t h, char *err, size_t 
 
 void vk_backend_target_free(vk_ctx *ctx, vk_rt *rt) { destroy_target(ctx, rt); }
 
+VkRenderPass  vk_backend_rt_rp(vk_rt *rt) { return rt ? rt->rp : VK_NULL_HANDLE; }
+VkFramebuffer vk_backend_rt_fb(vk_rt *rt) { return rt ? rt->fb : VK_NULL_HANDLE; }
 uint32_t vk_backend_rt_w(vk_rt *rt) { return rt ? rt->w : 0; }
 uint32_t vk_backend_rt_h(vk_rt *rt) { return rt ? rt->h : 0; }
 size_t   vk_backend_rt_rb_size(vk_rt *rt) { return rt ? (size_t)rt->rb_size : 0; }
@@ -601,6 +603,141 @@ done:
           fails ? "失败" : "全部通过", fails, (unsigned long long)(ms_now() - t0));
     *p = 0;
     return fails;
+}
+
+// ================= NVN 执行层用的"一帧"：清屏 + 已验证三角形 =================
+// 为什么单独开一个入口而不是让执行层自己建管线：管线/着色器/顶点缓冲属于 Vulkan 资源管理，
+// 集中在同一个模块里；执行层只负责"把 NVN 的 DrawArrays 翻译成这一句"。
+typedef struct { vk_rt *t; VkPipeline pl; VkBuffer vb; float clr[4]; } tri_pack;
+
+static void rec_tri(VkCommandBuffer cb, void *ud) {
+    tri_pack *d = (tri_pack *)ud;
+    vk_rt *t = d->t;
+
+    VkClearValue cv = { 0 };
+    cv.color.float32[0] = d->clr[0]; cv.color.float32[1] = d->clr[1];
+    cv.color.float32[2] = d->clr[2]; cv.color.float32[3] = d->clr[3];
+    VkRenderPassBeginInfo bi = { VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
+    bi.renderPass = t->rp; bi.framebuffer = t->fb;
+    bi.renderArea.extent.width = t->w; bi.renderArea.extent.height = t->h;
+    bi.clearValueCount = 1; bi.pClearValues = &cv;
+    vkCmdBeginRenderPass(cb, &bi, VK_SUBPASS_CONTENTS_INLINE);
+
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, d->pl);
+    VkViewport vp = { 0.f, 0.f, (float)t->w, (float)t->h, 0.f, 1.f };
+    VkRect2D sc = { { 0, 0 }, { t->w, t->h } };
+    vkCmdSetViewport(cb, 0, 1, &vp);
+    vkCmdSetScissor(cb, 0, 1, &sc);
+    VkDeviceSize off = 0;
+    vkCmdBindVertexBuffers(cb, 0, 1, &d->vb, &off);
+    vkCmdDraw(cb, 3, 1, 0, 0);
+    vkCmdEndRenderPass(cb);
+}
+
+static char g_draw_err[256];
+const char *vk_backend_draw_err(void) { return g_draw_err; }
+
+int vk_backend_draw_triangle(vk_ctx *ctx, vk_rt *rt, const float clear[4]) {
+    if (!ctx || !rt) { snprintf(g_draw_err, sizeof g_draw_err, "参数为空"); return -1; }
+    char err[256] = "";
+    g_draw_err[0] = 0;
+    // 管线（与阶段 2 完全一致的构造；SPIR-V 已在真机验证）
+    VkShaderModule vm = make_module(ctx->dev, dm_spv_vert, dm_spv_vert_n, err, sizeof err);
+    VkShaderModule fm = vm ? make_module(ctx->dev, dm_spv_frag, dm_spv_frag_n, err, sizeof err) : NULL;
+    if (!vm || !fm) {
+        snprintf(g_draw_err, sizeof g_draw_err, "着色器模块创建失败：%s", err);
+        if (vm) vkDestroyShaderModule(ctx->dev, vm, NULL);
+        if (fm) vkDestroyShaderModule(ctx->dev, fm, NULL);
+        do { snprintf(g_draw_err, sizeof g_draw_err, "失败于 vk_backend.c:%d", __LINE__); return -1; } while (0);
+    }
+
+    VkPipelineShaderStageCreateInfo st[2] = {
+        { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_VERTEX_BIT, vm, "main", NULL },
+        { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_FRAGMENT_BIT, fm, "main", NULL },
+    };
+    VkPipelineVertexInputStateCreateInfo vst = { VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
+    VkPipelineInputAssemblyStateCreateInfo ia = { VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
+    ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    VkPipelineViewportStateCreateInfo vp = { VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO };
+    vp.viewportCount = 1; vp.scissorCount = 1;
+    VkPipelineRasterizationStateCreateInfo rs = { VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
+    rs.polygonMode = VK_POLYGON_MODE_FILL; rs.cullMode = VK_CULL_MODE_NONE;
+    rs.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE; rs.lineWidth = 1.0f;
+    VkPipelineMultisampleStateCreateInfo ms = { VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO };
+    ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+    VkPipelineColorBlendAttachmentState att = { 0 };
+    att.colorWriteMask = 0xF;
+    VkPipelineColorBlendStateCreateInfo cb = { VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
+    cb.attachmentCount = 1; cb.pAttachments = &att;
+    VkDynamicState dyn[2] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+    VkPipelineDynamicStateCreateInfo ds = { VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO };
+    ds.dynamicStateCount = 2; ds.pDynamicStates = dyn;
+    VkPipelineLayoutCreateInfo li = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+    VkPipelineLayout lay;
+    if (vkCreatePipelineLayout(ctx->dev, &li, NULL, &lay) != VK_SUCCESS) {
+        snprintf(g_draw_err, sizeof g_draw_err, "管线布局创建失败");
+        vkDestroyShaderModule(ctx->dev, vm, NULL); vkDestroyShaderModule(ctx->dev, fm, NULL);
+        do { snprintf(g_draw_err, sizeof g_draw_err, "失败于 vk_backend.c:%d", __LINE__); return -1; } while (0);
+    }
+    VkGraphicsPipelineCreateInfo gi = { VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
+    gi.stageCount = 2; gi.pStages = st;
+    gi.pVertexInputState = &vst; gi.pInputAssemblyState = &ia; gi.pViewportState = &vp;
+    gi.pRasterizationState = &rs; gi.pMultisampleState = &ms; gi.pColorBlendState = &cb;
+    gi.pDynamicState = &ds; gi.layout = lay; gi.renderPass = rt->rp;
+    VkPipeline pl;
+    if (vkCreateGraphicsPipelines(ctx->dev, VK_NULL_HANDLE, 1, &gi, NULL, &pl) != VK_SUCCESS) {
+        snprintf(g_draw_err, sizeof g_draw_err, "图形管线创建失败（renderPass=%p layout=%p）", (void *)rt->rp, (void *)lay);
+        vkDestroyPipelineLayout(ctx->dev, lay, NULL);
+        vkDestroyShaderModule(ctx->dev, vm, NULL); vkDestroyShaderModule(ctx->dev, fm, NULL);
+        do { snprintf(g_draw_err, sizeof g_draw_err, "失败于 vk_backend.c:%d", __LINE__); return -1; } while (0);
+    }
+    vkDestroyShaderModule(ctx->dev, vm, NULL);
+    vkDestroyShaderModule(ctx->dev, fm, NULL);
+
+    const float verts[6] = { -1.f, -1.f, 1.f, -1.f, 0.f, 1.f };
+    VkBufferCreateInfo bi = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+    bi.size = sizeof verts; bi.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+    bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    VkBuffer vb;
+    if (vkCreateBuffer(ctx->dev, &bi, NULL, &vb) != VK_SUCCESS) {
+        snprintf(g_draw_err, sizeof g_draw_err, "顶点缓冲创建失败");
+        vkDestroyPipeline(ctx->dev, pl, NULL); vkDestroyPipelineLayout(ctx->dev, lay, NULL);
+        do { snprintf(g_draw_err, sizeof g_draw_err, "失败于 vk_backend.c:%d", __LINE__); return -1; } while (0);
+    }
+    VkMemoryRequirements mr; vkGetBufferMemoryRequirements(ctx->dev, vb, &mr);
+    VkMemoryAllocateInfo ma = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+    ma.allocationSize = mr.size;
+    VkResult r;
+    ma.memoryTypeIndex = find_mem_type(ctx, mr.memoryTypeBits,
+                                       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &r);
+    VkDeviceMemory vbm;
+    VkResult ra = vkAllocateMemory(ctx->dev, &ma, NULL, &vbm);
+    if (!ma.memoryTypeIndex || ra != VK_SUCCESS) {
+        // 说细一点：memType=0 说明 find_mem_type 没找到（bits 里没有 HOST_VISIBLE|COHERENT）；
+        // memType 非 0 而 ra 非 0 才是分配本身失败（多半是显存/句柄限制）。
+        snprintf(g_draw_err, sizeof g_draw_err,
+                 "顶点缓冲内存分配失败：memType=%u allocResult=%d bits=%#x size=%llu",
+                 ma.memoryTypeIndex, (int)ra, mr.memoryTypeBits, (unsigned long long)mr.size);
+        vkDestroyBuffer(ctx->dev, vb, NULL);
+        vkDestroyPipeline(ctx->dev, pl, NULL); vkDestroyPipelineLayout(ctx->dev, lay, NULL);
+        return -1;
+    }
+    vkBindBufferMemory(ctx->dev, vb, vbm, 0);
+    void *mp = NULL;
+    if (vkMapMemory(ctx->dev, vbm, 0, sizeof verts, 0, &mp) == VK_SUCCESS) {
+        memcpy(mp, verts, sizeof verts);
+        vkUnmapMemory(ctx->dev, vbm);
+    }
+
+    tri_pack dp = { rt, pl, vb, { clear[0], clear[1], clear[2], clear[3] } };
+    int rc = one_shot(ctx, rec_tri, &dp);
+    if (rc != 0) snprintf(g_draw_err, sizeof g_draw_err, "命令提交失败（one_shot rc=%d）", rc);
+
+    vkDestroyBuffer(ctx->dev, vb, NULL);
+    vkFreeMemory(ctx->dev, vbm, NULL);
+    vkDestroyPipeline(ctx->dev, pl, NULL);
+    vkDestroyPipelineLayout(ctx->dev, lay, NULL);
+    return rc == 0 ? 0 : -1;
 }
 
 // ================= 阶段 3 前置：内存池零拷贝的平台能力验证 =================

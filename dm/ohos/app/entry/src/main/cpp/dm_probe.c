@@ -6211,18 +6211,31 @@ static void exp_k(const char *files_dir, char *out, size_t cap, size_t *used) {
         // M4 自测四连（2026-10-22 真机档）：状态/设备/命令缓冲/纹理 四层的 Set→Get 往返。
         // 判据：四个失败数**全 0**。落独立文件，不受日志预算影响。
         {
+            // 同时打 klog（主日志）+ note_append（独立文件）：上一次只写文件，结果"文件没出现"时
+            // 完全看不出是没执行、还是执行到一半崩了。两条通道互相兜底（诊断通道冗余原则）。
+            klog("[自测] 进入 NVN 四层自测\n");
+            int a = dm_nvn_state_selftest();
+            klog("[自测] state=%d\n", a);
+            int b = dm_nvn_dev_selftest();
+            klog("[自测] dev=%d\n", b);
+            int c = dm_nvn_cb_selftest();
+            klog("[自测] cb=%d\n", c);
+            int d = dm_nvn_tex_selftest();
+            klog("[自测] tex=%d\n", d);
             char l[192];
             snprintf(l, sizeof l, "[自测] NVN 四层：state=%d dev=%d cb=%d tex=%d（全 0 才算过；函数数 %d/%d/%d/%d）\n",
-                     dm_nvn_state_selftest(), dm_nvn_dev_selftest(),
-                     dm_nvn_cb_selftest(), dm_nvn_tex_selftest(),
+                     a, b, c, d,
                      dm_nvn_state_count(), dm_nvn_dev_count(),
                      dm_nvn_cb_count(), dm_nvn_tex_count());
             note_append("dm_selftest.txt", l);
-            // M4 真执行：合成冒烟（走 NVN 分发 → 记录 → 提交 → 读回）
+            klog("[真执行] 进入合成冒烟\n");
             int st = dm_nvn_exec_smoketest();
-            snprintf(l, sizeof l, "[真执行] 合成冒烟：%s（verdict=%d）\n",
+            klog("[真执行] 冒烟返回 %d\n", st);
+            // l 要够大：vk_backend_shader 的报告有 ~700 字节，判定行在**末尾**（截断就看不到结论）
+            static char rep[1600];
+            snprintf(rep, sizeof rep, "[真执行] 合成冒烟：%s（verdict=%d）\n",
                      dm_nvn_exec_report(), st);
-            note_append("dm_selftest.txt", l);
+            note_append("dm_selftest.txt", rep);
         }
         // np146：把 main 映像的 R+X 封区告知胶水层（写 guest 内存前的可写性判据）。
         //   ⚠ 必须在写任何 guard 字节之前——否则拿 /proc/self/maps 兜底，

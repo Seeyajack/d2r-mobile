@@ -17,6 +17,7 @@
 // Design: transfer operations only (ClearColorImage + CopyImageToBuffer); no pipelines, no shaders, no
 // render passes -- phase 1 keeps the variable count as low as possible.
 #pragma once
+#include <vulkan/vulkan.h>   // VkRenderPass/VkFramebuffer 访问器要用（之前 .h 里没引，外部一用就编不过）
 
 #include <stddef.h>
 #include <stdint.h>
@@ -37,12 +38,19 @@ int     vk_backend_clear(vk_ctx *ctx, vk_rt *rt, float r, float g, float b, floa
 
 // vk_rt 是不透明类型：外部（比如 NVN 执行层）要读尺寸/读回长度，只能走这三个访问器。
 // 别把这些字段直接暴露到 .h 里——那会让所有调用方依赖内部分布。
+VkRenderPass  vk_backend_rt_rp(vk_rt *rt);
+VkFramebuffer vk_backend_rt_fb(vk_rt *rt);
 uint32_t vk_backend_rt_w(vk_rt *rt);
 uint32_t vk_backend_rt_h(vk_rt *rt);
 size_t   vk_backend_rt_rb_size(vk_rt *rt);
 
 // 把目标读回内存（RGBA8，按行紧密）；返回写入字节数，<0 = 失败
 long    vk_backend_readback(vk_ctx *ctx, vk_rt *rt, void *buf, size_t cap);
+
+// 一帧：按 clear 颜色清屏 + 画一个已验证的三角形（复用阶段 2 的 SPIR-V 直通路径）。
+// NVN 执行层的 DrawArrays 就翻译成它——所以它属于 Vulkan 资源管理，放本模块。
+int     vk_backend_draw_triangle(vk_ctx *ctx, vk_rt *rt, const float clear[4]);
+const char *vk_backend_draw_err(void);   // 上一次失败的原因（没失败就是空串）
 
 // 冒烟自测：init → 64×64 清红 → 读回 → 逐像素验证。
 // 报告写进 out（设备名/驱动/API 版本/耗时/逐项结论），含结尾 0。

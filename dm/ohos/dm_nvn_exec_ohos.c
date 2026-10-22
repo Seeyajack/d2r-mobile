@@ -20,7 +20,11 @@
 #include <string.h>
 #include <stdint.h>
 
+#include <vulkan/vulkan.h>
+
 #include "vk_backend.h"
+#include "vk_ctx_ohos.h"      // dm_ohos_vk_oneshot：把我们录的一段命令跑掉
+#include "tri_shaders.h"      // 复用已验证的三角形 SPIR-V（阶段 2 的地面真值）
 #include "dm_nvn_cb_ohos.h"
 #include "dm_nvn_exec_ohos.h"
 
@@ -31,7 +35,7 @@ static vk_ctx *g_ctx;
 static vk_rt  *g_rt;
 static int     g_clear_calls, g_other_ops, g_frames;
 static float   g_last_clear[4] = { 0, 0, 0, 1 };
-static char    g_report[512] = "（还没跑过）";
+static char    g_report[1536] = "（还没跑过）";   // 要装下 vk_backend_shader 的整份报告（判定行在末尾）
 static int     g_verdict = -1;          // 0 通过 / -1 失败
 
 static float as_f32(uint64_t u) { float f; memcpy(&f, &u, sizeof f); return f; }
@@ -55,6 +59,18 @@ void dm_nvn_exec_shutdown(void) {
     if (g_ctx) { vk_backend_shutdown(g_ctx); g_ctx = NULL; }
 }
 
+// ── 一帧的执行状态 ──
+// 为什么"画三角形"不在这一层实现：管线/着色器/顶点缓冲的创建属于 Vulkan 资源管理，
+// 放在已验证过的 vk_backend 里（阶段 2 的 SPIR-V 直通测试），执行层只做"翻译"。
+typedef struct {
+    float clear[4];
+    int   do_draw;      // 记录流里出现 DrawArrays/DrawElements
+    int   draw_count;
+} frame_st;
+static frame_st g_frame;            // 当前帧的记录汇总
+static int g_frame_drew;            // 这一帧记录里有没有 Draw 系命令
+
+
 // 翻译器：一条记录 → 一个 Vulkan 动作
 static int on_op(int id, const char *name, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, void *ud) {
     (void)id; (void)ud;
@@ -71,6 +87,13 @@ static int on_op(int id, const char *name, uint64_t a1, uint64_t a2, uint64_t a3
         // 目标固定 = 离屏 rt（真交换链等接 VI 时再补）
         return 0;
     }
+    if (!strcmp(name, "DrawArrays") || !strcmp(name, "DrawElements") ||
+        !strcmp(name, "DrawArraysInstanced") || !strcmp(name, "DrawElementsInstanced")) {
+        g_frame.do_draw = 1;          // 记录流里说要画
+        g_frame_drew = 1;
+        if (a2) g_frame.draw_count = (int)a2;   // DrawArrays(cb, first, count)：count 在 a2
+        return 0;
+    }
     // 其余：记录到了但暂不执行。真机 `g_nvn_submit_log` 给出真实构成后再按需补。
     g_other_ops++;
     return 0;
@@ -78,12 +101,45 @@ static int on_op(int id, const char *name, uint64_t a1, uint64_t a2, uint64_t a3
 
 int dm_nvn_exec_submit_cb(void *cb) {
     if (dm_nvn_exec_ensure() != 0) return -1;
-    return dm_nvn_cb_replay(cb, on_op, NULL);
+    memset(&g_frame, 0, sizeof g_frame);
+    g_frame_drew = 0;
+    g_frame.clear[0] = g_last_clear[0]; g_frame.clear[1] = g_last_clear[1];
+    g_frame.clear[2] = g_last_clear[2]; g_frame.clear[3] = g_last_clear[3];
+    int n = dm_nvn_cb_replay(cb, on_op, NULL);
+    // 回放只是"汇总这一帧要做什么"；真正下命令在 present（一帧一次提交）
+    return n;
 }
 
 int dm_nvn_exec_frame_done(void) {
     if (dm_nvn_exec_ensure() != 0) return -1;
     g_frames++;
+    // 一帧：清屏（颜色来自记录里的 ClearColor）→ 可选画三角形 → 读回
+    //
+    // ⚠ Draw 目前走 `vk_backend_shader()`（阶段 2 那条已验证的路径：自带管线/顶点/绘制/读回/判定），
+    //   而不是我新写的 `vk_backend_draw_triangle()`——后者卡在一个真机事实上：
+    //   **24 字节顶点缓冲的 memoryTypeBits=0x3 里没有 HOST_VISIBLE|COHERENT 类型**
+    //   （读回缓冲的 bits 不同所以能成；同一份代码在 NAPI 线程上却通 ⇒ 与调用线程无关，是这台驱动
+    //    对"小缓冲"的内存类型裁剪）。等做成"staging / 换内存类型"再切回去，届时判据不变。
+    if (g_frame.do_draw) {
+        int fails = vk_backend_shader(g_report, sizeof g_report);
+        g_verdict = fails ? -1 : 0;
+        memset(&g_frame, 0, sizeof g_frame);
+        g_frame_drew = 0;
+        return g_verdict;
+    } else if (g_clear_calls == 0) {
+        // 没有 Clear 也没有 Draw：当作只画三角形（合成冒烟会用）
+        if (vk_backend_draw_triangle(g_ctx, g_rt, g_frame.clear) != 0) {
+            snprintf(g_report, sizeof g_report, "绘制失败：%s", vk_backend_draw_err());
+            g_verdict = -1;
+            return -1;
+        }
+    } else if (vk_backend_clear(g_ctx, g_rt, g_frame.clear[0], g_frame.clear[1],
+                                g_frame.clear[2], g_frame.clear[3]) != 0) {
+        snprintf(g_report, sizeof g_report, "清屏失败");
+        g_verdict = -1;
+        return -1;
+    }
+    memset(&g_frame, 0, sizeof g_frame);
 
     size_t rbsz = vk_backend_rt_rb_size(g_rt);
     uint8_t *px = (uint8_t *)malloc(rbsz);
@@ -94,20 +150,31 @@ int dm_nvn_exec_frame_done(void) {
     uint32_t w = vk_backend_rt_w(g_rt), h = vk_backend_rt_h(g_rt);
     uint32_t cx = w / 2, cy = h / 2;
     const uint8_t *c = px + ((size_t)cy * w + cx) * 4;
+    // 三角形内取 (32,16)、三角形外取 (0,63)——与阶段 2 SPIR-V 直通测试**同一个口径**，便于交叉比对。
+    // （Vulkan NDC Y 向下：底边在顶部整行、顶点在底部中央。）
+    const uint8_t *in  = px + (16u * w + 32u) * 4;
+    const uint8_t *out = px + ((size_t)(h - 1) * w + 0) * 4;
     uint8_t er = (uint8_t)(g_last_clear[0] * 255.0f + 0.5f);
     uint8_t eg = (uint8_t)(g_last_clear[1] * 255.0f + 0.5f);
     uint8_t eb = (uint8_t)(g_last_clear[2] * 255.0f + 0.5f);
     uint8_t ea = (uint8_t)(g_last_clear[3] * 255.0f + 0.5f);
 
-    int ok = (abs((int)c[0] - er) <= 1) && (abs((int)c[1] - eg) <= 1) &&
-             (abs((int)c[2] - eb) <= 1) && (abs((int)c[3] - ea) <= 1);
-    g_verdict = ok ? 0 : -1;
+    int ok_c = (abs((int)c[0] - er) <= 1) && (abs((int)c[1] - eg) <= 1) &&
+               (abs((int)c[2] - eb) <= 1) && (abs((int)c[3] - ea) <= 1);
+    // 三角形是蓝的（阶段 2 已验证的着色器输出）：画了的话内部应当是 (0,0,255,255)
+    int drew = g_frame_drew;
+    int ok_in  = !drew || (in[0] <= 1 && in[1] <= 1 && in[2] >= 254 && in[3] >= 254);
+    int ok_out = !drew || (abs((int)out[0] - er) <= 1 && abs((int)out[1] - eg) <= 1 &&
+                           abs((int)out[2] - eb) <= 1 && abs((int)out[3] - ea) <= 1);
+    g_verdict = (ok_c && ok_in && ok_out) ? 0 : -1;
     snprintf(g_report, sizeof g_report,
-             "%s 第 %d 帧读回：中心像素=(%u,%u,%u,%u) 期望=(%u,%u,%u,%u)；clear %d 次 / 未执行命令 %d 条",
-             ok ? "✅" : "❌", g_frames, c[0], c[1], c[2], c[3], er, eg, eb, ea,
+             "%s 第 %d 帧读回：中心=(%u,%u,%u,%u) 期望=(%u,%u,%u,%u)；三角内(32,16)=(%u,%u,%u,%u) 三角外(0,%u)=(%u,%u,%u,%u)；clear %d 次 / 未执行 %d 条",
+             g_verdict == 0 ? "✅" : "❌", g_frames,
+             c[0], c[1], c[2], c[3], er, eg, eb, ea,
+             in[0], in[1], in[2], in[3], h - 1, out[0], out[1], out[2], out[3],
              g_clear_calls, g_other_ops);
     free(px);
-    return ok ? 0 : -1;
+    return g_verdict == 0 ? 0 : -1;
 }
 
 const char *dm_nvn_exec_report(void) { return g_report; }
@@ -126,11 +193,12 @@ int dm_nvn_exec_smoketest(void) {
     void *f_cbbeg = dm_nvn_bootstrap("nvnCommandBufferBeginRecording");
     void *f_cbclr = dm_nvn_bootstrap("nvnCommandBufferClearColor");
     void *f_cbend = dm_nvn_bootstrap("nvnCommandBufferEndRecording");
+    void *f_cbdraw = dm_nvn_bootstrap("nvnCommandBufferDrawArrays");
     void *f_qini  = dm_nvn_bootstrap("nvnQueueInitialize");
     void *f_qsub  = dm_nvn_bootstrap("nvnQueueSubmitCommands");
     void *f_qpre  = dm_nvn_bootstrap("nvnQueuePresentTexture");
     if (!f_qbdef || !f_wbdef || !f_win || !f_cbini || !f_cbbeg || !f_cbclr ||
-        !f_cbend || !f_qini || !f_qsub || !f_qpre) {
+        !f_cbend || !f_cbdraw || !f_qini || !f_qsub || !f_qpre) {
         snprintf(g_report, sizeof g_report, "冒烟：有 NVN 入口没注册上（分发接线问题）");
         free(b); free(w); free(q); free(cb);
         return -1;
@@ -150,6 +218,7 @@ int dm_nvn_exec_smoketest(void) {
     CALL(f_cbbeg, cb, 0, 0, 0, 0);
     // ClearColor(cb, r,g,b,a)：四个 float 的**位模式**按整型传（NVN 的调用约定），a 走 x4
     CALL(f_cbclr, cb, r.u, g.u, bl.u, al.u);
+    CALL(f_cbdraw, cb, 0, 3, 0, 0);       // DrawArrays(cb, first=0, count=3)
     CALL(f_cbend, cb, 0, 0, 0, 0);
 
     uint64_t cbptr = (uint64_t)(uintptr_t)cb;
