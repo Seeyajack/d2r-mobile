@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""NSO 模块勘察：解开 6 个模块，列出各自的**导出 / 导入 / 构造函数**，并算出跨模块解析表。
+"""NSO 模块勘察：解开目录里全部 NSO 模块，列出各自的**导出 / 导入 / 构造函数**，并算出跨模块解析表。
 
 为什么要有它（2026-10-22）：
   我们的探针只装 `main`（+ `sdk`），而 nxnative 那套是**装全部模块**（rtld/sdk/subsdk0-3/main），
@@ -17,6 +17,9 @@ import json
 import os
 import struct
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import nso_mods  # 模块发现 + 规范排序（与 dmport / gen_embed 同一份清单，换游戏不写死名字）
 
 
 # ───────────────────────── 纯 Python LZ4 block 解码 ─────────────────────────
@@ -156,13 +159,16 @@ def main():
     if '--json' in sys.argv:
         out_json = sys.argv[sys.argv.index('--json') + 1]
 
-    order = ['rtld', 'sdk', 'subsdk0', 'subsdk1', 'subsdk2', 'subsdk3', 'main']
+    # 模块清单以目录里**实际有的** NSO 为准（以前写死 7 个名字；换游戏缺 subsdk* 会漏、
+    # 多 subsdk4 会 silently 不勘察）。排序 = 规范装载序（main→sdk→rtld→subsdkN→其它）。
+    order = nso_mods.discover(d)
+    for req in ('main', 'sdk'):
+        if req not in order:
+            print(f'  ⚠ 缺 {req}（旷野之息类游戏应同时有 main+sdk；其它形态另说）')
+    print(f'发现 {len(order)} 个 NSO 模块：{", ".join(order)}')
     mods = {}
     for name in order:
         p = os.path.join(d, name)
-        if not os.path.exists(p):
-            print(f'  (缺 {name})')
-            continue
         img = nso_to_image(p)
         tags = parse_dyn(img)
         ex, im = symbols(img, tags)

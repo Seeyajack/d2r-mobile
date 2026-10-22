@@ -23,6 +23,8 @@
 #                  产物自包含、可提交进仓库（真机测试用）；连续零字节用 .space 压缩。
 #   --layout-header <输出.h>  把 fixups 表头（PATCH_OFF/TEXT_END/…）写成 #define，
 #                  供探针组装 module_t（运行时装载要用这些布局常数）。
+#   --xmods-header <输出.h>   把"额外模块"装载表（除 main/sdk 外）写成常量数组，
+#                  供探针 dm_probe.c 初始化 g_xmods——**换游戏只换这个文件，不动 C 代码**。
 #   --gates-header <输出.h>   把 <名>.gates.tsv（门表：返回点/kind/arg/原指令）写成登记表数组，
 #                  供探针在装载后逐条 gate_register（执行链的门回路验证用）。
 import os
@@ -118,13 +120,53 @@ def gen_one(out_dir, name, asm, embed_bytes):
     return a, po, end
 
 
+def gen_xmods(out_dir, names, dst):
+    """额外模块装载表 → C 常量数组（dm_probe.c 的 g_xmods 数据源）。
+
+    为什么：g_xmods 以前在 dm_probe.c 里手写，每行引用 DM_IMG_<名>_* 宏——换一款游戏
+    缺一个 subsdk 就直接编译不过（宏未定义）。改成**生成的数据表**后，换游戏只是
+    重新生成本文件，C 代码不动。main/sdk 除外：那两个在探针里有定制装载路径
+    （k_load_sdk / exp_k），不走通用表。
+    """
+    xmods = [n for n in names if n not in ('main', 'sdk')]
+    lines = ['// 【生成文件】由 gen_embed_ohos.py --xmods-header 生成，勿手改。',
+             '// 运行时"额外模块"表：除 main/sdk（定制装载）外的全部模块，顺序 = 装载顺序。',
+             '// 布局常量来自 dm_main_layout.h（同目录，由 --layout-header 一起生成）。',
+             '#pragma once',
+             '#include "dm_main_layout.h"',
+             '',
+             f'#define DM_XMODS_GEN_N {len(xmods)}',
+             '// 字段与 dm_probe.c 的 xmod_t 一一对应（name + module_t 的 8 个布局常数）',
+             'static const struct {',
+             '    const char *name;',
+             '    uint64_t text_end, patch_off, ro_off, data_off, key_page_off, key_page_size, x0_end, img_end;',
+             '} dm_xmods_gen[] = {']
+    if xmods:
+        for n in xmods:
+            up = n.upper()
+            lines.append(f'    {{ "{n}", DM_IMG_{up}_TEXT_END, DM_IMG_{up}_PATCH_OFF, DM_IMG_{up}_RO_OFF,')
+            lines.append(f'      DM_IMG_{up}_DATA_OFF, DM_IMG_{up}_KEY_PAGE_OFF, DM_IMG_{up}_KEY_PAGE_SIZE,')
+            lines.append(f'      DM_IMG_{up}_X0_END, DM_IMG_{up}_END }},')
+    else:
+        # 零长度数组不是合法 C ⇒ 给一条哑元（探针只读前 DM_XMODS_GEN_N 条，N=0 时不碰它）
+        lines.append('    { "", 0, 0, 0, 0, 0, 0, 0, 0 },   // N=0：本游戏只有 main/sdk，无额外模块')
+    lines.append('};')
+    with open(dst, 'w', encoding='utf-8') as f:
+        f.write('\n'.join(lines) + '\n')
+    print(f'已写出 {dst}（额外模块 {len(xmods)} 个：{", ".join(xmods) if xmods else "无"}）')
+
+
 def main():
     argv = sys.argv[1:]
     embed_bytes = '--embed-bytes' in argv
-    layout_hdr = gates_hdr = None
+    layout_hdr = gates_hdr = xmods_hdr = None
     if '--layout-header' in argv:
         k = argv.index('--layout-header')
         layout_hdr = argv[k + 1]
+        del argv[k:k + 2]
+    if '--xmods-header' in argv:
+        k = argv.index('--xmods-header')
+        xmods_hdr = argv[k + 1]
         del argv[k:k + 2]
     if '--gates-header' in argv:
         k = argv.index('--gates-header')
@@ -173,6 +215,9 @@ def main():
         with open(layout_hdr, 'w', encoding='utf-8') as f:
             f.write('\n'.join(lines) + '\n')
         print(f'已写出 {layout_hdr}')
+
+    if xmods_hdr:
+        gen_xmods(out_dir, names, xmods_hdr)
 
     if gates_hdr:
         # 门表登记数组：{返回点（分派键，门块内 blr 之后）, 原指令地址, kind 码, arg}

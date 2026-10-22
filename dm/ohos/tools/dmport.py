@@ -8,7 +8,7 @@
     ① 抽取    XCI → exefs（rtld / sdk / subsdk0-3 / main）
     ② 改写    每个模块 → <out>/rewritten/<名>.patched.bin + fixups 表（改写器 = patch_nso.py）
     ③ 勘察    7 个模块的导出/导入/构造函数 + 跨模块解析率（nso_survey.py）→ <out>/survey.json
-    ④ 嵌入    生成 dm_images.S + dm_main_layout.h（gen_embed_ohos.py）
+    ④ 嵌入    生成 dm_images.S + dm_main_layout.h + dm_xmods_gen.h（gen_embed_ohos.py）
     ⑤ 构建    hvigor assembleHap → <out>/<名>.hap
 
 为什么要有它：现在这五段是**手工串**的（本轮之前每一步都在命令行里手敲），换游戏就要重敲一遍，
@@ -36,8 +36,10 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, '..', '..', '..'))     # d2r-mobile/（HERE=dm/ohos/tools）
 APP = os.path.join(REPO, 'dm', 'ohos', 'app')
-MODULES = ['main', 'sdk', 'rtld', 'subsdk0', 'subsdk1', 'subsdk2', 'subsdk3']
+sys.path.insert(0, os.path.join(REPO, 'dm', 'tools'))           # nso_mods（模块发现+规范排序）
+import nso_mods                                                   # noqa: E402
 DEVECO = r'D:/Program Files/Huawei/DevEco Studio'
+XMODS_HDR = os.path.join(REPO, 'dm', 'ohos', 'dm_xmods_gen.h')  # 生成：探针 g_xmods 的数据源
 
 
 def log(step, msg):
@@ -72,12 +74,12 @@ def step_extract(xci, out):
     raise RuntimeError(f'抽取完成但没找到 exefs（需要同时含 main 与 rtld）：{dst}')
 
 
-def step_rewrite(exefs, out):
+def step_rewrite(exefs, out, mods):
     """② 每个模块 → rewritten/<名>.patched.bin + .fixups.tsv"""
     dst = os.path.join(out, 'rewritten')
     os.makedirs(dst, exist_ok=True)
     ok = []
-    for m in MODULES:
+    for m in mods:
         src = os.path.join(exefs, m)
         if not os.path.exists(src):
             log('②改写', f'⚠ 缺模块 {m}（跳过——有的游戏没有 subsdk*）')
@@ -95,6 +97,12 @@ def step_rewrite(exefs, out):
     return dst, ok
 
 
+def mods_from_rewritten(rewritten):
+    """复用改写产物时：按 *.patched.bin 反推模块清单（patched.bin 不是 NSO，不能按魔数发现）。"""
+    names = [n[:-len('.patched.bin')] for n in os.listdir(rewritten) if n.endswith('.patched.bin')]
+    return sorted(names, key=nso_mods.order_key)
+
+
 def step_survey(exefs, out, mods):
     """③ 勘察：导出/导入/构造函数 + 跨模块解析率"""
     js = os.path.join(out, 'survey.json')
@@ -106,16 +114,17 @@ def step_survey(exefs, out, mods):
 
 
 def step_embed(rewritten, out, mods):
-    """④ 生成 dm_images.S + dm_main_layout.h（写进仓库，因为构建要引用它们）"""
+    """④ 生成 dm_images.S + dm_main_layout.h + dm_xmods_gen.h（写进仓库，因为构建要引用它们）"""
     asm = os.path.join(REPO, 'dm', 'ohos', 'dm_images.S')
     hdr = os.path.join(REPO, 'dm', 'ohos', 'dm_main_layout.h')
-    log('④嵌入', f'{len(mods)} 个模块 → {os.path.relpath(asm, REPO)} + {os.path.relpath(hdr, REPO)}')
+    log('④嵌入', f'{len(mods)} 个模块 → {os.path.relpath(asm, REPO)} + {os.path.relpath(hdr, REPO)}'
+                 f' + {os.path.relpath(XMODS_HDR, REPO)}')
     # 备份旧的（构建失败可回滚；也是判据：能看出这轮换了什么）
-    for p in (asm, hdr):
+    for p in (asm, hdr, XMODS_HDR):
         if os.path.exists(p):
             shutil.copy2(p, os.path.join(out, os.path.basename(p) + '.prev'))
     sh([sys.executable, os.path.join(HERE, 'gen_embed_ohos.py'), '--layout-header', hdr,
-        rewritten, asm] + mods)
+        '--xmods-header', XMODS_HDR, rewritten, asm] + mods)
     return asm, hdr
 
 
@@ -182,23 +191,33 @@ def main(argv):
     else:
         exefs = step_extract(os.path.abspath(a.xci), out)
 
+    # 模块清单 = exefs 里**实际有的** NSO（按魔数发现，main.npdm 之类自动排除；
+    # 排序 = 规范装载序 main→sdk→rtld→subsdkN→其它）。换游戏只换输入文件。
+    exefs_mods = nso_mods.discover(exefs)
+    log('①抽取', f'发现 {len(exefs_mods)} 个 NSO 模块：{", ".join(exefs_mods)}')
+    if 'main' not in exefs_mods:
+        raise RuntimeError(f'{exefs} 里没有 main（NSO）模块，无法继续')
+    if 'sdk' not in exefs_mods:
+        log('①抽取', '⚠ 缺 sdk：探针的定制装载路径写死 DM_IMG_SDK_*（k_load_sdk），'
+                     '当前版本构建需要 main+sdk 必备；额外模块（rtld/subsdk*）可按实际增减')
+
     # ② 改写
     if a.skip_rewrite:
         rewritten = os.path.abspath(a.rewritten) if a.rewritten else os.path.join(out, 'rewritten')
-        mods = [m for m in MODULES if os.path.exists(os.path.join(rewritten, f'{m}.patched.bin'))]
+        mods = mods_from_rewritten(rewritten)
         log('②改写', f'跳过（复用 {rewritten}，有 {len(mods)} 个模块：{", ".join(mods)}）')
         if 'main' not in mods:
             raise RuntimeError(f'{rewritten} 里没有 main.patched.bin')
     else:
-        rewritten, mods = step_rewrite(exefs, out)
+        rewritten, mods = step_rewrite(exefs, out, exefs_mods)
 
     # ③ 勘察
     step_survey(exefs, out, mods)
 
     # ④ 嵌入。**注意**：这里的顺序只决定 `.so` 里段的排布，**不决定装载顺序**——
-    # 装载顺序写在代码里（探针的 g_xmods：rtld → subsdk0-3，sdk 更早由 k_load_sdk 装）。
-    # 保持与仓库现状一致（main, sdk, rtld, subsdk0-3），这样重跑不产生无谓 diff。
-    order = [m for m in ['main', 'sdk', 'rtld', 'subsdk0', 'subsdk1', 'subsdk2', 'subsdk3'] if m in mods]
+    # 装载顺序由生成的 dm_xmods_gen.h（= 本清单除 main/sdk 外）驱动探针的 g_xmods。
+    # 同一输入重跑 ⇒ dm_images.S / dm_main_layout.h / dm_xmods_gen.h 逐字节一致（零漂移）。
+    order = [m for m in exefs_mods if m in mods]
     asm, hdr = step_embed(rewritten, out, order)
 
     # ⑤ 构建
@@ -212,11 +231,13 @@ def main(argv):
     log('完成', f'耗时 {dt/60:.1f} 分钟')
     print('\n=== 产物 ===')
     for k, v in [('exefs', exefs), ('rewritten', rewritten), ('survey', os.path.join(out, 'survey.json')),
-                 ('dm_images.S', asm), ('dm_main_layout.h', hdr), ('hap', hap or '（未构建）')]:
+                 ('dm_images.S', asm), ('dm_main_layout.h', hdr), ('dm_xmods_gen.h', XMODS_HDR),
+                 ('hap', hap or '（未构建）')]:
         print(f'  {k:<16} {v}')
     print('\n判据自查：')
-    print(f'  模块数 = {len(mods)}（应为 7；缺 subsdk* 说明游戏不带那部分）')
-    print(f'  嵌入顺序 = {order}（只影响 .so 段排布；装载顺序由代码里的 g_xmods 决定）')
+    print(f'  模块数 = {len(mods)}（以 exefs 实际内容为准；缺 subsdk* 说明游戏不带那部分）')
+    print(f'  嵌入顺序 = {order}（只影响 .so 段排布；装载顺序由 dm_xmods_gen.h 驱动 g_xmods）')
+    print(f'  额外模块表 = {nso_mods.extras(order) or "无"}（dm_xmods_gen.h；main/sdk 走定制装载）')
     print('  下一步：装机 → aa start → 点「全链探针」→ 看 dm_run_test.log 的 [构造审计]/[服务]/nnMain')
     return 0
 

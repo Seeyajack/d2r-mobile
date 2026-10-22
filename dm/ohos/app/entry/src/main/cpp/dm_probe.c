@@ -39,6 +39,7 @@
 #include "dm_nvn_ohos.h"        // 通用 NVN 胶水层（设备族等平台中立语义）
 #include "dm_nvn_vk.h"         // 通用 NVN 内存池/缓冲胶水层（UMA 直通）
 #include "dm_main_layout.h"     // 旷野之息 main 的布局常数（fixups 表头生成）
+#include "dm_xmods_gen.h"       // 额外模块装载表（gen_embed --xmods-header 生成；换游戏只换它）
 #include "dm_main_gates.h"      // 旷野之息 main 的门表（93 个 svc 门，实验 H 登记）
 
 // np113：旧的"任务状态 1→2 补推"开关。默认 0（关闭）——它是"记录全零时代"的拐杖，
@@ -5705,36 +5706,51 @@ static int k_load_sdk(void) {
 // 与 k_load_sdk 的区别：那个是给 sdk 定制的（键页/导出/PLT 都写死）；这里是**表驱动**：
 //   一个描述符表 + 一个通用的 映射/重定位/收集导出 流程，任何模块都能装。
 // Why table-driven: k_load_sdk was bespoke for sdk; this loads any module from a descriptor table.
-#define EXTRA_MAX 5
+// 容量上限：旷野之息用 5 个（rtld + subsdk0-3）；换游戏可能更多（subsdk4…），留余量。
+// **实际装载哪些模块不写死在这里**——由生成的 dm_xmods_gen.h 决定（以 exefs 实际
+// 内容为准）。超出 EXTRA_MAX 的部分忽略并告警（宁可少装，不能越界写内存）。
+#define EXTRA_MAX 16
 static module_t      g_k_x[EXTRA_MAX];
 static pthread_key_t g_x_key[EXTRA_MAX][8];
-static int           g_n_x;
 
 typedef struct {
     const char *name; module_t *m;
     uint64_t text_end, patch_off, ro_off, data_off, key_page_off, key_page_size, x0_end, img_end;
 } xmod_t;
 
-// 装载顺序 = 依赖顺序：rtld 最先（0 导出），然后 subsdk0/1/2/3。
-// （sdk 已经在前面装好了，它的 14,833 个导出在 g_sdk_os 里，后装的模块能解析到它。）
-static xmod_t g_xmods[] = {
-    { "rtld",    &g_k_x[0], DM_IMG_RTLD_TEXT_END,    DM_IMG_RTLD_PATCH_OFF,    DM_IMG_RTLD_RO_OFF,
-      DM_IMG_RTLD_DATA_OFF,    DM_IMG_RTLD_KEY_PAGE_OFF,    DM_IMG_RTLD_KEY_PAGE_SIZE,
-      DM_IMG_RTLD_X0_END,    DM_IMG_RTLD_END },
-    { "subsdk0", &g_k_x[1], DM_IMG_SUBSDK0_TEXT_END, DM_IMG_SUBSDK0_PATCH_OFF, DM_IMG_SUBSDK0_RO_OFF,
-      DM_IMG_SUBSDK0_DATA_OFF, DM_IMG_SUBSDK0_KEY_PAGE_OFF, DM_IMG_SUBSDK0_KEY_PAGE_SIZE,
-      DM_IMG_SUBSDK0_X0_END, DM_IMG_SUBSDK0_END },
-    { "subsdk1", &g_k_x[2], DM_IMG_SUBSDK1_TEXT_END, DM_IMG_SUBSDK1_PATCH_OFF, DM_IMG_SUBSDK1_RO_OFF,
-      DM_IMG_SUBSDK1_DATA_OFF, DM_IMG_SUBSDK1_KEY_PAGE_OFF, DM_IMG_SUBSDK1_KEY_PAGE_SIZE,
-      DM_IMG_SUBSDK1_X0_END, DM_IMG_SUBSDK1_END },
-    { "subsdk2", &g_k_x[3], DM_IMG_SUBSDK2_TEXT_END, DM_IMG_SUBSDK2_PATCH_OFF, DM_IMG_SUBSDK2_RO_OFF,
-      DM_IMG_SUBSDK2_DATA_OFF, DM_IMG_SUBSDK2_KEY_PAGE_OFF, DM_IMG_SUBSDK2_KEY_PAGE_SIZE,
-      DM_IMG_SUBSDK2_X0_END, DM_IMG_SUBSDK2_END },
-    { "subsdk3", &g_k_x[4], DM_IMG_SUBSDK3_TEXT_END, DM_IMG_SUBSDK3_PATCH_OFF, DM_IMG_SUBSDK3_RO_OFF,
-      DM_IMG_SUBSDK3_DATA_OFF, DM_IMG_SUBSDK3_KEY_PAGE_OFF, DM_IMG_SUBSDK3_KEY_PAGE_SIZE,
-      DM_IMG_SUBSDK3_X0_END, DM_IMG_SUBSDK3_END },
-};
-#define N_XMODS ((int)(sizeof g_xmods / sizeof g_xmods[0]))
+static xmod_t        g_xmods[EXTRA_MAX];
+static int           g_n_xm;      // 表里的模块数（= DM_XMODS_GEN_N，含装载失败的）
+static int           g_n_x;       // 装载成功的个数（记账用）
+
+// 从生成表初始化 g_xmods：**换游戏只重新生成 dm_xmods_gen.h，本文件不动**
+// （以前这里是手写 5 行 DM_IMG_<名>_* 宏——缺一个 subsdk 就直接编译不过）。
+// 表由 gen_embed_ohos.py --xmods-header 生成：除 main/sdk（那两个有定制装载路径：
+// main 走 exp_k、sdk 走 k_load_sdk）外的全部模块，顺序 = 规范装载序
+// （rtld 最先——0 导出；然后 subsdkN）——与手写表时代的旷野之息逐项一致。
+static void k_init_xmods(void) {
+    int n = DM_XMODS_GEN_N < EXTRA_MAX ? DM_XMODS_GEN_N : EXTRA_MAX;
+    for (int i = 0; i < n; i++) {
+        xmod_t *x = &g_xmods[i];
+        x->name          = dm_xmods_gen[i].name;
+        x->m             = &g_k_x[i];
+        x->text_end      = dm_xmods_gen[i].text_end;
+        x->patch_off     = dm_xmods_gen[i].patch_off;
+        x->ro_off        = dm_xmods_gen[i].ro_off;
+        x->data_off      = dm_xmods_gen[i].data_off;
+        x->key_page_off  = dm_xmods_gen[i].key_page_off;
+        x->key_page_size = dm_xmods_gen[i].key_page_size;
+        x->x0_end        = dm_xmods_gen[i].x0_end;
+        x->img_end       = dm_xmods_gen[i].img_end;
+    }
+    g_n_xm = n;
+    if (DM_XMODS_GEN_N > EXTRA_MAX)
+        klog("[xmods] ⚠ 游戏有 %d 个额外模块，超过 EXTRA_MAX %d——超出部分不装载\n",
+             DM_XMODS_GEN_N, EXTRA_MAX);
+    else if (n == 0)
+        klog("[xmods] 本游戏只有 main/sdk，无额外模块（自动少装载）\n");
+    else
+        klog("[xmods] 额外模块 %d 个（首：%s）\n", n, g_xmods[0].name);
+}
 
 // 每个模块的动态段位置（装载时记下，填 PLT 时用）
 static struct { uint64_t rela, relasz, jmprel, pltrelsz, symtab, strtab, hash, dyn; int nexp, nrel; } g_xs[EXTRA_MAX];
@@ -5895,16 +5911,17 @@ static void k_run_ctors_isolated(const char *tag, module_t *m, int timeout_ms) {
 
 // 总入口：装全部额外模块 → 统一填 PLT →（可选）跑它们的构造函数。
 static void k_load_extras(void) {
+    k_init_xmods();                 // 从生成表填 g_xmods（换游戏只换 dm_xmods_gen.h）
     g_n_x = 0;
-    for (int i = 0; i < N_XMODS; i++)
+    for (int i = 0; i < g_n_xm; i++)
         if (k_load_extra(&g_xmods[i], i) == 0) g_n_x++;
-    for (int i = 0; i < N_XMODS; i++)
+    for (int i = 0; i < g_n_xm; i++)
         if (g_xmods[i].m->base) k_fill_plts_extra(&g_xmods[i], i);
     // 跑构造函数：**默认开**（S3）。GUI 进程拿不到环境变量（`aa start` 不传 env），所以只能靠
     // 编译期默认；要回到"只装载不跑构造"，设 NP_EXTRA_CTORS=0 或把这行改成 == 判断。
     // 逐个 setjmp 保护：某个构造函数崩了只记账、继续下一个（先看整体能走多远）。
     if (getenv("NP_EXTRA_CTORS") == NULL || atoi(getenv("NP_EXTRA_CTORS")) != 0)
-        for (int i = 0; i < N_XMODS; i++)
+        for (int i = 0; i < g_n_xm; i++)
             if (g_xmods[i].m->base) k_run_ctors_isolated(g_xmods[i].name, g_xmods[i].m, 25000);
 }
 
