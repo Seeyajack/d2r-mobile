@@ -1604,6 +1604,9 @@ static int smp_bt(uint64_t pc, uint64_t fp, char *out, size_t cap) {
     }
     return n;
 }
+// np217：smp_dump 的扫栈要用受保护读（k_read_ok 定义在后面）
+static int k_read_ok(const void *p, void *dst, size_t n);
+
 static void smp_dump(const char *tag) {
     if (!g_files_dir[0]) return;
     uint32_t n = __atomic_load_n(&g_smp_n, __ATOMIC_RELAXED);
@@ -1709,13 +1712,48 @@ static void smp_dump(const char *tag) {
                 //   可能深达几百字节每层）；并把 probe .so 与匿名区也纳入识别——
                 //   guest 的返回地址通常隔着一层我们的 plt_stub（宿主函数）。
                 int found = 0;
-                for (int k = 0; k < 512 && !found; k++) {
+                for (int k = 0; k < 512 && found != 1; k++) {
                     uint64_t v = *(const uint64_t *)(uintptr_t)(sp + (uint64_t)k * 8);
+                    // np217：**只认"像返回地址"的值**——该地址 -4 处必须是 `bl`（0x94xxxxxx）。
+                    //   为什么（np211f 教训）：栈上散布着数据指针（实测第一个命中的是
+                    //   img+0x22d9198 = F_wait 锁的单例对象），那不是调用点。
+                    //   真正的返回地址一定紧跟一条 bl。
+                    int is_ret = 0;
+                    if (v >= 0x10000ull && v < 0x800000000000ull) {
+                        uint32_t ins = 0;
+                        if (k_read_ok((const void *)(uintptr_t)(v - 4), &ins, 4))
+                            is_ret = ((ins & 0xFC000000u) == 0x94000000u);
+                    }
+                    if (!is_ret) {
+                        // 宿主帧也按同样规则认（probe 内的调用点）
+                        if (g_self_base && v >= g_self_base && v < g_self_base + 0x400000ull) {
+                            uint32_t ins = 0;
+                            if (k_read_ok((const void *)(uintptr_t)(v - 4), &ins, 4) &&
+                                ((ins & 0xFC000000u) == 0x94000000u)) {
+                                int l4n = snprintf(l2, sizeof l2,
+                                                   "smp-stk[%s] 热点+%#llx 的宿主帧 = probe+%#llx（sp+%#x）\n",
+                                                   tag, (unsigned long long)first_pc,
+                                                   (unsigned long long)(v - g_self_base), k * 8);
+                                (void)!write(fd, l2, (size_t)l4n);
+                            }
+                        }
+                        continue;
+                    }
                     if (v >= mb && v < mb + DM_IMG_MAIN_END) {
+                        // 顺便解出 bl 的目标（哪个函数调进来的）
+                        uint32_t ins = 0;
+                        uint64_t target = 0;
+                        if (k_read_ok((const void *)(uintptr_t)(v - 4), &ins, 4)) {
+                            int32_t imm = (int32_t)(ins & 0x03FFFFFFu);
+                            if (imm & 0x02000000) imm -= 0x04000000;
+                            target = (v - 4) + (int64_t)imm * 4;
+                        }
                         int l4n = snprintf(l2, sizeof l2,
-                                           "smp-stk[%s] 热点+%#llx 的 guest 调用点 = img+%#llx（sp+%#x）\n",
+                                           "smp-stk[%s] 热点+%#llx 的 guest 调用点 = img+%#llx（sp+%#x）bl→img+%#llx\n",
                                            tag, (unsigned long long)first_pc,
-                                           (unsigned long long)(v - mb), k * 8);
+                                           (unsigned long long)(v - mb), k * 8,
+                                           (unsigned long long)((target >= mb && target < mb + DM_IMG_MAIN_END)
+                                                                ? target - mb : target));
                         (void)!write(fd, l2, (size_t)l4n);
                         found = 1;
                     } else if (sb && v >= sb && v < sb + DM_IMG_SDK_END) {
@@ -1725,13 +1763,6 @@ static void smp_dump(const char *tag) {
                                            (unsigned long long)(v - sb), k * 8);
                         (void)!write(fd, l2, (size_t)l4n);
                         found = 1;
-                    } else if (g_self_base && v >= g_self_base && v < g_self_base + 0x400000ull) {
-                        int l4n = snprintf(l2, sizeof l2,
-                                           "smp-stk[%s] 热点+%#llx 的宿主帧 = probe+%#llx（sp+%#x）\n",
-                                           tag, (unsigned long long)first_pc,
-                                           (unsigned long long)(v - g_self_base), k * 8);
-                        (void)!write(fd, l2, (size_t)l4n);
-                        found = 2;   // 继续找更上面的 guest
                     }
                 }
                 if (found == 1) { /* 已写 */ }
@@ -5478,6 +5509,27 @@ static uint64_t hook_pcalc(uint64_t *f) { frame_log("PostCalc 0x103b1f0", f, &g_
 //   越界写污染成 94(0x5e)，`if (!ptr)` 检查被绕过 ⇒ 把 0x5e 当对象返回 ⇒ 原样崩在同一点。
 //   现在每次**局部变量现分配**（.bss 只留一份副本仅供比对，不参与判断）。
 static void *g_fake_parse_obj;
+// np215：键解析替换开关。0 = 让原实现跑（默认，见安装处注释）；1 = 退回全零对象替身。
+static int g_parse_repl = 0;
+// np215：原实现放行时的观察钩子——只打键名与参数，不改任何东西。
+static int g_n_pw;
+static uint64_t hook_parse_watch(uint64_t *f) {
+    if (++g_n_pw <= 24) {
+        uint64_t so = f[FR_X1];
+        char buf[64]; size_t i = 0; const char *key = NULL;
+        if (so > 0x10000ull && so < 0x800000000000ull) {
+            uint64_t k = *(const uint64_t *)(uintptr_t)so;
+            if (k > 0x10000ull && k < 0x800000000000ull) key = (const char *)(uintptr_t)k;
+        }
+        if (key) for (; i < sizeof buf - 1 && key[i]; i++) buf[i] = key[i];
+        buf[i] = 0;
+        char l[160];
+        snprintf(l, sizeof l, "np215键解析#%d 键=\"%s\" 表=%#llx\n", g_n_pw, buf,
+                 (unsigned long long)f[FR_X0]);
+        note_append("dm_gate.txt", l);
+    }
+    return 0;
+}
 static uint64_t hook_rep_parse(uint64_t *f) {
     void *old = g_fake_parse_obj;                 // 旧值：0=从没写过；94=被污染（np54 实证）
     void *obj = calloc(1, 0x2000);                // 局部现分配，不依赖 .bss
@@ -6851,7 +6903,21 @@ static void exp_k(const char *files_dir, char *out, size_t cap, size_t *used) {
         k_install_hook(img, 0xa051c4, (void *)hook_e28, "建对象 worker 0xa051c4（看 x2 是谁传的 0）");
         // 崩点链最上游的解析器：原实现一路缺数据恒返 0 ⇒ worker 的 x2=0 ⇒ 崩 0xa05324。
         // np54 起换成**替身**：宿主直接返全零对象，越过这道坎看下一层需求（§八影子对象打法）。
-        k_install_replace_hook(img, 0x9fa4c8, (void *)hook_rep_parse, "键解析·替身 0x9fa4c8（返全零对象）");
+        // ★ np215 实验 B：**取消键解析替换**（拐杖复审）。
+        // np54 时代替换的理由：原实现"建临时对象 → 按 ':' 切分 → 遍历已注册解析器"在宿主上
+        //   缺数据、恒返回 0 ⇒ worker 的 x2=0 ⇒ 崩在 0xa05324。于是返一个全零对象越过该坎。
+        // 现在（np213 真机）证据表明拐杖有害：
+        //   `[键解析·替身] 键=""` + `[settings] eq(lang=..., code="") → 0` 全部不匹配
+        //   ⇒ 语言/区域判定失败（游戏读了 System/RegionLangMask.txt 也白读）。
+        // 离线复核：原实现的依赖**都有效**——`*(0x2264200)`=0x1c429ee（分隔符数据）、
+        //   `*(0x22644d8)`=0x206b0e8（vtable 非零）。np54 的"缺数据"现在可能已就绪
+        //   （游戏跑到帧循环，注册表很可能已建）。
+        // 做法：默认**不替换**（让原实现跑）；设 NP_PARSE_REPL=1 可退回旧替身（真机 GUI
+        //   拿不到 env ⇒ 实际改代码里的 g_parse_repl 初值）。保留一个入口观察钩子打键名。
+        if (g_parse_repl)
+            k_install_replace_hook(img, 0x9fa4c8, (void *)hook_rep_parse, "键解析·替身 0x9fa4c8（返全零对象）");
+        else
+            k_install_hook(img, 0x9fa4c8, (void *)hook_parse_watch, "键解析·观察 0x9fa4c8（原实现放行）");
         // 解析派发（worker 的调用者，函数指针进来）：直接看它喂给构造函数的 x2
         k_install_hook(img, 0xa05fa4, (void *)hook_e30, "派发 0xa05fa4（看 x2）");
         // ★ 崩溃点仪器（2026-10-20）：PostCalc 入口——本轮崩点就是它收到 NULL 句柄

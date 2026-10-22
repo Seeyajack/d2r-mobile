@@ -6,6 +6,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>      // np214：DeviceGetTimestampInNanoseconds 用 clock_gettime
 
 static void (*g_log)(const char *, ...);
 void dm_nvn_vk_set_log(void (*fn)(const char *, ...)) { g_log = fn; }
@@ -97,8 +98,7 @@ static void nvn_mp_inval(void *pool, int64_t off, uint64_t size) { (void)pool; (
 static void nvn_mp_label(void *pool, const char *s) { (void)pool; (void)s; }
 static void nvn_mp_finalize(void *pool) { (void)pool; }
 // ---- Buffer builder ----
-static void nvn_bb_set_device(void *b, const void *dev) { (void)dev; buf_pend(b, 1); }
-static void nvn_bb_set_defaults(void *b) { nvn_buf_pend_t *e = buf_pend(b, 1); if (e) { e->size = 0; e->offset = 0; } }
+static void nvn_bb_set_device(void *b, const void *dev) { (void)dev; buf_pend(b, 1); }static void nvn_bb_set_defaults(void *b) { nvn_buf_pend_t *e = buf_pend(b, 1); if (e) { e->size = 0; e->offset = 0; } }
 static void nvn_bb_set_storage(void *b, const void *pool, int64_t offset, uint64_t size) {
     nvn_buf_pend_t *e = buf_pend(b, 1);
     if (e) { e->pool = pool; e->offset = (uint64_t)offset; e->size = size; }
@@ -136,6 +136,97 @@ static void nvn_buf_flush(void *buf, int64_t off, uint64_t size) { (void)buf; (v
 static void nvn_buf_inval(void *buf, int64_t off, uint64_t size) { (void)buf; (void)off; (void)size; }
 static void nvn_buf_label(void *buf, const char *s) { (void)buf; (void)s; }
 static void nvn_buf_finalize(void *buf) { (void)buf; }
+
+// ═══ np214：补齐 25 个 getter（游戏靠它们读回状态；落记账桩返 0 会走错分支）═══
+// 动机（真机实测）：`[NVN] 缓冲 Builder：pool=... size=0` ⇒ 缓冲兜底 1MB。
+//   游戏很可能先 `nvnBufferBuilderGetSize` 确认大小，拿 0 就当"未设置"再 SetStorage(0)。
+//   三个 BufferBuilder getter 在我们表里**根本没注册**（落记账桩）。
+// 实现原则：全部从**外部表**回查（builder 是游戏自己的结构体，布局未知，绝不直接读它）。
+// ---- MemoryPoolBuilder getters ----
+static void *nvn_mpb_get_memory(const void *b) { nvn_mp_pend_t *e = mp_pend(b, 0); return e ? (void *)e->storage : NULL; }
+static uint64_t nvn_mpb_get_size(const void *b) { nvn_mp_pend_t *e = mp_pend(b, 0); return e ? e->size : 0; }
+static uint32_t nvn_mpb_get_flags(const void *b) { nvn_mp_pend_t *e = mp_pend(b, 0); return e ? (uint32_t)e->flags : 0; }
+// ---- MemoryPool getters（g_pools 记了 size；flags 未记 ⇒ 0）----
+static uint64_t nvn_mp_get_size(const void *pool) { nvn_pool_t *p = pool_of(pool); return p ? p->size : 0; }
+static uint32_t nvn_mp_get_flags(const void *pool) { (void)pool; return 0; }
+// ---- BufferBuilder getters（★ 当前卡点）----
+static uint64_t nvn_bb_get_size(const void *b) { nvn_buf_pend_t *e = buf_pend(b, 0); return e ? e->size : 0; }
+static const void *nvn_bb_get_pool(const void *b) { nvn_buf_pend_t *e = buf_pend(b, 0); return e ? e->pool : NULL; }
+static int64_t nvn_bb_get_offset(const void *b) { nvn_buf_pend_t *e = buf_pend(b, 0); return e ? (int64_t)e->offset : 0; }
+static uint32_t nvn_buf_get_debugid(const void *b) { (void)b; return 0; }
+// ---- Queue builder / Queue：内存量记账（游戏查"命令缓冲还剩多少"）----
+static struct { const void *b; uint64_t memsz; } g_qb[4];
+static int g_n_qb;
+static struct { const void *q; uint64_t cmd, comp, ctrl, err; } g_qq[4];
+static int g_n_qq;
+static void nvn_qb_set_memsize(void *b, uint64_t sz) {
+    for (int i = 0; i < g_n_qb; i++) if (g_qb[i].b == b) { g_qb[i].memsz = sz; return; }
+    if (g_n_qb < 4) { g_qb[g_n_qb].b = b; g_qb[g_n_qb].memsz = sz; g_n_qb++; }
+    NLOG("[NVN] 队列 Builder：内存 %llu 字节\n", (unsigned long long)sz);
+}
+static uint64_t nvn_qb_get_memsize(const void *b) {
+    for (int i = 0; i < g_n_qb; i++) if (g_qb[i].b == b) return g_qb[i].memsz;
+    return 0;
+}
+static uint64_t nvn_q_get_used(const void *q, int which) {
+    for (int i = 0; i < g_n_qq; i++) if (g_qq[i].q == q)
+        return which == 0 ? g_qq[i].cmd : which == 1 ? g_qq[i].comp : g_qq[i].ctrl;
+    return 0;
+}
+static uint64_t nvn_q_get_cmd(const void *q) { return nvn_q_get_used(q, 0); }
+static uint64_t nvn_q_get_comp(const void *q) { return nvn_q_get_used(q, 1); }
+static uint64_t nvn_q_get_ctrl(const void *q) { return nvn_q_get_used(q, 2); }
+static uint32_t nvn_q_get_error(const void *q) { (void)q; return 0; }   // 0 = 无错
+// ---- Device getters：深度模式/窗口原点/时间戳 ----
+static uint32_t nvn_dev_depthmode(const void *dev) { (void)dev; return 0; }        // 0 = float depth
+static uint32_t nvn_dev_originmode(const void *dev) { (void)dev; return 0; }       // 0 = upper-left
+static uint64_t nvn_dev_timestamp(const void *dev) {
+    (void)dev;
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+static uint64_t nvn_dev_cur_timestamp(const void *dev) { return nvn_dev_timestamp(dev); }
+// 纹理/图像句柄：返回一个稳定的伪句柄（非 0，游戏只当 ID 用）
+static uint32_t nvn_dev_texhandle(const void *dev, const void *tex) {
+    (void)dev; return (uint32_t)(((uintptr_t)tex >> 4) & 0xFFFFFF) | 1u;
+}
+static uint32_t nvn_dev_texfetchhandle(const void *dev, const void *tex, int sampler) {
+    (void)dev; (void)sampler; return (uint32_t)(((uintptr_t)tex >> 4) & 0xFFFFFF) | 1u;
+}
+static uint32_t nvn_dev_imagehandle(const void *dev, const void *img) {
+    (void)dev; return (uint32_t)(((uintptr_t)img >> 4) & 0xFFFFFF) | 1u;
+}
+// ---- TexturePool / SamplerPool：size / pool / offset 记账 ----
+static struct { const void *o; uint64_t size, offset; const void *pool; } g_tp[8];
+static int g_n_tp;
+static struct { const void *o; uint64_t size, offset; const void *pool; } g_sp[8];
+static int g_n_sp;
+static void nvn_tp_note(void *o, const void *pool, uint64_t offset, uint64_t size) {
+    if (g_n_tp < 8) { g_tp[g_n_tp].o = o; g_tp[g_n_tp].pool = pool;
+        g_tp[g_n_tp].offset = offset; g_tp[g_n_tp].size = size; g_n_tp++; }
+}
+static void nvn_sp_note(void *o, const void *pool, uint64_t offset, uint64_t size) {
+    if (g_n_sp < 8) { g_sp[g_n_sp].o = o; g_sp[g_n_sp].pool = pool;
+        g_sp[g_n_sp].offset = offset; g_sp[g_n_sp].size = size; g_n_sp++; }
+}
+static uint64_t nvn_tp_size(const void *o) { for (int i = 0; i < g_n_tp; i++) if (g_tp[i].o == o) return g_tp[i].size; return 0; }
+static const void *nvn_tp_pool(const void *o) { for (int i = 0; i < g_n_tp; i++) if (g_tp[i].o == o) return g_tp[i].pool; return NULL; }
+static int64_t nvn_tp_off(const void *o) { for (int i = 0; i < g_n_tp; i++) if (g_tp[i].o == o) return (int64_t)g_tp[i].offset; return 0; }
+static uint64_t nvn_sp_size(const void *o) { for (int i = 0; i < g_n_sp; i++) if (g_sp[i].o == o) return g_sp[i].size; return 0; }
+static const void *nvn_sp_pool(const void *o) { for (int i = 0; i < g_n_sp; i++) if (g_sp[i].o == o) return g_sp[i].pool; return NULL; }
+static int64_t nvn_sp_off(const void *o) { for (int i = 0; i < g_n_sp; i++) if (g_sp[i].o == o) return (int64_t)g_sp[i].offset; return 0; }
+// ---- Window：原生窗口指针 + 呈现间隔 ----
+static struct { const void *w, *native; int interval; } g_win[4];
+static int g_n_win;
+static void nvn_wb_note(void *w, const void *native, int interval) {
+    if (g_n_win < 4) { g_win[g_n_win].w = w; g_win[g_n_win].native = native;
+        g_win[g_n_win].interval = interval; g_n_win++; }
+}
+static const void *nvn_w_get_native(const void *w) { for (int i = 0; i < g_n_win; i++) if (g_win[i].w == w) return g_win[i].native; return NULL; }
+static int nvn_w_get_interval(const void *w) { for (int i = 0; i < g_n_win; i++) if (g_win[i].w == w) return g_win[i].interval; return 1; }
+static const void *nvn_wb_get_native(const void *b) { (void)b; return NULL; }
+static int nvn_wb_get_interval(const void *b) { (void)b; return 1; }
+
 
 // 名字 → 真实现。**必须在记账桩表之前查**，否则会拿回返 0 的桩。
 typedef struct { const char *name; void *fn; } nvn_real_t;
@@ -191,6 +282,39 @@ static const dm_nvn_ent2 g_lut[] = {
     { "nvnBufferFlushMappedRange", (void *)nvn_buf_flush },
     { "nvnBufferInvalidateMappedRange", (void *)nvn_buf_inval },
     { "nvnBufferSetDebugLabel", (void *)nvn_buf_label },
+    // np214：25 个 getter（此前全部落记账桩 ⇒ 游戏读回 0/垃圾）
+    { "nvnMemoryPoolBuilderGetMemory", (void *)nvn_mpb_get_memory },
+    { "nvnMemoryPoolBuilderGetSize", (void *)nvn_mpb_get_size },
+    { "nvnMemoryPoolBuilderGetFlags", (void *)nvn_mpb_get_flags },
+    { "nvnMemoryPoolGetSize", (void *)nvn_mp_get_size },
+    { "nvnMemoryPoolGetFlags", (void *)nvn_mp_get_flags },
+    { "nvnBufferBuilderGetSize", (void *)nvn_bb_get_size },
+    { "nvnBufferBuilderGetMemoryPool", (void *)nvn_bb_get_pool },
+    { "nvnBufferBuilderGetMemoryOffset", (void *)nvn_bb_get_offset },
+    { "nvnBufferGetDebugID", (void *)nvn_buf_get_debugid },
+    { "nvnQueueBuilderSetQueueMemorySize", (void *)nvn_qb_set_memsize },
+    { "nvnQueueBuilderGetQueueMemorySize", (void *)nvn_qb_get_memsize },
+    { "nvnQueueGetTotalCommandMemoryUsed", (void *)nvn_q_get_cmd },
+    { "nvnQueueGetTotalComputeMemoryUsed", (void *)nvn_q_get_comp },
+    { "nvnQueueGetTotalControlMemoryUsed", (void *)nvn_q_get_ctrl },
+    { "nvnQueueGetError", (void *)nvn_q_get_error },
+    { "nvnDeviceGetDepthMode", (void *)nvn_dev_depthmode },
+    { "nvnDeviceGetWindowOriginMode", (void *)nvn_dev_originmode },
+    { "nvnDeviceGetTimestampInNanoseconds", (void *)nvn_dev_timestamp },
+    { "nvnDeviceGetCurrentTimestampInNanoseconds", (void *)nvn_dev_cur_timestamp },
+    { "nvnDeviceGetTextureHandle", (void *)nvn_dev_texhandle },
+    { "nvnDeviceGetTexelFetchHandle", (void *)nvn_dev_texfetchhandle },
+    { "nvnDeviceGetImageHandle", (void *)nvn_dev_imagehandle },
+    { "nvnTexturePoolGetSize", (void *)nvn_tp_size },
+    { "nvnTexturePoolGetMemoryPool", (void *)nvn_tp_pool },
+    { "nvnTexturePoolGetMemoryOffset", (void *)nvn_tp_off },
+    { "nvnSamplerPoolGetSize", (void *)nvn_sp_size },
+    { "nvnSamplerPoolGetMemoryPool", (void *)nvn_sp_pool },
+    { "nvnSamplerPoolGetMemoryOffset", (void *)nvn_sp_off },
+    { "nvnWindowGetNativeWindow", (void *)nvn_w_get_native },
+    { "nvnWindowGetPresentInterval", (void *)nvn_w_get_interval },
+    { "nvnWindowBuilderGetNativeWindow", (void *)nvn_wb_get_native },
+    { "nvnWindowBuilderGetPresentInterval", (void *)nvn_wb_get_interval },
 };
 
 void *dm_nvn_vk_real(const char *name) {

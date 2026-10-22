@@ -736,6 +736,44 @@ typedef struct {
 // GetNpadStyleSet 就是这么"静默成功"的。所以服务必须加进这张表，而不是去实现 CMIF 协议。
 // 语义取"最保守的真值"：**没有手柄**（GetNpadStyleSet=0）、其余初始化成功、用户给一个假句柄。
 // 这样游戏看到的世界是一致的，不会拿到未初始化的栈当返回值。
+// ── np216：手柄输入链（帧驱动）──
+// 真机实测（np213）：`GetNpadStyleSet` 返 0 =「该 pad 没接」⇒ 游戏**从不调 GetNpadState**
+//   （trace 里 36 次 StyleSet、0 次 NpadState）⇒ 永远进不了游戏内（标题菜单要按键）。
+// 上游 nxnative 的语义（docs/agents/05-debugging.md）：
+//   · StyleSet 报 **FullKey**（1<<3 = 8）—— 一个"完整按键手柄"；
+//   · NpadState 布局 0x28：{ int64 sampling; uint64 buttons; int32 lx,ly,rx,ry; u32 attr, pad; }
+//   · `GetNpadStates(out, n, &id)` 必须**填满 n 项**（Odyssey 读全部 16 项、只填第 0 项
+//     导致"摇杆无效"），newest first、采样号递减。
+// 按键脚本（nxnative 给的 BotW 现成路线，标题菜单 → 自动存档，控制权约 3900 帧）：
+//   f2500:A, f2800:A, f3100:A, f3400:A —— 这里按「GetNpadState 调用次数」当帧号。
+typedef struct { int64_t sampling; uint64_t buttons; int32_t lx, ly, rx, ry; uint32_t attr, pad; } dm_npad_state;
+#define NPAD_STYLE_FULLKEY 8u          // NpadStyleTag_FullKey
+#define NPAD_BTN_A         (1ull << 0)
+static int64_t g_npad_sampling = 1 << 16;
+static uint64_t g_npad_frame;          // ≈ 帧号（每调一次 GetNpadState/States +1）
+// 按键策略：**周期按 A**（不赌精确帧号）。
+//   nxnative 的 BotW 开场路线是 `f7600:A`（从进程启动算的 presented frame），而我们的
+//   g_npad_frame 从"第一次调 GetNpadState"算起 ⇒ 两者的绝对帧号不可比。
+//   游戏在标题菜单/存档选择/开场都认 A（确认键），所以从第 200 帧起每 240 帧按一次 A
+//   （按住 8 帧），足以推进所有菜单；不需要精确对齐。
+static uint64_t npad_buttons_now(void) {
+    uint64_t f = g_npad_frame;
+    if (f < 200) return 0;                    // 初始化期不干扰
+    if ((f % 240) < 8) return NPAD_BTN_A;     // 周期按 A
+    return 0;
+}
+static void npad_fill(dm_npad_state *s, int n) {
+    if (!s || n <= 0) return;
+    uint64_t btn = npad_buttons_now();
+    int64_t base = __atomic_fetch_add(&g_npad_sampling, (int64_t)n, __ATOMIC_RELAXED) + n;
+    for (int i = 0; i < n; i++) {
+        s[i].sampling = base - i;                 // newest first
+        s[i].buttons  = btn;
+        s[i].lx = s[i].ly = s[i].rx = s[i].ry = 0;
+        s[i].attr = 0; s[i].pad = 0;
+    }
+    g_npad_frame++;
+}
 static int svc_hid_init_npad(uint64_t a, uint64_t b, uint64_t c, uint64_t d) {
     (void)b;(void)c;(void)d; (void)a; return 0;               // void → 成功
 }
@@ -743,11 +781,32 @@ static int svc_hid_init_debugpad(uint64_t a, uint64_t b, uint64_t c, uint64_t d)
     (void)a;(void)b;(void)c;(void)d; return 0;
 }
 static int svc_hid_set_npad(uint64_t a, uint64_t b, uint64_t c, uint64_t d) {
-    (void)a;(void)b;(void)c;(void)d; return 0;                // 记录诉求即可，无手柄可配
+    (void)a;(void)b;(void)c;(void)d; return 0;                // 记录诉求即可
 }
+// GetNpadStyleSet(const NpadIdType&) → u32：**必须报 FullKey**，否则游戏不读按键
 static int svc_hid_get_style(uint64_t a, uint64_t b, uint64_t c, uint64_t d) {
-    // GetNpadStyleSet(const NpadIdType&) → u32。返回 0 = 该 pad 没接（每帧 36 次的调用）
-    (void)a;(void)b;(void)c;(void)d; return 0;
+    (void)a;(void)b;(void)c;(void)d;
+    static int n; if (++n <= 3) SDKLOG("[hid] GetNpadStyleSet → FullKey(8)（第 %d 次）\n", n);
+    return NPAD_STYLE_FULLKEY;
+}
+// GetNpadState(NpadXxxState *out, const NpadIdType&) —— 五种形态共用一个布局（0x28）
+static int svc_hid_npad_state(uint64_t out, uint64_t id, uint64_t c, uint64_t d) {
+    (void)id;(void)c;(void)d;
+    npad_fill((dm_npad_state *)(uintptr_t)out, 1);
+    static int n; if (++n <= 5) SDKLOG("[hid] GetNpadState → 填 1 项（第 %d 次，帧 %llu）\n",
+                                       n, (unsigned long long)g_npad_frame);
+    return 0;
+}
+// GetNpadStates(NpadXxxState *out, int n, const NpadIdType&) → 填的条数
+static int svc_hid_npad_states(uint64_t out, uint64_t n, uint64_t id, uint64_t d) {
+    (void)id;(void)d;
+    int cnt = (int)n;
+    if (cnt <= 0) return 0;
+    if (cnt > 32) cnt = 32;                       // 防御：不让游戏要超大数组
+    npad_fill((dm_npad_state *)(uintptr_t)out, cnt);
+    static int m; if (++m <= 5) SDKLOG("[hid] GetNpadStates(%d) → 填 %d 项（帧 %llu）\n",
+                                       (int)n, cnt, (unsigned long long)g_npad_frame);
+    return cnt;
 }
 static int svc_account_init(uint64_t a, uint64_t b, uint64_t c, uint64_t d) {
     (void)a;(void)b;(void)c;(void)d; return 0;
@@ -782,6 +841,17 @@ static const dm_sdk_ent g_tab[] = {
     E("_ZN2nn3hid24SetSupportedNpadStyleSetENS_4util10BitFlagSetILi32ENS0_12NpadStyleTagEEE", svc_hid_set_npad),
     E("_ZN2nn3hid22SetSupportedNpadIdTypeEPKjm", svc_hid_set_npad),
     E("_ZN2nn3hid15GetNpadStyleSetERKj",     svc_hid_get_style),
+    // np216：五种形态共用一个布局（0x28）——之前一个都没实现 ⇒ 游戏从不读按键
+    E("_ZN2nn3hid12GetNpadStateEPNS0_17NpadHandheldStateERKj", svc_hid_npad_state),
+    E("_ZN2nn3hid12GetNpadStateEPNS0_16NpadJoyDualStateERKj",  svc_hid_npad_state),
+    E("_ZN2nn3hid12GetNpadStateEPNS0_16NpadFullKeyStateERKj",  svc_hid_npad_state),
+    E("_ZN2nn3hid12GetNpadStateEPNS0_16NpadJoyLeftStateERKj",  svc_hid_npad_state),
+    E("_ZN2nn3hid12GetNpadStateEPNS0_17NpadJoyRightStateERKj", svc_hid_npad_state),
+    E("_ZN2nn3hid13GetNpadStatesEPNS0_17NpadHandheldStateEiRKj", svc_hid_npad_states),
+    E("_ZN2nn3hid13GetNpadStatesEPNS0_16NpadJoyDualStateEiRKj",  svc_hid_npad_states),
+    E("_ZN2nn3hid13GetNpadStatesEPNS0_16NpadFullKeyStateEiRKj",  svc_hid_npad_states),
+    E("_ZN2nn3hid13GetNpadStatesEPNS0_16NpadJoyLeftStateEiRKj",  svc_hid_npad_states),
+    E("_ZN2nn3hid13GetNpadStatesEPNS0_17NpadJoyRightStateEiRKj", svc_hid_npad_states),
     E("_ZN2nn3hid16GetDebugPadStateEPNS0_13DebugPadStateE", svc_hid_debug_pad_state),
     E("_ZN2nn7account10InitializeEv",        svc_account_init),
     E("_ZN2nn7account19OpenPreselectedUserEPNS0_10UserHandleE", svc_account_open_user),
