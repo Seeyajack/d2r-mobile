@@ -60,7 +60,16 @@ extern const unsigned char __stop_dmmainx1[];
 
 // 每写一行，同时打进 hilog —— 万一界面没显示出来（或进程中途挂了），
 // 也能从设备日志里看到跑到哪一步了。
+// ⚠ np211c（实验性，可回滚）：OH_LOG_Print **临时禁用**。
+//   依据：np211b 寄存器快照实测——runner（主线程）789/789 样本停在 musl ldso 的
+//   dso 符号查找（musl+0x14a6f4，x0=NULL/x1=栈/x3=8/lr 在 musl 内）。
+//   特征 = 某宿主侧导入经 musl lazy PLT 反复解析失败（musl 对失败不缓存）。
+//   头号嫌疑就是本函数：klog 每一行都经它调 OH_LOG_Print。若禁掉后主线程 PC
+//   立即改变/游戏前进 ⇒ 实锤；若不是它，下一轮按同样办法逐个排除。
+//   恢复方法：把 g_hilog_off 改回 0（或删掉这个 if）。
+static int g_hilog_off = 0;   // np211c 实验已结束（OH_LOG_Print 排除，已恢复）；改 1 可再禁用
 static void logline(const char *s) {
+    if (g_hilog_off) return;
     OH_LOG_Print(LOG_APP, LOG_INFO, 0xD001, "dmprobe", "%{public}s", s);
 }
 
@@ -1498,9 +1507,14 @@ static uint64_t k_gate_stub(void) {
 static volatile uint32_t g_smp_n;
 static uint64_t g_smp_pc[SMP_N];
 static uint64_t g_smp_fp[SMP_N];
+static uint32_t g_smp_tid[SMP_N];     // np211：样本所属线程（轮投全部游戏线程用）
+// np211b：热点样本的寄存器快照（x0-x3/x30）。主线程 789/789 停在 musl 符号哈希查找里，
+//   只有 LR（x30）能告诉我们"是谁调进来的"——静态考古 musl 太慢，一次采样定音。
+static uint64_t g_smp_r0[SMP_N], g_smp_r1[SMP_N], g_smp_r2[SMP_N], g_smp_r3[SMP_N], g_smp_lr[SMP_N];
+static uint64_t g_smp_sp[SMP_N];     // np211e：中断 SP（扫栈找 guest 调用点的基准）
 static int g_smp_started;
 static pthread_t g_main_pth;          // 主线程句柄（给 pthread_kill 定向投信号用）
-static volatile uint32_t g_smp_kicks; // np185 实验 G：已投递的采样信号数（诊断"没样本"是没发还是没送达）
+static volatile uint32_t g_smp_kicks; // np185 实验 G：已投递的采样信号数（诊断"没样本"是没发还是没送达））
 
 static void smp_handler(int sig, siginfo_t *si, void *uc_) {
     (void)sig; (void)si;
@@ -1509,6 +1523,13 @@ static void smp_handler(int sig, siginfo_t *si, void *uc_) {
     if (i < SMP_N) {
         g_smp_pc[i] = (uint64_t)uc->uc_mcontext.pc;
         g_smp_fp[i] = (uint64_t)uc->uc_mcontext.regs[29];
+        g_smp_tid[i] = (uint32_t)(uintptr_t)pthread_self();
+        g_smp_r0[i] = (uint64_t)uc->uc_mcontext.regs[0];
+        g_smp_r1[i] = (uint64_t)uc->uc_mcontext.regs[1];
+        g_smp_r2[i] = (uint64_t)uc->uc_mcontext.regs[2];
+        g_smp_r3[i] = (uint64_t)uc->uc_mcontext.regs[3];
+        g_smp_lr[i] = (uint64_t)uc->uc_mcontext.regs[30];
+        g_smp_sp[i] = (uint64_t)uc->uc_mcontext.sp;
     }
 }
 // 只装 handler；**不开定时器**——NDK 的 sigevent 不暴露 SIGEV_THREAD_ID，
@@ -1524,14 +1545,8 @@ static void smp_arm(void) {
     if (sigaction(SIGPROF, &sa, NULL) != 0) { klog("[采样] sigaction 失败\n"); return; }
     klog("[采样] ✔ SIGPROF handler 已装（由帧线程定向投样）\n");
 }
-static void smp_kick(void) {
-    if (!g_smp_started || !g_main_pth) return;
-    // ⚠ 主线程自己也在走 tick 路径：它若自己 pthread_kill 自己，样本会全部落在
-    //   musl 的 `pthread_kill+0xa4`（svc 返回点）——np178 首轮 4096/4096 就这么废掉的。
-    if ((uint32_t)(uintptr_t)pthread_self() == g_main_pthread) return;
-    __atomic_fetch_add(&g_smp_kicks, 1u, __ATOMIC_RELAXED);
-    pthread_kill(g_main_pth, SIGPROF);
-}
+// np211：实现移到 g_thr 定义之后（要遍历线程表）；这里只留前向声明。
+static void smp_kick(void);
 // np178：**maps 快照**。采样点落在映像外时，必须先知道它属于哪个 .so 才能反查符号。
 //   只记可执行段（r-xp）：行数可控，且足以判定"某地址属于哪个库、偏移多少"。
 static void dump_maps_once(void) {
@@ -1593,10 +1608,54 @@ static void smp_dump(const char *tag) {
     if (!g_files_dir[0]) return;
     uint32_t n = __atomic_load_n(&g_smp_n, __ATOMIC_RELAXED);
     if (n > SMP_N) n = SMP_N;
-    char p[600], buf[1400];
+    char p[600], buf[2400];
     snprintf(p, sizeof p, "%s/dm_gate.txt", g_files_dir);
     int fd = open(p, O_WRONLY | O_CREAT | O_APPEND, 0644);
     if (fd < 0) return;
+    // np211：先按 tid 分桶（最多 16 个线程），每桶内各自统计 Top3 pc。
+    //   判读：12 个工人线程若都挤在同一个 pc（如 0xa26f80 之后的某处），即"集体自旋等一个条件"。
+    uint32_t tids[16]; uint32_t tcnt[16] = {0}; int ntid = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        uint32_t t = g_smp_tid[i];
+        int k, hit = -1;
+        for (k = 0; k < ntid; k++) if (tids[k] == t) { hit = k; break; }
+        if (hit < 0) {
+            if (ntid < 16) { hit = ntid++; tids[hit] = t; tcnt[hit] = 0; }
+            else continue;
+        }
+        tcnt[hit]++;
+    }
+    int len = snprintf(buf, sizeof buf, "smp[%s] 样本=%u kick=%u 线程数=%d\n", tag, n,
+                       __atomic_load_n(&g_smp_kicks, __ATOMIC_RELAXED), ntid);
+    for (int b = 0; b < ntid; b++) {
+        uint64_t top[3] = {0}; uint32_t cnt[3] = {0};
+        for (uint32_t i = 0; i < n; i++) {
+            if (g_smp_tid[i] != tids[b]) continue;
+            uint64_t pc = g_smp_pc[i];
+            int k, hit = -1;
+            for (k = 0; k < 3; k++) if (top[k] == pc) { hit = k; break; }
+            if (hit < 0) {
+                int slot = -1;
+                for (k = 0; k < 3; k++) if (cnt[k] == 0) { slot = k; break; }
+                if (slot < 0) continue;
+                hit = slot; top[hit] = pc; cnt[hit] = 0;
+            }
+            cnt[hit]++;
+        }
+        len += snprintf(buf + len, sizeof buf - (size_t)len, "  tid=%u n=%u:", tids[b], tcnt[b]);
+        for (int rank = 0; rank < 3; rank++) {
+            int best = -1;
+            for (int k = 0; k < 3; k++) if (cnt[k] && (best < 0 || cnt[k] > cnt[best])) best = k;
+            if (best < 0) break;
+            char cls[48];
+            smp_cls(top[best], cls, sizeof cls);
+            len += snprintf(buf + len, sizeof buf - (size_t)len, " %u×%s", cnt[best], cls);
+            cnt[best] = 0;
+        }
+        len += snprintf(buf + len, sizeof buf - (size_t)len, "\n");
+    }
+    (void)!write(fd, buf, strlen(buf));
+    // 主线程热点帧链（原逻辑保留：全局第一名 + 帧链）
     uint64_t top[16] = {0}; uint32_t cnt[16] = {0}; int used = 0;
     for (uint32_t i = 0; i < n; i++) {
         uint64_t pc = g_smp_pc[i];
@@ -1604,30 +1663,21 @@ static void smp_dump(const char *tag) {
         for (k = 0; k < used; k++) if (top[k] == pc) { hit = k; break; }
         if (hit < 0) {
             if (used < 16) { hit = used++; top[hit] = pc; cnt[hit] = 0; }
-            else continue;                 // 表满：忽略新 pc（主热点早已入表）
+            else continue;
         }
         cnt[hit]++;
     }
-    int len = snprintf(buf, sizeof buf, "smp[%s] 样本=%u kick=%u", tag, n,
-                       __atomic_load_n(&g_smp_kicks, __ATOMIC_RELAXED));
     uint64_t first_pc = 0; uint64_t first_fp = 0; uint32_t first_cnt = 0;
     for (int rank = 0; rank < 6; rank++) {
         int best = -1;
         for (int k = 0; k < used; k++) if (cnt[k] && (best < 0 || cnt[k] > cnt[best])) best = k;
         if (best < 0) break;
-        char cls[48];
-        smp_cls(top[best], cls, sizeof cls);
-        len += snprintf(buf + len, sizeof buf - (size_t)len, " %u×%s",
-                        cnt[best], cls);
-        if (rank == 0) {                   // 记下第一名，出循环后补它的帧链
+        if (rank == 0) {
             first_pc = top[best]; first_fp = g_smp_fp[0]; first_cnt = cnt[best];
             for (uint32_t i = 0; i < n; i++) if (g_smp_pc[i] == top[best]) { first_fp = g_smp_fp[i]; break; }
         }
-        cnt[best] = 0;                      // 用过即清，避免重复
+        cnt[best] = 0;
     }
-    snprintf(buf + len, sizeof buf - (size_t)len, "\n");
-    (void)!write(fd, buf, strlen(buf));
-    // np185 实验 F：热点 PC 的帧链（自旋点的调用者 = 谁让主线程转圈）
     if (first_pc) {
         char bt[600];
         smp_bt(first_pc, first_fp, bt, sizeof bt);
@@ -1635,6 +1685,65 @@ static void smp_dump(const char *tag) {
         int l2n = snprintf(l2, sizeof l2, "smp-bt[%s] %u×%#llx：%s\n",
                            tag, first_cnt, (unsigned long long)first_pc, bt);
         (void)!write(fd, l2, (size_t)l2n);
+        // np211d：寄存器快照
+        for (uint32_t i = 0; i < n; i++) {
+            if (g_smp_pc[i] != first_pc) continue;
+            char l3[400];
+            char c0[48], clr[48];
+            smp_cls(g_smp_r0[i], c0, sizeof c0);
+            smp_cls(g_smp_lr[i], clr, sizeof clr);
+            int l3n = snprintf(l3, sizeof l3,
+                               "smp-reg[%s] x0=%s x1=%#llx x2=%#llx x3=%#llx lr=%s\n",
+                               tag, c0, (unsigned long long)g_smp_r1[i],
+                               (unsigned long long)g_smp_r2[i],
+                               (unsigned long long)g_smp_r3[i], clr);
+            (void)!write(fd, l3, (size_t)l3n);
+            // np211e：**扫栈找 guest 调用点**。帧链（fp）在 guest/musl 混合栈上不可靠
+            //   （实测只有一层）。改用暴力扫：从中断 SP 向下 96 字，取**第一个落在
+            //   main/sdk 映像内的值** = 最靠近热点的客体调用点（musl 是被它调进的）。
+            {
+                uint64_t mb = (uint64_t)(uintptr_t)g_k_m.base;
+                uint64_t sb = (uint64_t)(uintptr_t)g_k_s.base;
+                uint64_t sp = g_smp_sp[i];          // 中断 SP（被中断线程的栈）
+                // np211f：范围 0x300→0x1000（musl 内部帧 + plt_stub 宿主帧 + guest 帧
+                //   可能深达几百字节每层）；并把 probe .so 与匿名区也纳入识别——
+                //   guest 的返回地址通常隔着一层我们的 plt_stub（宿主函数）。
+                int found = 0;
+                for (int k = 0; k < 512 && !found; k++) {
+                    uint64_t v = *(const uint64_t *)(uintptr_t)(sp + (uint64_t)k * 8);
+                    if (v >= mb && v < mb + DM_IMG_MAIN_END) {
+                        int l4n = snprintf(l2, sizeof l2,
+                                           "smp-stk[%s] 热点+%#llx 的 guest 调用点 = img+%#llx（sp+%#x）\n",
+                                           tag, (unsigned long long)first_pc,
+                                           (unsigned long long)(v - mb), k * 8);
+                        (void)!write(fd, l2, (size_t)l4n);
+                        found = 1;
+                    } else if (sb && v >= sb && v < sb + DM_IMG_SDK_END) {
+                        int l4n = snprintf(l2, sizeof l2,
+                                           "smp-stk[%s] 热点+%#llx 的 guest 调用点 = sdk+%#llx（sp+%#x）\n",
+                                           tag, (unsigned long long)first_pc,
+                                           (unsigned long long)(v - sb), k * 8);
+                        (void)!write(fd, l2, (size_t)l4n);
+                        found = 1;
+                    } else if (g_self_base && v >= g_self_base && v < g_self_base + 0x400000ull) {
+                        int l4n = snprintf(l2, sizeof l2,
+                                           "smp-stk[%s] 热点+%#llx 的宿主帧 = probe+%#llx（sp+%#x）\n",
+                                           tag, (unsigned long long)first_pc,
+                                           (unsigned long long)(v - g_self_base), k * 8);
+                        (void)!write(fd, l2, (size_t)l4n);
+                        found = 2;   // 继续找更上面的 guest
+                    }
+                }
+                if (found == 1) { /* 已写 */ }
+                else if (found == 0) {
+                    int l4n = snprintf(l2, sizeof l2,
+                                       "smp-stk[%s] 热点+%#llx：sp+0..0x1000 内无 guest/宿主地址\n",
+                                       tag, (unsigned long long)first_pc);
+                    (void)!write(fd, l2, (size_t)l4n);
+                }
+            }
+            break;
+        }
     }
     close(fd);
 }
@@ -1715,6 +1824,10 @@ static uint64_t g_thread_shadow[DM_THREAD_SHADOW_QWORDS];
 // 这里让 [+0xb0] 指向注入的分配器对象（在 k_inject_heap 里接线），使这条分支拿到非 0。
 // 注：槽号目前只有 0（注入的上下文对象 [0x88] 为 0），故一个影子对象够用。
 static uint64_t g_tls_shadow[0x40];             // 0x200 字节，覆盖到 [+0xb0]
+// np211g：分配器对象地址的"转发指针"。g_alloc_obj 定义在 5300 行（本函数之后），
+//   而 k_sdk_tls_shadow_install 要给影子块 +0xb0 填它 ⇒ 用指针转发（k_inject_heap
+//   在 nnMain 前设值，工人线程创建时必已就绪）。
+static void *g_alloc_obj_ptr;
 
 // ── 真实线程（2026-10-18）：之前 CreateThread/StartThread 完全没实现 ⇒ 游戏所有"线程"在
 //    单线程上内联跑 ⇒ **子系统工作线程压根不存在 ⇒ 它们的任务永远不产生 ⇒ sead 主循环空转**
@@ -1747,6 +1860,22 @@ static int thr_find_by_self(void) {
         if (g_thr[i].game && g_thr[i].started && pthread_equal(g_thr[i].tid, me)) return i;
     return -1;
 }
+// np211：**轮投全部游戏线程**（原来只投主线程）。动机：12 个工人线程 R 态 cpu=0，
+//   静态追查全堵死（入口 4 个 PLT 全非阻塞、0xa26f80 是 popcount），必须拿 PC。
+//   ⚠ 别投自己——样本会落在 musl 的 `pthread_kill+0xa4`（svc 返回点），np178 首轮
+//   4096/4096 就这么废掉的。主线程也由这里投（帧线程 ≠ 主线程，不冲突）。
+static void smp_kick(void) {
+    if (!g_smp_started || !g_main_pth) return;
+    uint32_t me = (uint32_t)(uintptr_t)pthread_self();
+    __atomic_fetch_add(&g_smp_kicks, 1u, __ATOMIC_RELAXED);
+    pthread_kill(g_main_pth, SIGPROF);
+    for (int i = 0; i < DM_THREAD_MAX; i++) {
+        if (!g_thr[i].started) continue;
+        uint32_t t = (uint32_t)(uintptr_t)g_thr[i].tid;
+        if (t == me) continue;
+        pthread_kill(g_thr[i].tid, SIGPROF);
+    }
+}
 // ───────── np135：sdk 每线程 TLS 影子槽（M1 第三步）─────────
 // 背景：ohos 目标下，sdk 的线程槽跳床统一走 musl tsd（mrs tpidr_el0 → *(tp−272) → +键号×8），
 //   由探针按线程写槽。此前 8 个槽全填哨兵值——KGATE（门表）= k_gate_stub 是对的，但
@@ -1771,6 +1900,17 @@ static void k_sdk_tls_shadow_install(void) {
     *(uint64_t *)(tlr + 0x1f8) = (uint64_t)(uintptr_t)nn;
     *(uint64_t *)(tsd + (uint64_t)g_s_key[DM_IMG_SDK_KEY_K18_IDX]  * 8) = (uint64_t)(uintptr_t)(k18 + 0x10);
     *(uint64_t *)(tsd + (uint64_t)g_s_key[DM_IMG_SDK_KEY_KTLR_IDX] * 8) = (uint64_t)(uintptr_t)tlr;
+    // np211g（np211f 定谳的修复）：游戏经 `0xa0e2f8` 读「GetTlsValue(键) 返回块 +0xb0」
+    //   当"当前线程分配器"（0xa0913c 的 cbz 门：为空就放弃建子对象 ⇒ X+0x128 永不挂接
+    //   ⇒ F_wait 退出条件①永不满足 ⇒ 内容门打不开）。K18 键的块 = k18+0x10 ⇒ +0xb0 =
+    //   k18+0xc0；KTLR 键的块 = tlr ⇒ +0xb0 = tlr+0xb0。**两处都填**（键号由 ctx+0x88
+    //   决定，静态难定，成本为零）。此前只填了静态 g_tls_shadow[0xb0]——那数组从没接到
+    //   任何 TSD 槽上，等于没填。
+    if (g_alloc_obj_ptr) {
+        *(uint64_t *)(k18 + 0xc0) = (uint64_t)(uintptr_t)g_alloc_obj_ptr;   // +0xb0（np211f 门）
+        *(uint64_t *)(k18 + 0x70) = (uint64_t)(uintptr_t)g_alloc_obj_ptr;   // +0x60（np164 同一模式）
+        *(uint64_t *)(tlr + 0xb0) = (uint64_t)(uintptr_t)g_alloc_obj_ptr;
+    }
     klog("[sdk-tls] 影子槽已装：K18=%p（块 %p） KTLR=%p NN=%p 名牌=%u\n",
          (void *)(k18 + 0x10), (void *)k18, (void *)tlr, (void *)nn, (unsigned)tag);
 }
@@ -3825,6 +3965,131 @@ static uint64_t hook_m3_attach(uint64_t *f) {
     return 0;
 }
 
+// np211g：0xc5274c 是 np211f 离线定谳的**真正挂接点**（str x0,[x19,#0x128]）。
+//   宿主函数 0xc52664；x19 = 0xa0913c 经分配器协议（0xa0e2f8 → 影子块+0xb0 → vt+0x80/vt+0x30）
+//   建出的对象。判读：修复前此钩子不响；修复后响且 X+0x128 非零 ⇒ F_wait 退出条件①满足。
+static int g_n_m3_real;
+static uint64_t hook_m3_real_attach(uint64_t *f) {
+    if (++g_n_m3_real <= 8) {
+        uint64_t mgr = f[FR_X19], sub = f[FR_X0];
+        char l[256];
+        snprintf(l, sizeof l, "M3真挂接#%d [x19+0x128] <- %#llx（对象 x19=%#llx）\n",
+                 g_n_m3_real, (unsigned long long)sub, (unsigned long long)mgr);
+        note_append("dm_gate.txt", l);
+        uint64_t vt = 0;
+        if (k_read_ok((const void *)mgr, &vt, 8)) {
+            uint64_t base = (uint64_t)(uintptr_t)g_k_m.base;
+            int in = (vt >= base && vt < base + DM_IMG_MAIN_END);
+            snprintf(l, sizeof l, "  对象 vt=%s%#llx；子对象 vt=%s\n",
+                     in ? "img+" : "外",
+                     (unsigned long long)(in ? vt - base : vt),
+                     k_read_ok((const void *)sub, &vt, 8) ? "(已读)" : "(读不到)");
+            note_append("dm_gate.txt", l);
+        }
+    }
+    return 0;
+}
+
+// ===== np211g 诊断链（np211f 根因链的四点验证）=====
+// 0xc52664：挂接宿主函数入口（无静态调用者=虚派发）——进没进
+static int g_n_h1;
+static uint64_t hook_np211g_host(uint64_t *f) {
+    if (++g_n_h1 <= 4) {
+        char l[224];
+        snprintf(l, sizeof l, "np211g宿主#%d 进入 x0=%#llx x1=%#llx x2=%#llx x3=%#llx\n",
+                 g_n_h1, (unsigned long long)f[FR_X0], (unsigned long long)f[FR_X1],
+                 (unsigned long long)f[FR_X2], (unsigned long long)f[FR_X3]);
+        note_append("dm_gate.txt", l);
+    }
+    return 0;
+}
+// 0xa0913c：取子对象函数入口——打第三参 x2（非空就直接用，不进 0xa0e2f8）
+static int g_n_h2;
+static uint64_t hook_np211g_sub(uint64_t *f) {
+    if (++g_n_h2 <= 4) {
+        char l[224];
+        snprintf(l, sizeof l, "np211g取子#%d 进入 x2(第三参)=%#llx x3=%#llx\n",
+                 g_n_h2, (unsigned long long)f[FR_X2], (unsigned long long)f[FR_X3]);
+        note_append("dm_gate.txt", l);
+    }
+    return 0;
+}
+// 0xa0e2f8 入口：打 ctx 与键号（w0 = [ctx+0x88]）——定"读哪个 TSD 槽"
+static int g_n_h3;
+static uint64_t hook_np211g_tlsget(uint64_t *f) {
+    if (++g_n_h3 <= 4) {
+        uint64_t base = (uint64_t)(uintptr_t)g_k_m.base;
+        uint64_t ctxh = 0, slot = 0xFFFFFFFFu;
+        if (k_read_ok((const void *)(base + 0x22783d8), &ctxh, 8) && ctxh)
+            if (k_read_ok((const void *)ctxh, &ctxh, 8) && ctxh)
+                k_read_ok((const void *)(ctxh + 0x88), &slot, 4);
+        char l[224];
+        snprintf(l, sizeof l, "np211g TLS取#%d arg=%#llx ctx+0x88(键号)=%u\n",
+                 g_n_h3, (unsigned long long)f[FR_X0], (unsigned)slot);
+        note_append("dm_gate.txt", l);
+    }
+    return 0;
+}
+// 0xa0e338：0xa0e2f8 返回点——打返回值（0 ⇒ 门就是在这断的）
+static int g_n_h4;
+static uint64_t hook_np211g_tlsret(uint64_t *f) {
+    if (++g_n_h4 <= 4) {
+        char l[224];
+        snprintf(l, sizeof l, "np211g TLS返#%d x0=%#llx\n",
+                 g_n_h4, (unsigned long long)f[FR_X0]);
+        note_append("dm_gate.txt", l);
+    }
+    return 0;
+}
+
+// np211i：三个新挂接候选（np211h 排除 0xc5274c 后的下一批）
+// ① 0xa3581c：链表推进+挂接（x8=[x21+0x38] 当前节点，x23 挂到其 +0x128）
+static int g_n_i1;
+static uint64_t hook_np211i_list(uint64_t *f) {
+    if (++g_n_i1 <= 8) {
+        uint64_t node = 0, vt = 0;
+        // x8 在站点已载入（FR_X8）；子对象 x23
+        node = f[FR_X8];
+        if (k_read_ok((const void *)node, &vt, 8)) {
+            uint64_t base = (uint64_t)(uintptr_t)g_k_m.base;
+            int in = (vt >= base && vt < base + DM_IMG_MAIN_END);
+            char l[256];
+            snprintf(l, sizeof l, "np211i链表挂接#%d [%#llx+0x128] <- %#llx；节点 vt=%s%#llx\n",
+                     g_n_i1, (unsigned long long)node, (unsigned long long)f[FR_X23],
+                     in ? "img+" : "外", (unsigned long long)(in ? vt - base : vt));
+            note_append("dm_gate.txt", l);
+        }
+    }
+    return 0;
+}
+// ② 0x523ec：惰建单例真入口（0xc5274c 那条链的门；判进没进/单例空不空）
+static int g_n_i2;
+static uint64_t hook_np211i_singleton(uint64_t *f) {
+    if (++g_n_i2 <= 4) {
+        uint64_t base = (uint64_t)(uintptr_t)g_k_m.base;
+        uint64_t holder = 0, inst = 0;
+        if (k_read_ok((const void *)(base + 0x227a218), &holder, 8) && holder)
+            k_read_ok((const void *)holder, &inst, 8);
+        char l[224];
+        snprintf(l, sizeof l, "np211i单例#%d 进入 arg=%#llx 持有者=%#llx 单例=%s\n",
+                 g_n_i2, (unsigned long long)f[FR_X0], (unsigned long long)holder,
+                 inst ? "已存在" : "空（将新建）");
+        note_append("dm_gate.txt", l);
+    }
+    return 0;
+}
+// ③ 0x1187c74：str x21,[x8,#0x128]（x8 = [x19+8] 的子对象）
+static int g_n_i3;
+static uint64_t hook_np211i_sub2(uint64_t *f) {
+    if (++g_n_i3 <= 8) {
+        char l[224];
+        snprintf(l, sizeof l, "np211i子对象挂接#%d [x8+0x128] <- x21=%#llx（x19=%#llx）\n",
+                 g_n_i3, (unsigned long long)f[FR_X21], (unsigned long long)f[FR_X19]);
+        note_append("dm_gate.txt", l);
+    }
+    return 0;
+}
+
 // ===== np210 实验 B（第二轮）：门态 + 图形初始化入口 + 两个备选挂点 =====
 // 第一轮判读（见 np210 文档）：挂接函数体（0x9fc6f4 起）从未执行；离线定谳表明它是
 // **图形/显示初始化 0x9fc450**，唯一调用点 0x7355a0 之前有一道门
@@ -5184,6 +5449,7 @@ static void k_inject_heap(uint8_t *img) {
     *(uint64_t *)(img + 0x2289e68) = (uint64_t)(uintptr_t)&g_curheap_holder[0];
     *(uint64_t *)(img + 0x2289e60) = (uint64_t)(uintptr_t)&g_curheap_holder[0];
     g_tls_shadow[0xb0 / 8] = (uint64_t)(uintptr_t)&g_alloc_obj[0];   // 影子对象 [+0xb0] = 分配器对象
+    g_alloc_obj_ptr = (void *)&g_alloc_obj[0];   // np211g：转发给 shadow_install 填影子块 +0xb0
     *(uint64_t *)(img + 0x226f0a0) = (uint64_t)(uintptr_t)&g_alloc_holder[0];   // 分配器持有者
     *(uint64_t *)(img + 0x22783d8) = (uint64_t)(uintptr_t)&g_ctx_holder[0];     // 线程上下文持有者
     // 工厂 0x1f8 的入参契约（np141 符号级定谳；客体构造器 0x103b83c 全函数反汇编封闭）：
@@ -6413,6 +6679,17 @@ static void exp_k(const char *files_dir, char *out, size_t cap, size_t *used) {
         // attach 响但管理器 vt 不是 0x21b5d40 = H3（挂错对象）。接口表 dump 见 hook_e34。
         k_install_hook(img, 0x9fc6f4, (void *)hook_m3_enter, "np210 子系统初始化 0x9fc6f4（首次分配前）");
         k_install_hook(img, 0x9fc8c4, (void *)hook_m3_attach, "np210 挂接点 0x9fc8c4（[x19+0x128]<-x23）");
+        // np211g：np211f 定谳的真正挂接点（0xa0913c 分配器协议链的终点）
+        k_install_hook(img, 0xc5274c, (void *)hook_m3_real_attach, "np211g 真挂接点 0xc5274c（[x19+0x128]<-x0）");
+        // np211g 诊断链：宿主函数 / 取子对象 / TLS 取的入口与返回
+        k_install_hook(img, 0xc52664, (void *)hook_np211g_host, "np211g 宿主函数 0xc52664 入口");
+        k_install_hook(img, 0xa0913c, (void *)hook_np211g_sub, "np211g 取子对象 0xa0913c 入口");
+        k_install_hook(img, 0xa0e2f8, (void *)hook_np211g_tlsget, "np211g TLS取 0xa0e2f8 入口");
+        k_install_hook(img, 0xa0e338, (void *)hook_np211g_tlsret, "np211g TLS取返回 0xa0e338");
+        // np211i：排除 0xc5274c 后的三个新候选
+        k_install_hook(img, 0xa3581c, (void *)hook_np211i_list, "np211i 链表挂接 0xa3581c");
+        k_install_hook(img, 0xc523ec, (void *)hook_np211i_singleton, "np211i 惰建单例真入口 0xc523ec");
+        k_install_hook(img, 0x1187c74, (void *)hook_np211i_sub2, "np211i 子对象挂接 0x1187c74");
         // np210 实验 B（第二轮）：门态 + 图形初始化入口 + 两个备选挂点。
         // 第一轮已定谳"挂接函数体没跑"；离线追出它 = 图形/显示初始化 0x9fc450，
         // 唯一调用点 0x7355a0 前有单例门（0x735574 cbz）。本轮看门跳不跳、单例空不空、
