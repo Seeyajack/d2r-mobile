@@ -730,9 +730,52 @@ typedef struct {
     int (*fn)(uint64_t, uint64_t, uint64_t, uint64_t);
 } dm_sdk_ent;
 
+// ───────── M2（2026-10-22）：启动路径 5 个服务的最小实现 ─────────
+// 为什么必须由宿主给：main 的 PLT 槽全指向**记录型存根** → `dm_sdk_call(名字,…)`，
+// 表里没有的符号就**直接返回 0**（不是"崩"，是"成功但什么都没做"）。hid 那 36 次/帧的
+// GetNpadStyleSet 就是这么"静默成功"的。所以服务必须加进这张表，而不是去实现 CMIF 协议。
+// 语义取"最保守的真值"：**没有手柄**（GetNpadStyleSet=0）、其余初始化成功、用户给一个假句柄。
+// 这样游戏看到的世界是一致的，不会拿到未初始化的栈当返回值。
+static int svc_hid_init_npad(uint64_t a, uint64_t b, uint64_t c, uint64_t d) {
+    (void)b;(void)c;(void)d; (void)a; return 0;               // void → 成功
+}
+static int svc_hid_init_debugpad(uint64_t a, uint64_t b, uint64_t c, uint64_t d) {
+    (void)a;(void)b;(void)c;(void)d; return 0;
+}
+static int svc_hid_set_npad(uint64_t a, uint64_t b, uint64_t c, uint64_t d) {
+    (void)a;(void)b;(void)c;(void)d; return 0;                // 记录诉求即可，无手柄可配
+}
+static int svc_hid_get_style(uint64_t a, uint64_t b, uint64_t c, uint64_t d) {
+    // GetNpadStyleSet(const NpadIdType&) → u32。返回 0 = 该 pad 没接（每帧 36 次的调用）
+    (void)a;(void)b;(void)c;(void)d; return 0;
+}
+static int svc_account_init(uint64_t a, uint64_t b, uint64_t c, uint64_t d) {
+    (void)a;(void)b;(void)c;(void)d; return 0;
+}
+static int svc_account_open_user(uint64_t out, uint64_t b, uint64_t c, uint64_t d) {
+    (void)b;(void)c;(void)d;
+    // **必须写出参数**：调用方会拿这个句柄去查用户名/图标；不写就是未初始化栈
+    if (out) *(uint64_t *)(uintptr_t)out = 0x1000000000000001ull;
+    return 0;
+}
+static int svc_ret_ok(uint64_t a, uint64_t b, uint64_t c, uint64_t d) {
+    (void)a;(void)b;(void)c;(void)d; return 0;                // pctl / aoc 的 Initialize
+}
+
 #define E(name, f) { name, (int (*)(uint64_t, uint64_t, uint64_t, uint64_t))(f) }
 
 static const dm_sdk_ent g_tab[] = {
+    // ---- M2：启动路径实测用到的 5 个服务（hid / account / pctl / aoc）----
+    // 依据：真机日志里 [PLT] 记名统计——hid 每帧 36 次 GetNpadStyleSet、account/pctl/aoc 各一次 Initialize
+    E("_ZN2nn3hid14InitializeNpadEv",        svc_hid_init_npad),
+    E("_ZN2nn3hid18InitializeDebugPadEv",    svc_hid_init_debugpad),
+    E("_ZN2nn3hid24SetSupportedNpadStyleSetENS_4util10BitFlagSetILi32ENS0_12NpadStyleTagEEE", svc_hid_set_npad),
+    E("_ZN2nn3hid22SetSupportedNpadIdTypeEPKjm", svc_hid_set_npad),
+    E("_ZN2nn3hid15GetNpadStyleSetERKj",     svc_hid_get_style),
+    E("_ZN2nn7account10InitializeEv",        svc_account_init),
+    E("_ZN2nn7account19OpenPreselectedUserEPNS0_10UserHandleE", svc_account_open_user),
+    E("_ZN2nn4pctl10InitializeEv",           svc_ret_ok),
+    E("_ZN2nn3aoc10InitializeEv",            svc_ret_ok),
     // ---- nn::vi ----
     E("_ZN2nn2vi10InitializeEv", vi_init),
     E("_ZN2nn2vi18OpenDefaultDisplayEPPNS0_7DisplayE", vi_open_display),

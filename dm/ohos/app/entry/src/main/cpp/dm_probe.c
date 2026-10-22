@@ -5475,6 +5475,47 @@ static void *k_thread(void *arg) {
 
 // np135：导出表查找。**全量表**（np133 时只收 nn::os 340 个）——PLT 自解析与白名单
 // 都要查它；线性扫描，装载期一次性调用（4,135 槽 × 14,834 条 ≈ 6,000 万次首字符比较，可接受）。
+// ───────── 服务拦截表（M2，2026-10-22）─────────
+// 为什么在这里拦：NX 的跨模块/同模块调用全走 **PLT 槽**，槽里放谁就是谁。与其去实现 CMIF 协议
+// （要在 IPC 缓冲区里写 nn::sf 的应答头，一次写错就是崩/卡），不如在**填充槽时**把这几个服务
+// 直接解析到宿主函数：语义确定（"成功但什么也没做"），也不再往 sdk 的 IPC 栈里钻。
+// 实测依据：这 5 个服务的 IPC 一次都没发起（[IPC] 账本为空）⇒ sdk 那边本来就没跑通，
+// 拦截不会"打断"任何已经工作的东西。
+// Intercept table: NX calls go through PLT slots, so filling a slot with a host function is a
+// legitimate (and much cheaper) way to serve a service than implementing the CMIF protocol.
+static unsigned long g_svc_hits[16];
+static int g_svc_ret0(uint64_t a, uint64_t b, uint64_t c, uint64_t d) { (void)a;(void)b;(void)c;(void)d; return 0; }
+// account::OpenPreselectedUser(UserHandle *out)：**必须写出参数**，否则调用方拿未初始化句柄。
+static int g_svc_open_user(uint64_t out, uint64_t b, uint64_t c, uint64_t d) {
+    (void)b;(void)c;(void)d;
+    if (out) *(uint64_t *)(uintptr_t)out = 0x1000000000000001ull;   // 假用户句柄（非 0，格式合法位）
+    return 0;
+}
+static const struct { const char *sym; void *fn; const char *note; int slot; } g_svc_int[] = {
+    { "_ZN2nn3hid14InitializeNpadEv",        (void *)g_svc_ret0,      "hid::InitializeNpad → 无手柄（成功）", 0 },
+    { "_ZN2nn3hid18InitializeDebugPadEv",    (void *)g_svc_ret0,      "hid::InitializeDebugPad → 成功", 1 },
+    { "_ZN2nn3hid24SetSupportedNpadStyleSetENS_4util10BitFlagSetILi32ENS0_12NpadStyleTagEEE",
+                                             (void *)g_svc_ret0,      "hid::SetSupportedNpadStyleSet → 成功", 2 },
+    { "_ZN2nn3hid22SetSupportedNpadIdTypeEPKjm", (void *)g_svc_ret0,  "hid::SetSupportedNpadIdType → 成功", 3 },
+    { "_ZN2nn3hid15GetNpadStyleSetERKj",     (void *)g_svc_ret0,      "hid::GetNpadStyleSet → 0（无手柄）", 4 },
+    { "_ZN2nn7account10InitializeEv",        (void *)g_svc_ret0,      "account::Initialize → 成功", 5 },
+    { "_ZN2nn7account19OpenPreselectedUserEPNS0_10UserHandleE", (void *)g_svc_open_user, "account::OpenPreselectedUser → 假用户句柄", 6 },
+    { "_ZN2nn4pctl10InitializeEv",           (void *)g_svc_ret0,      "pctl::Initialize → 成功", 7 },
+    { "_ZN2nn3aoc10InitializeEv",            (void *)g_svc_ret0,      "aoc::Initialize → 成功", 8 },
+};
+#define N_SVC_INT ((int)(sizeof g_svc_int / sizeof g_svc_int[0]))
+
+// 命中就返回宿主函数（并按符号记一次账）
+static void *dm_svc_intercept(const char *nm) {
+    for (int i = 0; i < N_SVC_INT; i++)
+        if (!strcmp(g_svc_int[i].sym, nm)) {
+            unsigned long c = ++g_svc_hits[g_svc_int[i].slot];
+            if (c == 1) klog("[服务] 拦截 %s（第 1 次）\n", g_svc_int[i].note);
+            return g_svc_int[i].fn;
+        }
+    return NULL;
+}
+
 static void *k_sdk_lookup(const char *nm) {
     for (int i = 0; i < g_n_sdk_os; i++)
         if (!strcmp(g_sdk_os[i].name, nm)) return (void *)(uintptr_t)g_sdk_os[i].addr;
@@ -5587,7 +5628,8 @@ static int k_load_sdk(void) {
         else if (!strcmp(nm, "free"))          { target = (uint64_t)(uintptr_t)free; n_libc++; }
         else if (!strcmp(nm, "aligned_alloc")) { target = (uint64_t)(uintptr_t)aligned_alloc; n_libc++; }
         else {
-            void *p = k_sdk_lookup(nm);      // 自解析：命中本模块自己的导出
+            void *p = dm_svc_intercept(nm);  // M2：服务拦截表优先（不经 IPC）
+            if (!p) p = k_sdk_lookup(nm);     // 再自解析：本模块自己的导出
             if (p) { target = (uint64_t)(uintptr_t)p; n_self++; }
             else   { target = (uint64_t)(uintptr_t)sdk_ret0; n_ext++; }
         }
@@ -5730,7 +5772,8 @@ static void k_fill_plts_extra(xmod_t *x, int idx) {
         uint64_t st = g_xs[idx].symtab + (uint64_t)symi * 24;
         uint32_t name_off = *(uint32_t *)(img + st);
         const char *nm = (const char *)(img + g_xs[idx].strtab + name_off);
-        void *p = k_sdk_lookup(nm);
+        void *p = dm_svc_intercept(nm);      // M2：服务拦截表优先
+        if (!p) p = k_sdk_lookup(nm);
         uint64_t target;
         if (p) { target = (uint64_t)(uintptr_t)p; if ((uint8_t *)p >= img && (uint8_t *)p < img + m->img_end) self++; else cross++; }
         else if (!strcmp(nm, "malloc"))  { target = (uint64_t)(uintptr_t)malloc;  libc++; }
@@ -6148,7 +6191,8 @@ static void exp_k(const char *files_dir, char *out, size_t cap, size_t *used) {
             // np133：**M1 第二步** —— 白名单里的 nn::os 符号解析到 sdk 自己的实现。
             //   第一批只开互斥量（只用 ArbitrateLock/Unlock，不建句柄、不碰线程）。
             if (!impl && k_sdk_bind_allowed(nm)) {
-                void *p = k_sdk_lookup(nm);
+                void *p = dm_svc_intercept(nm);   // M2：服务拦截表优先
+                if (!p) p = k_sdk_lookup(nm);
                 if (p) { impl = p; src = "sdk"; g_nimpl_sdk++; }
                 else klog("[sdk] ⚠ 白名单符号未在 sdk 找到：%s（仍走宿主）\n", nm);
             }
