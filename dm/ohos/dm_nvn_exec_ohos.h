@@ -13,4 +13,5 @@ int  dm_nvn_exec_submit_cb(void *cb); // 回放一个 CB 的记录流（= 翻译
 int  dm_nvn_exec_frame_done(void);    // Present：读回中心像素并与最后清屏色比对
 const char *dm_nvn_exec_report(void); // 最近一次判定的人话描述
 int  dm_nvn_exec_verdict(void);       // 0 通过 / -1 失败 / -2 未跑
-int  dm_nvn_exec_smoketest(void);     // 合成冒烟（不依赖游戏）
+int  dm_nvn_exec_smoketest(void);
+void dm_nvn_exec_mark_window(void);   // nvnWindowInitialize 调过 = 需要真上屏     // 合成冒烟（不依赖游戏）

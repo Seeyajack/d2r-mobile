@@ -147,6 +147,7 @@ static uint64_t win_init(uint64_t w, uint64_t dev, uint64_t b, uint64_t d) {
     oset((const void *)(uintptr_t)w, 3, oget((const void *)(uintptr_t)b, 2, 0));   // 纹理数组首址
     oset((const void *)(uintptr_t)w, 4, oget((const void *)(uintptr_t)b, 3, 0));   // 纹理个数
     g_nvn_win_init++;
+    dm_nvn_exec_mark_window();     // 告诉执行层：游戏真的要上屏（PresentTexture 才走真交换链）
     return 0;
 }
 static uint64_t win_final(uint64_t w, uint64_t b, uint64_t c, uint64_t d) {

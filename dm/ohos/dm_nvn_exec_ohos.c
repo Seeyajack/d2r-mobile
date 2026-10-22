@@ -69,6 +69,7 @@ typedef struct {
 } frame_st;
 static frame_st g_frame;            // 当前帧的记录汇总
 static int g_frame_drew;            // 这一帧记录里有没有 Draw 系命令
+static int g_win_via_nvn;           // nvnWindowInitialize 被调过（= 游戏真的要上屏）
 
 
 // 翻译器：一条记录 → 一个 Vulkan 动作
@@ -113,6 +114,26 @@ int dm_nvn_exec_submit_cb(void *cb) {
 int dm_nvn_exec_frame_done(void) {
     if (dm_nvn_exec_ensure() != 0) return -1;
     g_frames++;
+    // ★ 真交换链上屏：游戏调 nvnQueuePresentTexture ⇒ 走 3.3-A 已验证的
+    //   XComponent → VkSurfaceKHR → swapchain → present 骨架（`vk_backend_onscreen`）。
+    //   判据：它报的"present N 帧 + 间隔统计 + 节拍稳定"，画面本身靠截图肉眼确认。
+    if (g_win_via_nvn) {
+        static char os[2048];
+        int f = vk_backend_onscreen(os, sizeof os);
+        g_verdict = f ? -1 : 0;
+        // 报告里只留关键几行（整份 ~1KB，判定行在末尾）
+        snprintf(g_report, sizeof g_report, "上屏：%s", f ? "失败" : "通过");
+        {
+            const char *tail = strrchr(os, '=');
+            if (tail) {
+                size_t room = sizeof g_report - strlen(g_report) - 1;
+                strncat(g_report, tail, room);
+            }
+        }
+        memset(&g_frame, 0, sizeof g_frame);
+        g_frame_drew = 0;
+        return g_verdict;
+    }
     // 一帧：清屏（颜色来自记录里的 ClearColor）→ 可选画三角形 → 读回
     //
     // ⚠ Draw 目前走 `vk_backend_shader()`（阶段 2 那条已验证的路径：自带管线/顶点/绘制/读回/判定），
@@ -177,6 +198,8 @@ int dm_nvn_exec_frame_done(void) {
     return g_verdict == 0 ? 0 : -1;
 }
 
+void dm_nvn_exec_mark_window(void) { g_win_via_nvn = 1; }
+
 const char *dm_nvn_exec_report(void) { return g_report; }
 int dm_nvn_exec_verdict(void) { return g_verdict; }
 
@@ -210,8 +233,8 @@ int dm_nvn_exec_smoketest(void) {
          (uint64_t)(uintptr_t)(x3), (uint64_t)(uintptr_t)(x4))
     union { float f; uint32_t u; } r = { 0.25f }, g = { 0.5f }, bl = { 0.75f }, al = { 1.0f };
 
+    // ── 第一趟：**不上屏**（不调 nvnWindowInitialize）——离屏判据：清 + 画 + 读回 ──
     CALL(f_wbdef, b, 0, 0, 0, 0);
-    CALL(f_win, w, 0, b, 0, 0);            // 离屏：不给 native window
     CALL(f_qbdef, b, 0, 0, 0, 0);
     CALL(f_qini, q, 0, b, 0, 0);
     CALL(f_cbini, cb, 0, 0, 0, 0);
@@ -223,9 +246,18 @@ int dm_nvn_exec_smoketest(void) {
 
     uint64_t cbptr = (uint64_t)(uintptr_t)cb;
     CALL(f_qsub, q, 1, &cbptr, 0, 0);      // num=1, bufs=&cbptr
-    CALL(f_qpre, q, w, 0, 0, 0);
+    CALL(f_qpre, q, 0, 0, 0, 0);           // 没建窗口 ⇒ 离屏读回判定
+    int off = dm_nvn_exec_verdict();
 
+    // ── 第二趟：**上屏**（调 nvnWindowInitialize ⇒ 真交换链 present）──
+    CALL(f_win, w, 0, b, 0, 0);
+    CALL(f_qpre, q, w, 0, 0, 0);
+    int on = dm_nvn_exec_verdict();
+
+    snprintf(g_report, sizeof g_report, "离屏(清+画+读回)=%s；上屏(真交换链 present)=%s",
+             off ? "FAIL" : "OK", on ? "FAIL" : "OK");
     free(b); free(w); free(q); free(cb);
-    return dm_nvn_exec_verdict();
-#undef CALL
+    return (off || on) ? -1 : 0;
 }
+
+#undef CALL
