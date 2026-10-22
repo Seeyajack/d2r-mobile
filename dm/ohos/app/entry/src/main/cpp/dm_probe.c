@@ -3760,6 +3760,187 @@ static int k_read_ok(const void *p, void *dst, size_t n) {
     return 0;
 }
 
+// ===== np210 实验 A：M3 挂接链验证（纯观测，零行为变化；判据写 dm_gate.txt）=====
+// 离线定谳（`离线分析-M3内容门-惰性挂接定谳（np210）.md`）：
+//   `[X+0x128]` 是**惰性挂接槽**——X 的类 ctor(0xa00afc) 在 0xa00d20 用 `str xzr` 清零，
+//   由子系统初始化函数（含 0x9fc6e0 段）在 0x9fc8c4 挂上 0x60 字节子对象。F_wait 的退出
+//   条件①就是它。本组钩子判定卡点假设 H1（挂接函数没被触发）/H2（半路断：接口表没填齐）/
+//   H3（挂到别的对象上）：
+//   ① hook_m3_enter @ 0x9fc6f4（函数体内首次分配之前）——函数跑没跑、来时的 x19/x20/x22/x24；
+//   ② hook_m3_attach @ 0x9fc8c4（挂接点）——挂没挂、x19=管理器（与 F_wait 的 [waiter+0x38] 对号）；
+//   ③ hook_e34（F_wait）首次进入时补打接口表九槽（0x227f000+0x6a0..0x6e8 → 0x22d73xx）——
+//      静态映像里这些结构首成员全零=运行时才填；自旋时仍为 0 ⇒ 注册没发生（H2 判据）。
+static int g_n_m3_enter, g_n_m3_attach;
+
+// 接口表九槽 dump：槽值=结构指针，结构首成员=函数指针（运行时填）。
+static void m3_dump_iface(uint64_t base) {
+    static const uint32_t offs[] = {0x6a0,0x6a8,0x6b0,0x6b8,0x6c0,0x6c8,0x6d0,0x6d8,0x6e8};
+    char l[224];
+    for (unsigned i = 0; i < sizeof offs / sizeof offs[0]; i++) {
+        uint64_t slot = 0, fn = 0;
+        int ok1 = k_read_ok((const void *)(base + 0x227f000 + offs[i]), &slot, 8);
+        int ok2 = (ok1 && slot) ? k_read_ok((const void *)slot, &fn, 8) : 0;
+        snprintf(l, sizeof l, "  iface[+%#x]=%#llx → fn=%#llx（槽%s fn%s）\n",
+                 offs[i], (unsigned long long)slot, (unsigned long long)fn,
+                 ok1 ? "OK" : "败", ok2 ? "OK" : (ok1 && slot ? "败" : "-"));
+        note_append("dm_gate.txt", l);
+    }
+}
+
+// 0x9fc6f4：bl 0x9f33f0（首次分配）之前。此时 x19/x20/x22/x24 还是调用方传进来的值。
+static uint64_t hook_m3_enter(uint64_t *f) {
+    if (++g_n_m3_enter <= 8) {
+        char l[256];
+        snprintf(l, sizeof l, "M3挂接#%d 子系统初始化进入：x19=%#llx x20=%#llx x22=%#llx x24=%#llx\n",
+                 g_n_m3_enter, (unsigned long long)f[FR_X19], (unsigned long long)f[FR_X20],
+                 (unsigned long long)f[FR_X22], (unsigned long long)f[FR_X24]);
+        note_append("dm_gate.txt", l);
+        if (g_n_m3_enter == 1) {
+            note_append("dm_gate.txt", "M3 接口表（挂接函数进入时）：\n");
+            m3_dump_iface((uint64_t)(uintptr_t)g_k_m.base);
+        }
+    }
+    return 0;
+}
+
+// 0x9fc8c4：str x23,[x19,#0x128] —— 惰性挂接点。x19=管理器 x23=新子对象。
+static uint64_t hook_m3_attach(uint64_t *f) {
+    if (++g_n_m3_attach <= 8) {
+        uint64_t mgr = f[FR_X19], sub = f[FR_X23];
+        char l[256];
+        snprintf(l, sizeof l, "M3挂接点#%d [x19+0x128] <- %#llx（管理器 x19=%#llx）\n",
+                 g_n_m3_attach, (unsigned long long)sub, (unsigned long long)mgr);
+        note_append("dm_gate.txt", l);
+        // 对号：管理器 +0 应是主 vt（img+0x21b5d40）；不是 ⇒ 挂到了别的对象上（H3）
+        uint64_t vt = 0;
+        if (k_read_ok((const void *)mgr, &vt, 8)) {
+            uint64_t base = (uint64_t)(uintptr_t)g_k_m.base;
+            int in = (vt >= base && vt < base + DM_IMG_MAIN_END);
+            snprintf(l, sizeof l, "  管理器 vt=%s%#llx（期望 img+0x21b5d40）\n",
+                     in ? "img+" : "外",
+                     (unsigned long long)(in ? vt - base : vt));
+            note_append("dm_gate.txt", l);
+        }
+    }
+    return 0;
+}
+
+// ===== np210 实验 B（第二轮）：门态 + 图形初始化入口 + 两个备选挂点 =====
+// 第一轮判读（见 np210 文档）：挂接函数体（0x9fc6f4 起）从未执行；离线定谳表明它是
+// **图形/显示初始化 0x9fc450**，唯一调用点 0x7355a0 之前有一道门
+// （0x735574 `cbz x0`——x0 = 单例 getter 0x1074b50 的返回值，空则整个图形初始化被跳过）。
+// 单例 getter 读两个句柄变量（img+0x232f9e8 / img+0x232f9f0，经静态句柄槽
+// 0x2289e60/0x2289e68 间接），静态为 0、无静态写入者 ⇒ 运行时创建。
+// 本轮四钩：
+//   ① hook_m3_gate  @ 0x735574（cbz 站点，x0=getter 结果）——门到底跳不跳；
+//      首次调用时把两个句柄变量 dump 出来（自旋时是否为 0）。
+//   ② hook_m3_ginit @ 0x9fc450（图形初始化入口）——被进入过没有。
+//   ③ hook_m3_alt1  @ 0x9fdaf8（兄弟类 ctor 里的 +0x128 写）——备选挂点跑没跑。
+//   ④ hook_m3_alt2  @ 0x9ffbd8（另一处 +0x128 写）——备选挂点跑没跑。
+static int g_n_m3_gate, g_n_m3_ginit, g_n_m3_alt1, g_n_m3_alt2;
+
+// dump 两个单例句柄变量：*(0x2289e68) → var1；*(0x2289e60) → var2（句柄槽静态指向 bss 变量）
+static void m3_dump_singletons(uint64_t base) {
+    char l[256];
+    const uint64_t slots[2] = {0x2289e68, 0x2289e60};
+    for (int i = 0; i < 2; i++) {
+        uint64_t h = 0, v = 0;
+        int ok1 = k_read_ok((const void *)(base + slots[i]), &h, 8);
+        int ok2 = (ok1 && h) ? k_read_ok((const void *)h, &v, 8) : 0;
+        snprintf(l, sizeof l, "  单例句柄[%#x]=%#llx → 变量=%#llx（%s）\n",
+                 slots[i], (unsigned long long)h, (unsigned long long)v,
+                 ok2 ? (v ? "非空" : "空") : "读败");
+        note_append("dm_gate.txt", l);
+    }
+}
+
+// 0x735574：bl 0x1074b50 之后的 cbz——x0 = 单例 getter 的返回值（0 = 门跳走、图形初始化被跳过）
+static uint64_t hook_m3_gate(uint64_t *f) {
+    if (++g_n_m3_gate <= 8) {
+        char l[224];
+        snprintf(l, sizeof l, "M3门#%d getter 结果=%#llx（%s）\n",
+                 g_n_m3_gate, (unsigned long long)f[FR_X0],
+                 f[FR_X0] ? "非空⇒放行" : "空⇒跳过图形初始化");
+        note_append("dm_gate.txt", l);
+        if (g_n_m3_gate == 1) {
+            note_append("dm_gate.txt", "M3 单例句柄（门处）：\n");
+            m3_dump_singletons((uint64_t)(uintptr_t)g_k_m.base);
+        }
+    }
+    return 0;
+}
+
+// 0x9fc450：图形/显示初始化入口（序言 stp x28,x27,[sp,#-0x60]!）
+static uint64_t hook_m3_ginit(uint64_t *f) {
+    if (++g_n_m3_ginit <= 4) {
+        char l[224];
+        snprintf(l, sizeof l, "M3图形初始化#%d 进入：x0=%#llx x1=%#llx x2=%#llx\n",
+                 g_n_m3_ginit, (unsigned long long)f[FR_X0],
+                 (unsigned long long)f[FR_X1], (unsigned long long)f[FR_X2]);
+        note_append("dm_gate.txt", l);
+    }
+    return 0;
+}
+
+// 0x9fdaf8：兄弟类 ctor 内的 +0x128 写（备选挂点一）
+static uint64_t hook_m3_alt1(uint64_t *f) {
+    if (++g_n_m3_alt1 <= 8) {
+        char l[224];
+        snprintf(l, sizeof l, "M3备选一#%d [x20+0x128] <- %#llx（对象 x20=%#llx）\n",
+                 g_n_m3_alt1, (unsigned long long)f[FR_X8], (unsigned long long)f[FR_X20]);
+        note_append("dm_gate.txt", l);
+    }
+    return 0;
+}
+
+// 0x9ffbd8：另一处 +0x128 写（备选挂点二）
+static uint64_t hook_m3_alt2(uint64_t *f) {
+    if (++g_n_m3_alt2 <= 8) {
+        char l[224];
+        snprintf(l, sizeof l, "M3备选二#%d [x20+0x128] <- %#llx（对象 x20=%#llx）\n",
+                 g_n_m3_alt2, (unsigned long long)f[FR_X24], (unsigned long long)f[FR_X20]);
+        note_append("dm_gate.txt", l);
+    }
+    return 0;
+}
+
+// ===== np210 实验 C（第三轮）：X 类槽30方法入口 + X 的工厂入口 =====
+// 第二轮判读：X 的 +0x128 应由 X 类虚方法 0x9fd858（vt 0x21b5d40 槽30/+0xf0）初始化
+// （其函数体内 0x9fdaf8 写内嵌子对象 vt）——round2 它对另外 3 个同类对象跑过，独独漏了 X。
+// 注意 0x9fdaf8 是函数中段，若方法有分支提前返回，中段钩子会漏 ⇒ 本轮挂**入口**：
+//   ① hook_m3_m30 @ 0x9fd858——每次调用打 x0（对象）+ x30（派发者），看 X 收没收到、谁派发；
+//   ② hook_m3_fac  @ 0xa00f90——X 的工厂入口，打 x0（父对象）+ x30（创建者），看 X 谁建的。
+// 两个地址都是函数序言（stp），安全可挂。
+static int g_n_m3_m30, g_n_m3_fac;
+
+static uint64_t hook_m3_m30(uint64_t *f) {
+    if (++g_n_m3_m30 <= 16) {
+        uint64_t lr = f[FR_X30];
+        uint64_t base = (uint64_t)(uintptr_t)g_k_m.base;
+        char l[224];
+        snprintf(l, sizeof l, "M3方法30#%d 对象=%#llx 派发者=%s%#llx\n",
+                 g_n_m3_m30, (unsigned long long)f[FR_X0],
+                 (lr >= base && lr < base + DM_IMG_MAIN_END) ? "img+" : "外",
+                 (unsigned long long)((lr >= base && lr < base + DM_IMG_MAIN_END) ? lr - base : lr));
+        note_append("dm_gate.txt", l);
+    }
+    return 0;
+}
+
+static uint64_t hook_m3_fac(uint64_t *f) {
+    if (++g_n_m3_fac <= 6) {
+        uint64_t lr = f[FR_X30];
+        uint64_t base = (uint64_t)(uintptr_t)g_k_m.base;
+        char l[224];
+        snprintf(l, sizeof l, "M3工厂#%d 父对象=%#llx 创建者=%s%#llx\n",
+                 g_n_m3_fac, (unsigned long long)f[FR_X0],
+                 (lr >= base && lr < base + DM_IMG_MAIN_END) ? "img+" : "外",
+                 (unsigned long long)((lr >= base && lr < base + DM_IMG_MAIN_END) ? lr - base : lr));
+        note_append("dm_gate.txt", l);
+    }
+    return 0;
+}
+
 static uint64_t hook_e34(uint64_t *f) {
     if (++g_n_e34 <= 8) {
         uint64_t lr = f[FR_X30];
@@ -3771,6 +3952,13 @@ static uint64_t hook_e34(uint64_t *f) {
                  (lr >= base && lr < base + DM_IMG_MAIN_END) ? "img+" : "外",
                  (unsigned long long)((lr >= base && lr < base + DM_IMG_MAIN_END) ? lr - base : lr));
         note_append("dm_gate.txt", l);
+
+        // np210：F_wait 首次自旋时打接口表九槽——与"挂接函数进入时"的 dump 对照，
+        // 看注册到底发生在哪个时间点（H2 判据：自旋时仍全零 ⇒ 注册从未发生）。
+        if (g_n_e34 == 1) {
+            note_append("dm_gate.txt", "M3 接口表（F_wait 首次自旋时）：\n");
+            m3_dump_iface(base);
+        }
 
         // ★ 2026-10-22（M3 关键一问）：F_wait 的退出条件是 [waiter+0x38]→[+0x128] 或 [waiter+0x50]。
         //   **前两次进入**就把这两条读出来，并把 [waiter+0x38] 指向的对象头 dump 16 个字——
@@ -6220,6 +6408,22 @@ static void exp_k(const char *files_dir, char *out, size_t cap, size_t *used) {
         k_install_hook(img, 0xa01514, (void *)hook_e32, "np185 任务 vt+0x50 0xa01514");
         k_install_hook(img, 0xa01570, (void *)hook_e33, "np185 类目 0xa00804 调用点 0xa01570");
         k_install_hook(img, 0x9feb3c, (void *)hook_e34, "np185 F_wait 入口 0x9feb3c（打调用者 x30）");
+        // np210 实验 A：M3 惰性挂接链验证（0x9fc6f4 函数体内首次分配前 / 0x9fc8c4 挂接点）。
+        // 判据落 dm_gate.txt：enter 不响 = H1（没触发）；enter 响 attach 不响 = H2（半路断）；
+        // attach 响但管理器 vt 不是 0x21b5d40 = H3（挂错对象）。接口表 dump 见 hook_e34。
+        k_install_hook(img, 0x9fc6f4, (void *)hook_m3_enter, "np210 子系统初始化 0x9fc6f4（首次分配前）");
+        k_install_hook(img, 0x9fc8c4, (void *)hook_m3_attach, "np210 挂接点 0x9fc8c4（[x19+0x128]<-x23）");
+        // np210 实验 B（第二轮）：门态 + 图形初始化入口 + 两个备选挂点。
+        // 第一轮已定谳"挂接函数体没跑"；离线追出它 = 图形/显示初始化 0x9fc450，
+        // 唯一调用点 0x7355a0 前有单例门（0x735574 cbz）。本轮看门跳不跳、单例空不空、
+        // 图形初始化进没进、另外两个 +0x128 写点跑没跑。
+        k_install_hook(img, 0x735574, (void *)hook_m3_gate, "np210 单例门 0x735574（cbz，x0=getter结果）");
+        k_install_hook(img, 0x9fc450, (void *)hook_m3_ginit, "np210 图形初始化入口 0x9fc450");
+        k_install_hook(img, 0x9fdaf8, (void *)hook_m3_alt1, "np210 备选挂点一 0x9fdaf8（兄弟类ctor +0x128）");
+        k_install_hook(img, 0x9ffbd8, (void *)hook_m3_alt2, "np210 备选挂点二 0x9ffbd8（+0x128）");
+        // np210 实验 C（第三轮）：X 类槽30方法入口（谁派发、X 收没收到）+ X 的工厂入口（X 谁建的）。
+        k_install_hook(img, 0x9fd858, (void *)hook_m3_m30, "np210 X类槽30方法入口 0x9fd858");
+        k_install_hook(img, 0xa00f90, (void *)hook_m3_fac, "np210 X工厂入口 0xa00f90");
         // np133：装载 sdk（M1）。失败不致命：装载不了就全走宿主实现，行为与之前一致。
         if (k_load_sdk() != 0)
             klog("[sdk] 未装载（继续用宿主实现，行为不变）\n");
