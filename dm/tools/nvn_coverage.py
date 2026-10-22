@@ -21,6 +21,7 @@ REPO = os.path.abspath(os.path.join(HERE, '..', '..'))
 IMPL_FILES = [
     'dm/ohos/dm_nvn_ohos.c',
     'dm/ohos/dm_nvn_vk.c',
+    'dm/ohos/dm_nvn_state_ohos.c',   # M4-a：状态族 77 个
     'dm/gfx/nvn/nvn_vk.c',
     'dm/gfx/nvn/nvn_tex.c',
 ]

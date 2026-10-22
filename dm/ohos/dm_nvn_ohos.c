@@ -1,6 +1,7 @@
 // 通用 NVN 胶水层实现（见头文件顶部的定位说明）。
 // Implementation of the general NVN glue layer (see the header).
 #include "dm_nvn_ohos.h"
+#include "dm_nvn_state_ohos.h"   // M4-a：状态族（纯数据）
 
 #include <stddef.h>
 #include <string.h>
@@ -101,6 +102,10 @@ void dm_nvn_set_extra(void *(*fn)(const char *name)) { g_extra_lookup = fn; }
 void *dm_nvn_bootstrap(const char *name) {
     if (!name || !*name) return NULL;
     void *fn = dm_nvn_real(name);
+    if (fn) return fn;
+    // M4-a（2026-10-22）：状态族 77 个（纯数据）。放在正式表之后、外部查找之前：
+    // 正式表里已有同名实现时不覆盖（先到先得），外部查找是最后兜底。
+    fn = dm_nvn_state_lookup(name);
     if (fn) return fn;
     if (g_extra_lookup) return g_extra_lookup(name);
     return NULL;
