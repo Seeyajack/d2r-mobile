@@ -2,6 +2,7 @@
 // Implementation of the general NVN glue layer (see the header).
 #include "dm_nvn_ohos.h"
 #include "dm_nvn_state_ohos.h"   // M4-a：状态族（纯数据）
+#include "dm_nvn_dev_ohos.h"     // M4-c：设备/窗口/队列
 
 #include <stddef.h>
 #include <string.h>
@@ -106,6 +107,9 @@ void *dm_nvn_bootstrap(const char *name) {
     // M4-a（2026-10-22）：状态族 77 个（纯数据）。放在正式表之后、外部查找之前：
     // 正式表里已有同名实现时不覆盖（先到先得），外部查找是最后兜底。
     fn = dm_nvn_state_lookup(name);
+    if (fn) return fn;
+    // M4-c（2026-10-22）：设备/窗口/队列（首帧前置）。
+    fn = dm_nvn_dev_lookup(name);
     if (fn) return fn;
     if (g_extra_lookup) return g_extra_lookup(name);
     return NULL;

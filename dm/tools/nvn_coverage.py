@@ -22,6 +22,7 @@ IMPL_FILES = [
     'dm/ohos/dm_nvn_ohos.c',
     'dm/ohos/dm_nvn_vk.c',
     'dm/ohos/dm_nvn_state_ohos.c',   # M4-a：状态族 77 个
+    'dm/ohos/dm_nvn_dev_ohos.c',     # M4-c：设备/窗口/队列
     'dm/gfx/nvn/nvn_vk.c',
     'dm/gfx/nvn/nvn_tex.c',
 ]
