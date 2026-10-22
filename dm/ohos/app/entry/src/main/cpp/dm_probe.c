@@ -2089,6 +2089,19 @@ static void ktrace_plt(int idx, uint64_t a0, uint64_t a1);
 // np175：绕过日志预算的专用写（定义在后面；plt_stub 要用它记"建-信号循环"的调用点）
 static void note_append(const char *name, const char *line);
 
+// np213：StandardAllocator 的外部状态表（this → 池），plt_stub 用（C 无嵌套函数）
+static struct { uint64_t self, base, size, used; } g_sa[8];
+static int g_sa_n;
+static int sa_lookup(uint64_t self, int create) {
+    for (int i = 0; i < g_sa_n; i++) if (g_sa[i].self == self) return i;
+    if (create && g_sa_n < 8) {
+        g_sa[g_sa_n].self = self; g_sa[g_sa_n].base = 0;
+        g_sa[g_sa_n].size = 0; g_sa[g_sa_n].used = 0;
+        return g_sa_n++;
+    }
+    return -1;
+}
+
 static uint64_t plt_stub(void) {
     uint64_t x16v, a0, a1, a2, a3;
     __asm__ volatile("mov %0, x16" : "=r"(x16v));
@@ -2182,6 +2195,141 @@ static uint64_t plt_stub(void) {
                      (unsigned long long)(in ? lr - b2 : lr));
             }
             return (uint64_t)(uintptr_t)g_host_argv;
+        }
+        // ═══ np213：nxnative 对齐的 SDK 服务桩（交叉比对出的 25 个精确缺口）═══
+        // 依据：nxnative（同源分支，MIT）docs/agents/03-bringup.md 第 75 行坐实——
+        //   BotW 1.9.0（SDK 20.5.22）的 nfp 一族在 sdk+0x3f2a78 读空指针崩。
+        // 交叉方法：我们 expect_scan 的"返 0 走失败分支"高风险表 ∩ nxnative 真实现
+        //   = 25 个符号；这 25 个在我们 plt_stub 里**一个都没有**（全落通用存根）。
+        // 判读要点：多数是 Result 型（0 = RES_OK = 成功）——返 0 本身没错，
+        //   错在**不填输出参数**：ListDevices 不写设备、GetDebugPadState 不清零、
+        //   OpenAudioRenderer 不写 handle、GetState 该返 1、WorkBufferSize 该返真大小。
+        //   游戏读到垃圾 ⇒ 走"无设备/未初始化"分支 ⇒ 初始化链断在看不见的地方。
+        // ── nfp（amiibo）：宿主无 NFC 读卡器，报"一个设备但永远找不到 tag"（与真机无 amiibo 同）──
+        if (!strcmp(nm, "_ZN2nn3nfp10InitializeEv")) { klog("[nfp] Initialize：一个 NFC 设备，找不到 tag\n"); return 0; }
+        if (!strcmp(nm, "_ZN2nn3nfp8GetStateEv")) return 1;                 // 库状态 1 = 已初始化
+        if (!strcmp(nm, "_ZN2nn3nfp11ListDevicesEPNS0_12DeviceHandleEPii")) {
+            // (out, *n, max)：写一个设备（8 字节 {u32 id, u8[4] reserved}），*n = 1
+            if (a0 && a2 >= 1) { memset((void *)(uintptr_t)a0, 0, 8);
+                *(uint32_t *)(uintptr_t)a0 = 0x4e465030u; /* 'NFP0' */ }
+            if (a1) *(int *)(uintptr_t)a1 = (a2 >= 1) ? 1 : 0;
+            klog("[nfp] ListDevices → 1 个设备（max=%lld）\n", (long long)a2);
+            return 0;
+        }
+        if (!strcmp(nm, "_ZN2nn3nfp9GetNpadIdEPjRKNS0_12DeviceHandleE")) {
+            if (a0) *(uint32_t *)(uintptr_t)a0 = 0;                          // 手柄 0（当前连接）
+            return 0;
+        }
+        if (!strcmp(nm, "_ZN2nn3nfp14GetDeviceStateERKNS0_12DeviceHandleE")) return 0;  // 0=已初始化 1=搜索中
+        if (!strcmp(nm, "_ZN2nn3nfp14StartDetectionERKNS0_12DeviceHandleE")) return 0;
+        if (!strcmp(nm, "_ZN2nn3nfp13StopDetectionERKNS0_12DeviceHandleE")) return 0;
+        if (!strcmp(nm, "_ZN2nn3nfp19AttachActivateEventEPNS_2os15SystemEventTypeERKNS0_12DeviceHandleE") ||
+            !strcmp(nm, "_ZN2nn3nfp21AttachDeactivateEventEPNS_2os15SystemEventTypeERKNS0_12DeviceHandleE") ||
+            !strcmp(nm, "_ZN2nn3nfp29AttachAvailabilityChangeEventEPNS_2os15SystemEventTypeE")) {
+            // 事件"已附着但永不触发"：BotW 是轮询 GetDeviceState，不阻塞等它（nxnative 同做法）
+            static int n_ev; if (++n_ev <= 3) klog("[nfp] 附着事件 %p（永不触发，游戏轮询状态）\n", (void *)(uintptr_t)a0);
+            return 0;
+        }
+        if (!strcmp(nm, "_ZN2nn3nfp8FinalizeEv")) return 0;
+        // 需要 tag 的操作：一律"找不到 tag"（Result = 115 | 97<<9）
+        if (!strncmp(nm, "_ZN2nn3nfp", 10)) {
+            static int n_nt; if (++n_nt <= 4) klog("[nfp] %s → 无 tag\n", nm + 10);
+            return (uint64_t)(115u | (97u << 9));
+        }
+        // ── hid：调试手柄状态必须**清零**（每项 32 字节）──
+        if (!strcmp(nm, "_ZN2nn3hid16GetDebugPadStateEPNS0_13DebugPadStateE")) {
+            if (a0) memset((void *)(uintptr_t)a0, 0, 32);
+            static int n_dp; if (++n_dp <= 3) klog("[hid] GetDebugPadState → 未连接（32 字节清零）\n");
+            return 0;
+        }
+        if (!strcmp(nm, "_ZN2nn3hid17GetDebugPadStatesEPNS0_13DebugPadStateEi")) {
+            if (a0 && a1 > 0) memset((void *)(uintptr_t)a0, 0, (size_t)a1 * 32);
+            static int n_dps; if (++n_dps <= 3) klog("[hid] GetDebugPadStates(%lld) → 全未连接\n", (long long)a1);
+            return 0;
+        }
+        if (!strcmp(nm, "_ZN2nn3hid21ShowControllerSupportERKNS0_20ControllerSupportArgE")) return 0;
+        // ── audio：handle / 工作缓冲大小 / 通道数 必须给真值 ──
+        if (!strcmp(nm, "_ZN2nn5audio17OpenAudioRendererEPNS0_19AudioRendererHandleEPNS_2os11SystemEventERKNS0_22AudioRendererParameterEPvm")) {
+            static uint64_t s_ar_handle = 0x41554430ull;   // 'AUD0' 假句柄
+            if (a0) *(uint64_t *)(uintptr_t)a0 = s_ar_handle;
+            klog("[audio] OpenAudioRenderer → 假句柄 %#llx（参数 %p）\n",
+                 (unsigned long long)s_ar_handle, (void *)(uintptr_t)a2);
+            return 0;
+        }
+        if (!strcmp(nm, "_ZN2nn5audio30GetAudioRendererWorkBufferSizeERKNS0_22AudioRendererParameterE") ||
+            !strcmp(nm, "_ZN2nn5audio36GetAudioRendererConfigWorkBufferSizeERKNS0_22AudioRendererParameterE")) {
+            static int n_wb; if (++n_wb <= 3) klog("[audio] WorkBufferSize → 0x40000\n");
+            return 0x40000;                                  // 256KB：够 Wwise/sead 起混音器
+        }
+        if (!strcmp(nm, "_ZN2nn5audio21GetActiveChannelCountEv")) return 2;
+        if (!strcmp(nm, "_ZN2nn5audio36AcquireAudioDeviceSwitchNotificationEPNS_2os11SystemEventE")) return 0;
+        // ── diag：符号名/回溯必须写缓冲（不写 ⇒ 游戏读到垃圾当函数名）──
+        if (!strcmp(nm, "_ZN2nn4diag13GetSymbolNameEPcmm")) {
+            if (a0 && a1 > 0) ((char *)(uintptr_t)a0)[0] = 0;   // 空串
+            return 0;
+        }
+        if (!strcmp(nm, "_ZN2nn4diag12GetBacktraceEPmm")) {
+            if (a1) *(uint64_t *)(uintptr_t)a1 = 0;              // 深度 0
+            return 0;
+        }
+        if (!strcmp(nm, "_ZN2nn4diag34InitializeApplicationAbortObserverEv")) return 0;
+        // ── image：JPEG 编解码器的工作缓冲大小（返 0 ⇒ 游戏分配 0 字节 ⇒ 后续越界）──
+        if (!strcmp(nm, "_ZNK2nn5image11JpegEncoder25GetAnalyzedWorkBufferSizeEv")) return 0x10000;
+        if (!strcmp(nm, "_ZN2nn5image11JpegEncoder7AnalyzeEv") ||
+            !strcmp(nm, "_ZN2nn5image11JpegDecoder7AnalyzeEv")) return 0;
+        // ── nn::mem::StandardAllocator：**游戏自有分配器的底座，必须真实现** ──
+        // 依据（np213）：nxnative 对它是从 sdk 模块解析**真实现**（加载了全模块）；
+        //   我们只装 main ⇒ 8 个符号全落通用存根 ⇒ Initialize 什么都不做、
+        //   Allocate 返 0 ⇒ 游戏 `operator new` 全拿 null ⇒ 对象构造静默跳过
+        //   ⇒ 「某个对象永远不存在」类症状（X+0x128 无人设就是这一类）。
+        // 实现：外部表记 this→{base,size,used}，Allocate 走 bump（不回收，够用）；
+        //   **绝不碰 this 指向的内存**（布局未知），只用外部表。
+        if (!strncmp(nm, "_ZN2nn3mem17StandardAllocator", 29)) {
+            // Initialize(this, mem, size) / C1(this, mem, size)
+            if (!strcmp(nm, "_ZN2nn3mem17StandardAllocator10InitializeEPvm") ||
+                !strcmp(nm, "_ZN2nn3mem17StandardAllocatorC1EPvm")) {
+                int i = sa_lookup(a0, 1);
+                if (i >= 0) { g_sa[i].base = a1; g_sa[i].size = a2; g_sa[i].used = 0; }
+                klog("[mem] StandardAllocator::Initialize(this=%p, 内存=%p, 大小=%#llx)\n",
+                     (void *)(uintptr_t)a0, (void *)(uintptr_t)a1, (unsigned long long)a2);
+                return 0;
+            }
+            if (!strcmp(nm, "_ZN2nn3mem17StandardAllocatorC1Ev")) {
+                sa_lookup(a0, 1);
+                klog("[mem] StandardAllocator 默认构造(this=%p)\n", (void *)(uintptr_t)a0);
+                return 0;
+            }
+            // Allocate(this, size) / Allocate(this, size, align)
+            if (!strcmp(nm, "_ZN2nn3mem17StandardAllocator8AllocateEm") ||
+                !strcmp(nm, "_ZN2nn3mem17StandardAllocator8AllocateEmm")) {
+                uint64_t align = (nm[34] == 'E' && nm[35] == 'm' && nm[36] == 'm') ? a2 : 16;
+                if (align < 16) align = 16;
+                int i = sa_lookup(a0, 1);
+                if (i < 0) return 0;
+                uint64_t p = (g_sa[i].base + g_sa[i].used + align - 1) & ~(align - 1);
+                if (!g_sa[i].base || p + a1 > g_sa[i].base + g_sa[i].size) {
+                    static int n_ovf; if (++n_ovf <= 5)
+                        klog("[mem] ⚠ Allocate(%#llx) 超出池：base=%p size=%#llx used=%#llx ⇒ 退回 calloc\n",
+                             (unsigned long long)a1, (void *)(uintptr_t)g_sa[i].base,
+                             (unsigned long long)g_sa[i].size, (unsigned long long)g_sa[i].used);
+                    return (uint64_t)(uintptr_t)calloc(1, (size_t)a1);   // 池没初始化：退回宿主堆
+                }
+                g_sa[i].used = (p - g_sa[i].base) + a1;
+                return p;
+            }
+            if (!strcmp(nm, "_ZN2nn3mem17StandardAllocator4FreeEPv")) return 0;   // bump：不回收
+            if (!strcmp(nm, "_ZN2nn3mem17StandardAllocator10ReallocateEPvm")) {
+                // (this, ptr, size)：不知原大小 ⇒ 新分配 + 拷贝 min(旧,新)（旧大小未知，按新大小拷）
+                int i = sa_lookup(a0, 1);
+                if (i < 0) return 0;
+                uint64_t p = (g_sa[i].base + g_sa[i].used + 15) & ~15ull;
+                if (!g_sa[i].base || p + a2 > g_sa[i].base + g_sa[i].size)
+                    return (uint64_t)(uintptr_t)calloc(1, (size_t)a2);
+                g_sa[i].used = (p - g_sa[i].base) + a2;
+                if (a1 && p) memcpy((void *)(uintptr_t)p, (const void *)(uintptr_t)a1, (size_t)a2);
+                return p;
+            }
+            if (!strcmp(nm, "_ZN2nn3mem17StandardAllocator8FinalizeEv")) return 0;
         }
         // ═══ 线程 / TLS / 互斥（2026-10-18 改造：真 pthread）═══
         // nn::os::CreateThread(ThreadType*, entry, arg, stack, stack_size, prio)
@@ -4206,6 +4354,14 @@ static uint64_t hook_m3_fac(uint64_t *f) {
     return 0;
 }
 
+// np212：X+0x128 代填桩的虚方法——一律"无事发生"（返 0），与 k_gate_stub 同语义。
+static int g_x128_stub_calls;
+static uint64_t x128_stub_method(void) {
+    if (++g_x128_stub_calls <= 8)
+        klog("[np212] X+0x128 桩虚方法第 %d 次被调\n", g_x128_stub_calls);
+    return 0;
+}
+
 static uint64_t hook_e34(uint64_t *f) {
     if (++g_n_e34 <= 8) {
         uint64_t lr = f[FR_X30];
@@ -4254,6 +4410,39 @@ static uint64_t hook_e34(uint64_t *f) {
                              (unsigned long long)hdr[12], (unsigned long long)hdr[13],
                              (unsigned long long)hdr[14], (unsigned long long)hdr[15]);
                     note_append("dm_gate.txt", l);
+                }
+            }
+        }
+    }
+    // ★★★ np212 实验 A（用户 2026-10-23 02:33 批准）：**代填 X+0x128 让游戏冲过去** ★★★
+    // 依据：np188 实验 I 已实证——强行置位 X+0x128 后任务生命周期全程跑通
+    // （插入→激活→执行→完成→销毁），崩点在销毁路径（可另外伺候）。
+    // 与其继续查"谁该设它"（已查 20+ 轮无果），不如先盖章让游戏前进：
+    //   · 冲过去 ⇒ M3 真正的问题当场暴露（新阶段日志/新崩溃点）；
+    //   · 崩了 ⇒ 崩溃点直接告诉我们这个字段该长什么样。
+    // 桩对象：合法 vtable + 全部虚方法返 0（F_wait 只查非零；退出后游戏拿它走虚调用，
+    // 返回 0 是最保守的"无事发生"语义，与 k_gate_stub 一致）。
+    // 注意：本段在 g_n_e34<=8 限制**之外**——每轮 F_wait 都检查，直到填上。
+    {
+        static uint64_t stub_obj[0x40];
+        static uint64_t stub_vt[0x40];
+        static int stub_ready, fill_n;
+        if (!stub_ready) {
+            for (int i = 0; i < 0x40; i++) stub_vt[i] = (uint64_t)(uintptr_t)&x128_stub_method;
+            stub_obj[0] = (uint64_t)(uintptr_t)&stub_vt[0];
+            stub_obj[1] = (uint64_t)(uintptr_t)&stub_obj[0];   // 自指（与 g_alloc_obj 同构）
+            stub_ready = 1;
+        }
+        uint64_t sub = 0, v128 = 0;
+        if (k_read_ok((const void *)(uintptr_t)(f[FR_X0] + 0x38), &sub, 8) && sub) {
+            if (k_read_ok((const void *)(uintptr_t)(sub + 0x128), &v128, 8) && v128 == 0) {
+                *(uint64_t *)(uintptr_t)(sub + 0x128) = (uint64_t)(uintptr_t)&stub_obj[0];
+                if (++fill_n <= 8) {
+                    char l[224];
+                    snprintf(l, sizeof l, "np212代填#%d X=%#llx +0x128 0 → 桩 %p（F_wait 放行）\n",
+                             fill_n, (unsigned long long)sub, (void *)&stub_obj[0]);
+                    note_append("dm_gate.txt", l);
+                    klog("[np212] 代填 X+0x128：X=%p → 桩对象\n", (void *)sub);
                 }
             }
         }
