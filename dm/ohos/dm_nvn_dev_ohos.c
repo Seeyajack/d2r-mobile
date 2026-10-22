@@ -18,6 +18,7 @@
 #include <string.h>
 #include <stdint.h>
 #include "dm_nvn_dev_ohos.h"
+#include "dm_nvn_cb_ohos.h"   // 提交时取 CB 摘要
 
 // ── 旁表：一个对象一条记录，字段按对象类型各自解释 ──
 #define OBJ_MAX 96
@@ -32,6 +33,10 @@ static int g_nobj;
 // 只用于打点/判据的计数器（真机日志里能看到真实调用序列）
 uint64_t g_nvn_win_init, g_nvn_win_acquire, g_nvn_q_init, g_nvn_q_submit, g_nvn_q_present,
          g_nvn_q_finish, g_nvn_q_flush, g_nvn_dev_ts;
+
+// 提交摘要滚动缓冲（供探针读取；每批最多 4 条）
+char g_nvn_submit_log[8][160];
+int  g_nvn_submit_n;
 
 static obj_ent *obj_find(const void *p, int create) {
     if (!p) return NULL;
@@ -234,8 +239,18 @@ static uint64_t q_reset_counts(uint64_t q, uint64_t b, uint64_t c, uint64_t d) {
 // SubmitCommands(Queue*, int num, CommandBuffer const* const*)：记账 + 返回成功。
 // **不真提交**——记录层还没落地（CommandBuffer 127 个函数只做了状态侧）。
 static uint64_t q_submit(uint64_t q, uint64_t num, uint64_t bufs, uint64_t d) {
-    (void)bufs; (void)d;
+    (void)q; (void)d;
     g_nvn_q_submit += (num ? num : 1);
+    // 把这批 CB 的命令摘要记下来（滚动 8 条）。**这是 M4-c 的判据**：
+    // 真机日志里能看到"游戏每帧记了哪些命令、各几次"，据此才知道该先实现哪几条。
+    if (bufs && num) {
+        uint64_t n = num > 4 ? 4 : num;
+        for (uint64_t i = 0; i < n; i++) {
+            uint64_t cb = *(uint64_t *)(uintptr_t)(bufs + i * 8);
+            dm_nvn_cb_summary((void *)(uintptr_t)cb, g_nvn_submit_log[g_nvn_submit_n % 8], 160);
+            g_nvn_submit_n++;
+        }
+    }
     return 0;
 }
 // PresentTexture(Queue*, Window*, int slot)：记账；真呈现要等交换链。

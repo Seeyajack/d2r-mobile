@@ -3,6 +3,7 @@
 #include "dm_nvn_ohos.h"
 #include "dm_nvn_state_ohos.h"   // M4-a：状态族（纯数据）
 #include "dm_nvn_dev_ohos.h"     // M4-c：设备/窗口/队列
+#include "dm_nvn_cb_ohos.h"      // M4-c：命令缓冲记录层
 
 #include <stddef.h>
 #include <string.h>
@@ -110,6 +111,9 @@ void *dm_nvn_bootstrap(const char *name) {
     if (fn) return fn;
     // M4-c（2026-10-22）：设备/窗口/队列（首帧前置）。
     fn = dm_nvn_dev_lookup(name);
+    if (fn) return fn;
+    // M4-c 第二步（2026-10-22）：命令缓冲记录层 127 个。
+    fn = dm_nvn_cb_lookup(name);
     if (fn) return fn;
     if (g_extra_lookup) return g_extra_lookup(name);
     return NULL;
