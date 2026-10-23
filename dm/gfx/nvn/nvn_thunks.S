@@ -7,8 +7,8 @@
     .p2align 2
     .globl _nvnth_0
 _nvnth_0:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #0
     add x16, x16, x17
     mov x17, #1
@@ -17,8 +17,8 @@ _nvnth_0:
     br x17
     .globl _nvnth_1
 _nvnth_1:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #16
     add x16, x16, x17
     mov x17, #1
@@ -27,8 +27,8 @@ _nvnth_1:
     br x17
     .globl _nvnth_2
 _nvnth_2:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #32
     add x16, x16, x17
     mov x17, #1
@@ -37,8 +37,8 @@ _nvnth_2:
     br x17
     .globl _nvnth_3
 _nvnth_3:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #48
     add x16, x16, x17
     mov x17, #1
@@ -47,8 +47,8 @@ _nvnth_3:
     br x17
     .globl _nvnth_4
 _nvnth_4:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #64
     add x16, x16, x17
     mov x17, #1
@@ -57,8 +57,8 @@ _nvnth_4:
     br x17
     .globl _nvnth_5
 _nvnth_5:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #80
     add x16, x16, x17
     mov x17, #1
@@ -67,8 +67,8 @@ _nvnth_5:
     br x17
     .globl _nvnth_6
 _nvnth_6:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #96
     add x16, x16, x17
     mov x17, #1
@@ -77,8 +77,8 @@ _nvnth_6:
     br x17
     .globl _nvnth_7
 _nvnth_7:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #112
     add x16, x16, x17
     mov x17, #1
@@ -87,8 +87,8 @@ _nvnth_7:
     br x17
     .globl _nvnth_8
 _nvnth_8:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #128
     add x16, x16, x17
     mov x17, #1
@@ -97,8 +97,8 @@ _nvnth_8:
     br x17
     .globl _nvnth_9
 _nvnth_9:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #144
     add x16, x16, x17
     mov x17, #1
@@ -107,8 +107,8 @@ _nvnth_9:
     br x17
     .globl _nvnth_10
 _nvnth_10:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #160
     add x16, x16, x17
     mov x17, #1
@@ -117,8 +117,8 @@ _nvnth_10:
     br x17
     .globl _nvnth_11
 _nvnth_11:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #176
     add x16, x16, x17
     mov x17, #1
@@ -127,8 +127,8 @@ _nvnth_11:
     br x17
     .globl _nvnth_12
 _nvnth_12:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #192
     add x16, x16, x17
     mov x17, #1
@@ -137,8 +137,8 @@ _nvnth_12:
     br x17
     .globl _nvnth_13
 _nvnth_13:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #208
     add x16, x16, x17
     mov x17, #1
@@ -147,8 +147,8 @@ _nvnth_13:
     br x17
     .globl _nvnth_14
 _nvnth_14:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #224
     add x16, x16, x17
     mov x17, #1
@@ -157,8 +157,8 @@ _nvnth_14:
     br x17
     .globl _nvnth_15
 _nvnth_15:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #240
     add x16, x16, x17
     mov x17, #1
@@ -167,8 +167,8 @@ _nvnth_15:
     br x17
     .globl _nvnth_16
 _nvnth_16:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #256
     add x16, x16, x17
     mov x17, #1
@@ -177,8 +177,8 @@ _nvnth_16:
     br x17
     .globl _nvnth_17
 _nvnth_17:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #272
     add x16, x16, x17
     mov x17, #1
@@ -187,8 +187,8 @@ _nvnth_17:
     br x17
     .globl _nvnth_18
 _nvnth_18:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #288
     add x16, x16, x17
     mov x17, #1
@@ -197,8 +197,8 @@ _nvnth_18:
     br x17
     .globl _nvnth_19
 _nvnth_19:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #304
     add x16, x16, x17
     mov x17, #1
@@ -207,8 +207,8 @@ _nvnth_19:
     br x17
     .globl _nvnth_20
 _nvnth_20:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #320
     add x16, x16, x17
     mov x17, #1
@@ -217,8 +217,8 @@ _nvnth_20:
     br x17
     .globl _nvnth_21
 _nvnth_21:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #336
     add x16, x16, x17
     mov x17, #1
@@ -227,8 +227,8 @@ _nvnth_21:
     br x17
     .globl _nvnth_22
 _nvnth_22:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #352
     add x16, x16, x17
     mov x17, #1
@@ -237,8 +237,8 @@ _nvnth_22:
     br x17
     .globl _nvnth_23
 _nvnth_23:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #368
     add x16, x16, x17
     mov x17, #1
@@ -247,8 +247,8 @@ _nvnth_23:
     br x17
     .globl _nvnth_24
 _nvnth_24:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #384
     add x16, x16, x17
     mov x17, #1
@@ -257,8 +257,8 @@ _nvnth_24:
     br x17
     .globl _nvnth_25
 _nvnth_25:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #400
     add x16, x16, x17
     mov x17, #1
@@ -267,8 +267,8 @@ _nvnth_25:
     br x17
     .globl _nvnth_26
 _nvnth_26:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #416
     add x16, x16, x17
     mov x17, #1
@@ -277,8 +277,8 @@ _nvnth_26:
     br x17
     .globl _nvnth_27
 _nvnth_27:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #432
     add x16, x16, x17
     mov x17, #1
@@ -287,8 +287,8 @@ _nvnth_27:
     br x17
     .globl _nvnth_28
 _nvnth_28:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #448
     add x16, x16, x17
     mov x17, #1
@@ -297,8 +297,8 @@ _nvnth_28:
     br x17
     .globl _nvnth_29
 _nvnth_29:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #464
     add x16, x16, x17
     mov x17, #1
@@ -307,8 +307,8 @@ _nvnth_29:
     br x17
     .globl _nvnth_30
 _nvnth_30:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #480
     add x16, x16, x17
     mov x17, #1
@@ -317,8 +317,8 @@ _nvnth_30:
     br x17
     .globl _nvnth_31
 _nvnth_31:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #496
     add x16, x16, x17
     mov x17, #1
@@ -327,8 +327,8 @@ _nvnth_31:
     br x17
     .globl _nvnth_32
 _nvnth_32:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #512
     add x16, x16, x17
     mov x17, #1
@@ -337,8 +337,8 @@ _nvnth_32:
     br x17
     .globl _nvnth_33
 _nvnth_33:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #528
     add x16, x16, x17
     mov x17, #1
@@ -347,8 +347,8 @@ _nvnth_33:
     br x17
     .globl _nvnth_34
 _nvnth_34:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #544
     add x16, x16, x17
     mov x17, #1
@@ -357,8 +357,8 @@ _nvnth_34:
     br x17
     .globl _nvnth_35
 _nvnth_35:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #560
     add x16, x16, x17
     mov x17, #1
@@ -367,8 +367,8 @@ _nvnth_35:
     br x17
     .globl _nvnth_36
 _nvnth_36:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #576
     add x16, x16, x17
     mov x17, #1
@@ -377,8 +377,8 @@ _nvnth_36:
     br x17
     .globl _nvnth_37
 _nvnth_37:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #592
     add x16, x16, x17
     mov x17, #1
@@ -387,8 +387,8 @@ _nvnth_37:
     br x17
     .globl _nvnth_38
 _nvnth_38:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #608
     add x16, x16, x17
     mov x17, #1
@@ -397,8 +397,8 @@ _nvnth_38:
     br x17
     .globl _nvnth_39
 _nvnth_39:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #624
     add x16, x16, x17
     mov x17, #1
@@ -407,8 +407,8 @@ _nvnth_39:
     br x17
     .globl _nvnth_40
 _nvnth_40:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #640
     add x16, x16, x17
     mov x17, #1
@@ -417,8 +417,8 @@ _nvnth_40:
     br x17
     .globl _nvnth_41
 _nvnth_41:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #656
     add x16, x16, x17
     mov x17, #1
@@ -427,8 +427,8 @@ _nvnth_41:
     br x17
     .globl _nvnth_42
 _nvnth_42:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #672
     add x16, x16, x17
     mov x17, #1
@@ -437,8 +437,8 @@ _nvnth_42:
     br x17
     .globl _nvnth_43
 _nvnth_43:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #688
     add x16, x16, x17
     mov x17, #1
@@ -447,8 +447,8 @@ _nvnth_43:
     br x17
     .globl _nvnth_44
 _nvnth_44:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #704
     add x16, x16, x17
     mov x17, #1
@@ -457,8 +457,8 @@ _nvnth_44:
     br x17
     .globl _nvnth_45
 _nvnth_45:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #720
     add x16, x16, x17
     mov x17, #1
@@ -467,8 +467,8 @@ _nvnth_45:
     br x17
     .globl _nvnth_46
 _nvnth_46:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #736
     add x16, x16, x17
     mov x17, #1
@@ -477,8 +477,8 @@ _nvnth_46:
     br x17
     .globl _nvnth_47
 _nvnth_47:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #752
     add x16, x16, x17
     mov x17, #1
@@ -487,8 +487,8 @@ _nvnth_47:
     br x17
     .globl _nvnth_48
 _nvnth_48:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #768
     add x16, x16, x17
     mov x17, #1
@@ -497,8 +497,8 @@ _nvnth_48:
     br x17
     .globl _nvnth_49
 _nvnth_49:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #784
     add x16, x16, x17
     mov x17, #1
@@ -507,8 +507,8 @@ _nvnth_49:
     br x17
     .globl _nvnth_50
 _nvnth_50:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #800
     add x16, x16, x17
     mov x17, #1
@@ -517,8 +517,8 @@ _nvnth_50:
     br x17
     .globl _nvnth_51
 _nvnth_51:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #816
     add x16, x16, x17
     mov x17, #1
@@ -527,8 +527,8 @@ _nvnth_51:
     br x17
     .globl _nvnth_52
 _nvnth_52:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #832
     add x16, x16, x17
     mov x17, #1
@@ -537,8 +537,8 @@ _nvnth_52:
     br x17
     .globl _nvnth_53
 _nvnth_53:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #848
     add x16, x16, x17
     mov x17, #1
@@ -547,8 +547,8 @@ _nvnth_53:
     br x17
     .globl _nvnth_54
 _nvnth_54:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #864
     add x16, x16, x17
     mov x17, #1
@@ -557,8 +557,8 @@ _nvnth_54:
     br x17
     .globl _nvnth_55
 _nvnth_55:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #880
     add x16, x16, x17
     mov x17, #1
@@ -567,8 +567,8 @@ _nvnth_55:
     br x17
     .globl _nvnth_56
 _nvnth_56:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #896
     add x16, x16, x17
     mov x17, #1
@@ -577,8 +577,8 @@ _nvnth_56:
     br x17
     .globl _nvnth_57
 _nvnth_57:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #912
     add x16, x16, x17
     mov x17, #1
@@ -587,8 +587,8 @@ _nvnth_57:
     br x17
     .globl _nvnth_58
 _nvnth_58:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #928
     add x16, x16, x17
     mov x17, #1
@@ -597,8 +597,8 @@ _nvnth_58:
     br x17
     .globl _nvnth_59
 _nvnth_59:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #944
     add x16, x16, x17
     mov x17, #1
@@ -607,8 +607,8 @@ _nvnth_59:
     br x17
     .globl _nvnth_60
 _nvnth_60:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #960
     add x16, x16, x17
     mov x17, #1
@@ -617,8 +617,8 @@ _nvnth_60:
     br x17
     .globl _nvnth_61
 _nvnth_61:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #976
     add x16, x16, x17
     mov x17, #1
@@ -627,8 +627,8 @@ _nvnth_61:
     br x17
     .globl _nvnth_62
 _nvnth_62:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #992
     add x16, x16, x17
     mov x17, #1
@@ -637,8 +637,8 @@ _nvnth_62:
     br x17
     .globl _nvnth_63
 _nvnth_63:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #1008
     add x16, x16, x17
     mov x17, #1
@@ -647,8 +647,8 @@ _nvnth_63:
     br x17
     .globl _nvnth_64
 _nvnth_64:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #1024
     add x16, x16, x17
     mov x17, #1
@@ -657,8 +657,8 @@ _nvnth_64:
     br x17
     .globl _nvnth_65
 _nvnth_65:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #1040
     add x16, x16, x17
     mov x17, #1
@@ -667,8 +667,8 @@ _nvnth_65:
     br x17
     .globl _nvnth_66
 _nvnth_66:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #1056
     add x16, x16, x17
     mov x17, #1
@@ -677,8 +677,8 @@ _nvnth_66:
     br x17
     .globl _nvnth_67
 _nvnth_67:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #1072
     add x16, x16, x17
     mov x17, #1
@@ -687,8 +687,8 @@ _nvnth_67:
     br x17
     .globl _nvnth_68
 _nvnth_68:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #1088
     add x16, x16, x17
     mov x17, #1
@@ -697,8 +697,8 @@ _nvnth_68:
     br x17
     .globl _nvnth_69
 _nvnth_69:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #1104
     add x16, x16, x17
     mov x17, #1
@@ -707,8 +707,8 @@ _nvnth_69:
     br x17
     .globl _nvnth_70
 _nvnth_70:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #1120
     add x16, x16, x17
     mov x17, #1
@@ -717,8 +717,8 @@ _nvnth_70:
     br x17
     .globl _nvnth_71
 _nvnth_71:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #1136
     add x16, x16, x17
     mov x17, #1
@@ -727,8 +727,8 @@ _nvnth_71:
     br x17
     .globl _nvnth_72
 _nvnth_72:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #1152
     add x16, x16, x17
     mov x17, #1
@@ -737,8 +737,8 @@ _nvnth_72:
     br x17
     .globl _nvnth_73
 _nvnth_73:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #1168
     add x16, x16, x17
     mov x17, #1
@@ -747,8 +747,8 @@ _nvnth_73:
     br x17
     .globl _nvnth_74
 _nvnth_74:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #1184
     add x16, x16, x17
     mov x17, #1
@@ -757,8 +757,8 @@ _nvnth_74:
     br x17
     .globl _nvnth_75
 _nvnth_75:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #1200
     add x16, x16, x17
     mov x17, #1
@@ -767,8 +767,8 @@ _nvnth_75:
     br x17
     .globl _nvnth_76
 _nvnth_76:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #1216
     add x16, x16, x17
     mov x17, #1
@@ -777,8 +777,8 @@ _nvnth_76:
     br x17
     .globl _nvnth_77
 _nvnth_77:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #1232
     add x16, x16, x17
     mov x17, #1
@@ -787,8 +787,8 @@ _nvnth_77:
     br x17
     .globl _nvnth_78
 _nvnth_78:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #1248
     add x16, x16, x17
     mov x17, #1
@@ -797,8 +797,8 @@ _nvnth_78:
     br x17
     .globl _nvnth_79
 _nvnth_79:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #1264
     add x16, x16, x17
     mov x17, #1
@@ -807,8 +807,8 @@ _nvnth_79:
     br x17
     .globl _nvnth_80
 _nvnth_80:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #1280
     add x16, x16, x17
     mov x17, #1
@@ -817,8 +817,8 @@ _nvnth_80:
     br x17
     .globl _nvnth_81
 _nvnth_81:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #1296
     add x16, x16, x17
     mov x17, #1
@@ -827,8 +827,8 @@ _nvnth_81:
     br x17
     .globl _nvnth_82
 _nvnth_82:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #1312
     add x16, x16, x17
     mov x17, #1
@@ -837,8 +837,8 @@ _nvnth_82:
     br x17
     .globl _nvnth_83
 _nvnth_83:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #1328
     add x16, x16, x17
     mov x17, #1
@@ -847,8 +847,8 @@ _nvnth_83:
     br x17
     .globl _nvnth_84
 _nvnth_84:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #1344
     add x16, x16, x17
     mov x17, #1
@@ -857,8 +857,8 @@ _nvnth_84:
     br x17
     .globl _nvnth_85
 _nvnth_85:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #1360
     add x16, x16, x17
     mov x17, #1
@@ -867,8 +867,8 @@ _nvnth_85:
     br x17
     .globl _nvnth_86
 _nvnth_86:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #1376
     add x16, x16, x17
     mov x17, #1
@@ -877,8 +877,8 @@ _nvnth_86:
     br x17
     .globl _nvnth_87
 _nvnth_87:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #1392
     add x16, x16, x17
     mov x17, #1
@@ -887,8 +887,8 @@ _nvnth_87:
     br x17
     .globl _nvnth_88
 _nvnth_88:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #1408
     add x16, x16, x17
     mov x17, #1
@@ -897,8 +897,8 @@ _nvnth_88:
     br x17
     .globl _nvnth_89
 _nvnth_89:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #1424
     add x16, x16, x17
     mov x17, #1
@@ -907,8 +907,8 @@ _nvnth_89:
     br x17
     .globl _nvnth_90
 _nvnth_90:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #1440
     add x16, x16, x17
     mov x17, #1
@@ -917,8 +917,8 @@ _nvnth_90:
     br x17
     .globl _nvnth_91
 _nvnth_91:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #1456
     add x16, x16, x17
     mov x17, #1
@@ -927,8 +927,8 @@ _nvnth_91:
     br x17
     .globl _nvnth_92
 _nvnth_92:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #1472
     add x16, x16, x17
     mov x17, #1
@@ -937,8 +937,8 @@ _nvnth_92:
     br x17
     .globl _nvnth_93
 _nvnth_93:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #1488
     add x16, x16, x17
     mov x17, #1
@@ -947,8 +947,8 @@ _nvnth_93:
     br x17
     .globl _nvnth_94
 _nvnth_94:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #1504
     add x16, x16, x17
     mov x17, #1
@@ -957,8 +957,8 @@ _nvnth_94:
     br x17
     .globl _nvnth_95
 _nvnth_95:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #1520
     add x16, x16, x17
     mov x17, #1
@@ -967,8 +967,8 @@ _nvnth_95:
     br x17
     .globl _nvnth_96
 _nvnth_96:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #1536
     add x16, x16, x17
     mov x17, #1
@@ -977,8 +977,8 @@ _nvnth_96:
     br x17
     .globl _nvnth_97
 _nvnth_97:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #1552
     add x16, x16, x17
     mov x17, #1
@@ -987,8 +987,8 @@ _nvnth_97:
     br x17
     .globl _nvnth_98
 _nvnth_98:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #1568
     add x16, x16, x17
     mov x17, #1
@@ -997,8 +997,8 @@ _nvnth_98:
     br x17
     .globl _nvnth_99
 _nvnth_99:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #1584
     add x16, x16, x17
     mov x17, #1
@@ -1007,8 +1007,8 @@ _nvnth_99:
     br x17
     .globl _nvnth_100
 _nvnth_100:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #1600
     add x16, x16, x17
     mov x17, #1
@@ -1017,8 +1017,8 @@ _nvnth_100:
     br x17
     .globl _nvnth_101
 _nvnth_101:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #1616
     add x16, x16, x17
     mov x17, #1
@@ -1027,8 +1027,8 @@ _nvnth_101:
     br x17
     .globl _nvnth_102
 _nvnth_102:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #1632
     add x16, x16, x17
     mov x17, #1
@@ -1037,8 +1037,8 @@ _nvnth_102:
     br x17
     .globl _nvnth_103
 _nvnth_103:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #1648
     add x16, x16, x17
     mov x17, #1
@@ -1047,8 +1047,8 @@ _nvnth_103:
     br x17
     .globl _nvnth_104
 _nvnth_104:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #1664
     add x16, x16, x17
     mov x17, #1
@@ -1057,8 +1057,8 @@ _nvnth_104:
     br x17
     .globl _nvnth_105
 _nvnth_105:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #1680
     add x16, x16, x17
     mov x17, #1
@@ -1067,8 +1067,8 @@ _nvnth_105:
     br x17
     .globl _nvnth_106
 _nvnth_106:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #1696
     add x16, x16, x17
     mov x17, #1
@@ -1077,8 +1077,8 @@ _nvnth_106:
     br x17
     .globl _nvnth_107
 _nvnth_107:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #1712
     add x16, x16, x17
     mov x17, #1
@@ -1087,8 +1087,8 @@ _nvnth_107:
     br x17
     .globl _nvnth_108
 _nvnth_108:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #1728
     add x16, x16, x17
     mov x17, #1
@@ -1097,8 +1097,8 @@ _nvnth_108:
     br x17
     .globl _nvnth_109
 _nvnth_109:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #1744
     add x16, x16, x17
     mov x17, #1
@@ -1107,8 +1107,8 @@ _nvnth_109:
     br x17
     .globl _nvnth_110
 _nvnth_110:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #1760
     add x16, x16, x17
     mov x17, #1
@@ -1117,8 +1117,8 @@ _nvnth_110:
     br x17
     .globl _nvnth_111
 _nvnth_111:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #1776
     add x16, x16, x17
     mov x17, #1
@@ -1127,8 +1127,8 @@ _nvnth_111:
     br x17
     .globl _nvnth_112
 _nvnth_112:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #1792
     add x16, x16, x17
     mov x17, #1
@@ -1137,8 +1137,8 @@ _nvnth_112:
     br x17
     .globl _nvnth_113
 _nvnth_113:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #1808
     add x16, x16, x17
     mov x17, #1
@@ -1147,8 +1147,8 @@ _nvnth_113:
     br x17
     .globl _nvnth_114
 _nvnth_114:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #1824
     add x16, x16, x17
     mov x17, #1
@@ -1157,8 +1157,8 @@ _nvnth_114:
     br x17
     .globl _nvnth_115
 _nvnth_115:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #1840
     add x16, x16, x17
     mov x17, #1
@@ -1167,8 +1167,8 @@ _nvnth_115:
     br x17
     .globl _nvnth_116
 _nvnth_116:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #1856
     add x16, x16, x17
     mov x17, #1
@@ -1177,8 +1177,8 @@ _nvnth_116:
     br x17
     .globl _nvnth_117
 _nvnth_117:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #1872
     add x16, x16, x17
     mov x17, #1
@@ -1187,8 +1187,8 @@ _nvnth_117:
     br x17
     .globl _nvnth_118
 _nvnth_118:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #1888
     add x16, x16, x17
     mov x17, #1
@@ -1197,8 +1197,8 @@ _nvnth_118:
     br x17
     .globl _nvnth_119
 _nvnth_119:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #1904
     add x16, x16, x17
     mov x17, #1
@@ -1207,8 +1207,8 @@ _nvnth_119:
     br x17
     .globl _nvnth_120
 _nvnth_120:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #1920
     add x16, x16, x17
     mov x17, #1
@@ -1217,8 +1217,8 @@ _nvnth_120:
     br x17
     .globl _nvnth_121
 _nvnth_121:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #1936
     add x16, x16, x17
     mov x17, #1
@@ -1227,8 +1227,8 @@ _nvnth_121:
     br x17
     .globl _nvnth_122
 _nvnth_122:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #1952
     add x16, x16, x17
     mov x17, #1
@@ -1237,8 +1237,8 @@ _nvnth_122:
     br x17
     .globl _nvnth_123
 _nvnth_123:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #1968
     add x16, x16, x17
     mov x17, #1
@@ -1247,8 +1247,8 @@ _nvnth_123:
     br x17
     .globl _nvnth_124
 _nvnth_124:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #1984
     add x16, x16, x17
     mov x17, #1
@@ -1257,8 +1257,8 @@ _nvnth_124:
     br x17
     .globl _nvnth_125
 _nvnth_125:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #2000
     add x16, x16, x17
     mov x17, #1
@@ -1267,8 +1267,8 @@ _nvnth_125:
     br x17
     .globl _nvnth_126
 _nvnth_126:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #2016
     add x16, x16, x17
     mov x17, #1
@@ -1277,8 +1277,8 @@ _nvnth_126:
     br x17
     .globl _nvnth_127
 _nvnth_127:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #2032
     add x16, x16, x17
     mov x17, #1
@@ -1287,8 +1287,8 @@ _nvnth_127:
     br x17
     .globl _nvnth_128
 _nvnth_128:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #2048
     add x16, x16, x17
     mov x17, #1
@@ -1297,8 +1297,8 @@ _nvnth_128:
     br x17
     .globl _nvnth_129
 _nvnth_129:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #2064
     add x16, x16, x17
     mov x17, #1
@@ -1307,8 +1307,8 @@ _nvnth_129:
     br x17
     .globl _nvnth_130
 _nvnth_130:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #2080
     add x16, x16, x17
     mov x17, #1
@@ -1317,8 +1317,8 @@ _nvnth_130:
     br x17
     .globl _nvnth_131
 _nvnth_131:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #2096
     add x16, x16, x17
     mov x17, #1
@@ -1327,8 +1327,8 @@ _nvnth_131:
     br x17
     .globl _nvnth_132
 _nvnth_132:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #2112
     add x16, x16, x17
     mov x17, #1
@@ -1337,8 +1337,8 @@ _nvnth_132:
     br x17
     .globl _nvnth_133
 _nvnth_133:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #2128
     add x16, x16, x17
     mov x17, #1
@@ -1347,8 +1347,8 @@ _nvnth_133:
     br x17
     .globl _nvnth_134
 _nvnth_134:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #2144
     add x16, x16, x17
     mov x17, #1
@@ -1357,8 +1357,8 @@ _nvnth_134:
     br x17
     .globl _nvnth_135
 _nvnth_135:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #2160
     add x16, x16, x17
     mov x17, #1
@@ -1367,8 +1367,8 @@ _nvnth_135:
     br x17
     .globl _nvnth_136
 _nvnth_136:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #2176
     add x16, x16, x17
     mov x17, #1
@@ -1377,8 +1377,8 @@ _nvnth_136:
     br x17
     .globl _nvnth_137
 _nvnth_137:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #2192
     add x16, x16, x17
     mov x17, #1
@@ -1387,8 +1387,8 @@ _nvnth_137:
     br x17
     .globl _nvnth_138
 _nvnth_138:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #2208
     add x16, x16, x17
     mov x17, #1
@@ -1397,8 +1397,8 @@ _nvnth_138:
     br x17
     .globl _nvnth_139
 _nvnth_139:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #2224
     add x16, x16, x17
     mov x17, #1
@@ -1407,8 +1407,8 @@ _nvnth_139:
     br x17
     .globl _nvnth_140
 _nvnth_140:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #2240
     add x16, x16, x17
     mov x17, #1
@@ -1417,8 +1417,8 @@ _nvnth_140:
     br x17
     .globl _nvnth_141
 _nvnth_141:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #2256
     add x16, x16, x17
     mov x17, #1
@@ -1427,8 +1427,8 @@ _nvnth_141:
     br x17
     .globl _nvnth_142
 _nvnth_142:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #2272
     add x16, x16, x17
     mov x17, #1
@@ -1437,8 +1437,8 @@ _nvnth_142:
     br x17
     .globl _nvnth_143
 _nvnth_143:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #2288
     add x16, x16, x17
     mov x17, #1
@@ -1447,8 +1447,8 @@ _nvnth_143:
     br x17
     .globl _nvnth_144
 _nvnth_144:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #2304
     add x16, x16, x17
     mov x17, #1
@@ -1457,8 +1457,8 @@ _nvnth_144:
     br x17
     .globl _nvnth_145
 _nvnth_145:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #2320
     add x16, x16, x17
     mov x17, #1
@@ -1467,8 +1467,8 @@ _nvnth_145:
     br x17
     .globl _nvnth_146
 _nvnth_146:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #2336
     add x16, x16, x17
     mov x17, #1
@@ -1477,8 +1477,8 @@ _nvnth_146:
     br x17
     .globl _nvnth_147
 _nvnth_147:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #2352
     add x16, x16, x17
     mov x17, #1
@@ -1487,8 +1487,8 @@ _nvnth_147:
     br x17
     .globl _nvnth_148
 _nvnth_148:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #2368
     add x16, x16, x17
     mov x17, #1
@@ -1497,8 +1497,8 @@ _nvnth_148:
     br x17
     .globl _nvnth_149
 _nvnth_149:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #2384
     add x16, x16, x17
     mov x17, #1
@@ -1507,8 +1507,8 @@ _nvnth_149:
     br x17
     .globl _nvnth_150
 _nvnth_150:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #2400
     add x16, x16, x17
     mov x17, #1
@@ -1517,8 +1517,8 @@ _nvnth_150:
     br x17
     .globl _nvnth_151
 _nvnth_151:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #2416
     add x16, x16, x17
     mov x17, #1
@@ -1527,8 +1527,8 @@ _nvnth_151:
     br x17
     .globl _nvnth_152
 _nvnth_152:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #2432
     add x16, x16, x17
     mov x17, #1
@@ -1537,8 +1537,8 @@ _nvnth_152:
     br x17
     .globl _nvnth_153
 _nvnth_153:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #2448
     add x16, x16, x17
     mov x17, #1
@@ -1547,8 +1547,8 @@ _nvnth_153:
     br x17
     .globl _nvnth_154
 _nvnth_154:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #2464
     add x16, x16, x17
     mov x17, #1
@@ -1557,8 +1557,8 @@ _nvnth_154:
     br x17
     .globl _nvnth_155
 _nvnth_155:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #2480
     add x16, x16, x17
     mov x17, #1
@@ -1567,8 +1567,8 @@ _nvnth_155:
     br x17
     .globl _nvnth_156
 _nvnth_156:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #2496
     add x16, x16, x17
     mov x17, #1
@@ -1577,8 +1577,8 @@ _nvnth_156:
     br x17
     .globl _nvnth_157
 _nvnth_157:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #2512
     add x16, x16, x17
     mov x17, #1
@@ -1587,8 +1587,8 @@ _nvnth_157:
     br x17
     .globl _nvnth_158
 _nvnth_158:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #2528
     add x16, x16, x17
     mov x17, #1
@@ -1597,8 +1597,8 @@ _nvnth_158:
     br x17
     .globl _nvnth_159
 _nvnth_159:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #2544
     add x16, x16, x17
     mov x17, #1
@@ -1607,8 +1607,8 @@ _nvnth_159:
     br x17
     .globl _nvnth_160
 _nvnth_160:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #2560
     add x16, x16, x17
     mov x17, #1
@@ -1617,8 +1617,8 @@ _nvnth_160:
     br x17
     .globl _nvnth_161
 _nvnth_161:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #2576
     add x16, x16, x17
     mov x17, #1
@@ -1627,8 +1627,8 @@ _nvnth_161:
     br x17
     .globl _nvnth_162
 _nvnth_162:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #2592
     add x16, x16, x17
     mov x17, #1
@@ -1637,8 +1637,8 @@ _nvnth_162:
     br x17
     .globl _nvnth_163
 _nvnth_163:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #2608
     add x16, x16, x17
     mov x17, #1
@@ -1647,8 +1647,8 @@ _nvnth_163:
     br x17
     .globl _nvnth_164
 _nvnth_164:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #2624
     add x16, x16, x17
     mov x17, #1
@@ -1657,8 +1657,8 @@ _nvnth_164:
     br x17
     .globl _nvnth_165
 _nvnth_165:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #2640
     add x16, x16, x17
     mov x17, #1
@@ -1667,8 +1667,8 @@ _nvnth_165:
     br x17
     .globl _nvnth_166
 _nvnth_166:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #2656
     add x16, x16, x17
     mov x17, #1
@@ -1677,8 +1677,8 @@ _nvnth_166:
     br x17
     .globl _nvnth_167
 _nvnth_167:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #2672
     add x16, x16, x17
     mov x17, #1
@@ -1687,8 +1687,8 @@ _nvnth_167:
     br x17
     .globl _nvnth_168
 _nvnth_168:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #2688
     add x16, x16, x17
     mov x17, #1
@@ -1697,8 +1697,8 @@ _nvnth_168:
     br x17
     .globl _nvnth_169
 _nvnth_169:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #2704
     add x16, x16, x17
     mov x17, #1
@@ -1707,8 +1707,8 @@ _nvnth_169:
     br x17
     .globl _nvnth_170
 _nvnth_170:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #2720
     add x16, x16, x17
     mov x17, #1
@@ -1717,8 +1717,8 @@ _nvnth_170:
     br x17
     .globl _nvnth_171
 _nvnth_171:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #2736
     add x16, x16, x17
     mov x17, #1
@@ -1727,8 +1727,8 @@ _nvnth_171:
     br x17
     .globl _nvnth_172
 _nvnth_172:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #2752
     add x16, x16, x17
     mov x17, #1
@@ -1737,8 +1737,8 @@ _nvnth_172:
     br x17
     .globl _nvnth_173
 _nvnth_173:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #2768
     add x16, x16, x17
     mov x17, #1
@@ -1747,8 +1747,8 @@ _nvnth_173:
     br x17
     .globl _nvnth_174
 _nvnth_174:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #2784
     add x16, x16, x17
     mov x17, #1
@@ -1757,8 +1757,8 @@ _nvnth_174:
     br x17
     .globl _nvnth_175
 _nvnth_175:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #2800
     add x16, x16, x17
     mov x17, #1
@@ -1767,8 +1767,8 @@ _nvnth_175:
     br x17
     .globl _nvnth_176
 _nvnth_176:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #2816
     add x16, x16, x17
     mov x17, #1
@@ -1777,8 +1777,8 @@ _nvnth_176:
     br x17
     .globl _nvnth_177
 _nvnth_177:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #2832
     add x16, x16, x17
     mov x17, #1
@@ -1787,8 +1787,8 @@ _nvnth_177:
     br x17
     .globl _nvnth_178
 _nvnth_178:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #2848
     add x16, x16, x17
     mov x17, #1
@@ -1797,8 +1797,8 @@ _nvnth_178:
     br x17
     .globl _nvnth_179
 _nvnth_179:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #2864
     add x16, x16, x17
     mov x17, #1
@@ -1807,8 +1807,8 @@ _nvnth_179:
     br x17
     .globl _nvnth_180
 _nvnth_180:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #2880
     add x16, x16, x17
     mov x17, #1
@@ -1817,8 +1817,8 @@ _nvnth_180:
     br x17
     .globl _nvnth_181
 _nvnth_181:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #2896
     add x16, x16, x17
     mov x17, #1
@@ -1827,8 +1827,8 @@ _nvnth_181:
     br x17
     .globl _nvnth_182
 _nvnth_182:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #2912
     add x16, x16, x17
     mov x17, #1
@@ -1837,8 +1837,8 @@ _nvnth_182:
     br x17
     .globl _nvnth_183
 _nvnth_183:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #2928
     add x16, x16, x17
     mov x17, #1
@@ -1847,8 +1847,8 @@ _nvnth_183:
     br x17
     .globl _nvnth_184
 _nvnth_184:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #2944
     add x16, x16, x17
     mov x17, #1
@@ -1857,8 +1857,8 @@ _nvnth_184:
     br x17
     .globl _nvnth_185
 _nvnth_185:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #2960
     add x16, x16, x17
     mov x17, #1
@@ -1867,8 +1867,8 @@ _nvnth_185:
     br x17
     .globl _nvnth_186
 _nvnth_186:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #2976
     add x16, x16, x17
     mov x17, #1
@@ -1877,8 +1877,8 @@ _nvnth_186:
     br x17
     .globl _nvnth_187
 _nvnth_187:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #2992
     add x16, x16, x17
     mov x17, #1
@@ -1887,8 +1887,8 @@ _nvnth_187:
     br x17
     .globl _nvnth_188
 _nvnth_188:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #3008
     add x16, x16, x17
     mov x17, #1
@@ -1897,8 +1897,8 @@ _nvnth_188:
     br x17
     .globl _nvnth_189
 _nvnth_189:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #3024
     add x16, x16, x17
     mov x17, #1
@@ -1907,8 +1907,8 @@ _nvnth_189:
     br x17
     .globl _nvnth_190
 _nvnth_190:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #3040
     add x16, x16, x17
     mov x17, #1
@@ -1917,8 +1917,8 @@ _nvnth_190:
     br x17
     .globl _nvnth_191
 _nvnth_191:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #3056
     add x16, x16, x17
     mov x17, #1
@@ -1927,8 +1927,8 @@ _nvnth_191:
     br x17
     .globl _nvnth_192
 _nvnth_192:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #3072
     add x16, x16, x17
     mov x17, #1
@@ -1937,8 +1937,8 @@ _nvnth_192:
     br x17
     .globl _nvnth_193
 _nvnth_193:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #3088
     add x16, x16, x17
     mov x17, #1
@@ -1947,8 +1947,8 @@ _nvnth_193:
     br x17
     .globl _nvnth_194
 _nvnth_194:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #3104
     add x16, x16, x17
     mov x17, #1
@@ -1957,8 +1957,8 @@ _nvnth_194:
     br x17
     .globl _nvnth_195
 _nvnth_195:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #3120
     add x16, x16, x17
     mov x17, #1
@@ -1967,8 +1967,8 @@ _nvnth_195:
     br x17
     .globl _nvnth_196
 _nvnth_196:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #3136
     add x16, x16, x17
     mov x17, #1
@@ -1977,8 +1977,8 @@ _nvnth_196:
     br x17
     .globl _nvnth_197
 _nvnth_197:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #3152
     add x16, x16, x17
     mov x17, #1
@@ -1987,8 +1987,8 @@ _nvnth_197:
     br x17
     .globl _nvnth_198
 _nvnth_198:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #3168
     add x16, x16, x17
     mov x17, #1
@@ -1997,8 +1997,8 @@ _nvnth_198:
     br x17
     .globl _nvnth_199
 _nvnth_199:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #3184
     add x16, x16, x17
     mov x17, #1
@@ -2007,8 +2007,8 @@ _nvnth_199:
     br x17
     .globl _nvnth_200
 _nvnth_200:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #3200
     add x16, x16, x17
     mov x17, #1
@@ -2017,8 +2017,8 @@ _nvnth_200:
     br x17
     .globl _nvnth_201
 _nvnth_201:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #3216
     add x16, x16, x17
     mov x17, #1
@@ -2027,8 +2027,8 @@ _nvnth_201:
     br x17
     .globl _nvnth_202
 _nvnth_202:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #3232
     add x16, x16, x17
     mov x17, #1
@@ -2037,8 +2037,8 @@ _nvnth_202:
     br x17
     .globl _nvnth_203
 _nvnth_203:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #3248
     add x16, x16, x17
     mov x17, #1
@@ -2047,8 +2047,8 @@ _nvnth_203:
     br x17
     .globl _nvnth_204
 _nvnth_204:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #3264
     add x16, x16, x17
     mov x17, #1
@@ -2057,8 +2057,8 @@ _nvnth_204:
     br x17
     .globl _nvnth_205
 _nvnth_205:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #3280
     add x16, x16, x17
     mov x17, #1
@@ -2067,8 +2067,8 @@ _nvnth_205:
     br x17
     .globl _nvnth_206
 _nvnth_206:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #3296
     add x16, x16, x17
     mov x17, #1
@@ -2077,8 +2077,8 @@ _nvnth_206:
     br x17
     .globl _nvnth_207
 _nvnth_207:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #3312
     add x16, x16, x17
     mov x17, #1
@@ -2087,8 +2087,8 @@ _nvnth_207:
     br x17
     .globl _nvnth_208
 _nvnth_208:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #3328
     add x16, x16, x17
     mov x17, #1
@@ -2097,8 +2097,8 @@ _nvnth_208:
     br x17
     .globl _nvnth_209
 _nvnth_209:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #3344
     add x16, x16, x17
     mov x17, #1
@@ -2107,8 +2107,8 @@ _nvnth_209:
     br x17
     .globl _nvnth_210
 _nvnth_210:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #3360
     add x16, x16, x17
     mov x17, #1
@@ -2117,8 +2117,8 @@ _nvnth_210:
     br x17
     .globl _nvnth_211
 _nvnth_211:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #3376
     add x16, x16, x17
     mov x17, #1
@@ -2127,8 +2127,8 @@ _nvnth_211:
     br x17
     .globl _nvnth_212
 _nvnth_212:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #3392
     add x16, x16, x17
     mov x17, #1
@@ -2137,8 +2137,8 @@ _nvnth_212:
     br x17
     .globl _nvnth_213
 _nvnth_213:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #3408
     add x16, x16, x17
     mov x17, #1
@@ -2147,8 +2147,8 @@ _nvnth_213:
     br x17
     .globl _nvnth_214
 _nvnth_214:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #3424
     add x16, x16, x17
     mov x17, #1
@@ -2157,8 +2157,8 @@ _nvnth_214:
     br x17
     .globl _nvnth_215
 _nvnth_215:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #3440
     add x16, x16, x17
     mov x17, #1
@@ -2167,8 +2167,8 @@ _nvnth_215:
     br x17
     .globl _nvnth_216
 _nvnth_216:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #3456
     add x16, x16, x17
     mov x17, #1
@@ -2177,8 +2177,8 @@ _nvnth_216:
     br x17
     .globl _nvnth_217
 _nvnth_217:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #3472
     add x16, x16, x17
     mov x17, #1
@@ -2187,8 +2187,8 @@ _nvnth_217:
     br x17
     .globl _nvnth_218
 _nvnth_218:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #3488
     add x16, x16, x17
     mov x17, #1
@@ -2197,8 +2197,8 @@ _nvnth_218:
     br x17
     .globl _nvnth_219
 _nvnth_219:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #3504
     add x16, x16, x17
     mov x17, #1
@@ -2207,8 +2207,8 @@ _nvnth_219:
     br x17
     .globl _nvnth_220
 _nvnth_220:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #3520
     add x16, x16, x17
     mov x17, #1
@@ -2217,8 +2217,8 @@ _nvnth_220:
     br x17
     .globl _nvnth_221
 _nvnth_221:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #3536
     add x16, x16, x17
     mov x17, #1
@@ -2227,8 +2227,8 @@ _nvnth_221:
     br x17
     .globl _nvnth_222
 _nvnth_222:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #3552
     add x16, x16, x17
     mov x17, #1
@@ -2237,8 +2237,8 @@ _nvnth_222:
     br x17
     .globl _nvnth_223
 _nvnth_223:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #3568
     add x16, x16, x17
     mov x17, #1
@@ -2247,8 +2247,8 @@ _nvnth_223:
     br x17
     .globl _nvnth_224
 _nvnth_224:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #3584
     add x16, x16, x17
     mov x17, #1
@@ -2257,8 +2257,8 @@ _nvnth_224:
     br x17
     .globl _nvnth_225
 _nvnth_225:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #3600
     add x16, x16, x17
     mov x17, #1
@@ -2267,8 +2267,8 @@ _nvnth_225:
     br x17
     .globl _nvnth_226
 _nvnth_226:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #3616
     add x16, x16, x17
     mov x17, #1
@@ -2277,8 +2277,8 @@ _nvnth_226:
     br x17
     .globl _nvnth_227
 _nvnth_227:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #3632
     add x16, x16, x17
     mov x17, #1
@@ -2287,8 +2287,8 @@ _nvnth_227:
     br x17
     .globl _nvnth_228
 _nvnth_228:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #3648
     add x16, x16, x17
     mov x17, #1
@@ -2297,8 +2297,8 @@ _nvnth_228:
     br x17
     .globl _nvnth_229
 _nvnth_229:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #3664
     add x16, x16, x17
     mov x17, #1
@@ -2307,8 +2307,8 @@ _nvnth_229:
     br x17
     .globl _nvnth_230
 _nvnth_230:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #3680
     add x16, x16, x17
     mov x17, #1
@@ -2317,8 +2317,8 @@ _nvnth_230:
     br x17
     .globl _nvnth_231
 _nvnth_231:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #3696
     add x16, x16, x17
     mov x17, #1
@@ -2327,8 +2327,8 @@ _nvnth_231:
     br x17
     .globl _nvnth_232
 _nvnth_232:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #3712
     add x16, x16, x17
     mov x17, #1
@@ -2337,8 +2337,8 @@ _nvnth_232:
     br x17
     .globl _nvnth_233
 _nvnth_233:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #3728
     add x16, x16, x17
     mov x17, #1
@@ -2347,8 +2347,8 @@ _nvnth_233:
     br x17
     .globl _nvnth_234
 _nvnth_234:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #3744
     add x16, x16, x17
     mov x17, #1
@@ -2357,8 +2357,8 @@ _nvnth_234:
     br x17
     .globl _nvnth_235
 _nvnth_235:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #3760
     add x16, x16, x17
     mov x17, #1
@@ -2367,8 +2367,8 @@ _nvnth_235:
     br x17
     .globl _nvnth_236
 _nvnth_236:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #3776
     add x16, x16, x17
     mov x17, #1
@@ -2377,8 +2377,8 @@ _nvnth_236:
     br x17
     .globl _nvnth_237
 _nvnth_237:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #3792
     add x16, x16, x17
     mov x17, #1
@@ -2387,8 +2387,8 @@ _nvnth_237:
     br x17
     .globl _nvnth_238
 _nvnth_238:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #3808
     add x16, x16, x17
     mov x17, #1
@@ -2397,8 +2397,8 @@ _nvnth_238:
     br x17
     .globl _nvnth_239
 _nvnth_239:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #3824
     add x16, x16, x17
     mov x17, #1
@@ -2407,8 +2407,8 @@ _nvnth_239:
     br x17
     .globl _nvnth_240
 _nvnth_240:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #3840
     add x16, x16, x17
     mov x17, #1
@@ -2417,8 +2417,8 @@ _nvnth_240:
     br x17
     .globl _nvnth_241
 _nvnth_241:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #3856
     add x16, x16, x17
     mov x17, #1
@@ -2427,8 +2427,8 @@ _nvnth_241:
     br x17
     .globl _nvnth_242
 _nvnth_242:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #3872
     add x16, x16, x17
     mov x17, #1
@@ -2437,8 +2437,8 @@ _nvnth_242:
     br x17
     .globl _nvnth_243
 _nvnth_243:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #3888
     add x16, x16, x17
     mov x17, #1
@@ -2447,8 +2447,8 @@ _nvnth_243:
     br x17
     .globl _nvnth_244
 _nvnth_244:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #3904
     add x16, x16, x17
     mov x17, #1
@@ -2457,8 +2457,8 @@ _nvnth_244:
     br x17
     .globl _nvnth_245
 _nvnth_245:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #3920
     add x16, x16, x17
     mov x17, #1
@@ -2467,8 +2467,8 @@ _nvnth_245:
     br x17
     .globl _nvnth_246
 _nvnth_246:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #3936
     add x16, x16, x17
     mov x17, #1
@@ -2477,8 +2477,8 @@ _nvnth_246:
     br x17
     .globl _nvnth_247
 _nvnth_247:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #3952
     add x16, x16, x17
     mov x17, #1
@@ -2487,8 +2487,8 @@ _nvnth_247:
     br x17
     .globl _nvnth_248
 _nvnth_248:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #3968
     add x16, x16, x17
     mov x17, #1
@@ -2497,8 +2497,8 @@ _nvnth_248:
     br x17
     .globl _nvnth_249
 _nvnth_249:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #3984
     add x16, x16, x17
     mov x17, #1
@@ -2507,8 +2507,8 @@ _nvnth_249:
     br x17
     .globl _nvnth_250
 _nvnth_250:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #4000
     add x16, x16, x17
     mov x17, #1
@@ -2517,8 +2517,8 @@ _nvnth_250:
     br x17
     .globl _nvnth_251
 _nvnth_251:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #4016
     add x16, x16, x17
     mov x17, #1
@@ -2527,8 +2527,8 @@ _nvnth_251:
     br x17
     .globl _nvnth_252
 _nvnth_252:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #4032
     add x16, x16, x17
     mov x17, #1
@@ -2537,8 +2537,8 @@ _nvnth_252:
     br x17
     .globl _nvnth_253
 _nvnth_253:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #4048
     add x16, x16, x17
     mov x17, #1
@@ -2547,8 +2547,8 @@ _nvnth_253:
     br x17
     .globl _nvnth_254
 _nvnth_254:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #4064
     add x16, x16, x17
     mov x17, #1
@@ -2557,8 +2557,8 @@ _nvnth_254:
     br x17
     .globl _nvnth_255
 _nvnth_255:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #4080
     add x16, x16, x17
     mov x17, #1
@@ -2567,8 +2567,8 @@ _nvnth_255:
     br x17
     .globl _nvnth_256
 _nvnth_256:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #4096
     add x16, x16, x17
     mov x17, #1
@@ -2577,8 +2577,8 @@ _nvnth_256:
     br x17
     .globl _nvnth_257
 _nvnth_257:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #4112
     add x16, x16, x17
     mov x17, #1
@@ -2587,8 +2587,8 @@ _nvnth_257:
     br x17
     .globl _nvnth_258
 _nvnth_258:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #4128
     add x16, x16, x17
     mov x17, #1
@@ -2597,8 +2597,8 @@ _nvnth_258:
     br x17
     .globl _nvnth_259
 _nvnth_259:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #4144
     add x16, x16, x17
     mov x17, #1
@@ -2607,8 +2607,8 @@ _nvnth_259:
     br x17
     .globl _nvnth_260
 _nvnth_260:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #4160
     add x16, x16, x17
     mov x17, #1
@@ -2617,8 +2617,8 @@ _nvnth_260:
     br x17
     .globl _nvnth_261
 _nvnth_261:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #4176
     add x16, x16, x17
     mov x17, #1
@@ -2627,8 +2627,8 @@ _nvnth_261:
     br x17
     .globl _nvnth_262
 _nvnth_262:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #4192
     add x16, x16, x17
     mov x17, #1
@@ -2637,8 +2637,8 @@ _nvnth_262:
     br x17
     .globl _nvnth_263
 _nvnth_263:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #4208
     add x16, x16, x17
     mov x17, #1
@@ -2647,8 +2647,8 @@ _nvnth_263:
     br x17
     .globl _nvnth_264
 _nvnth_264:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #4224
     add x16, x16, x17
     mov x17, #1
@@ -2657,8 +2657,8 @@ _nvnth_264:
     br x17
     .globl _nvnth_265
 _nvnth_265:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #4240
     add x16, x16, x17
     mov x17, #1
@@ -2667,8 +2667,8 @@ _nvnth_265:
     br x17
     .globl _nvnth_266
 _nvnth_266:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #4256
     add x16, x16, x17
     mov x17, #1
@@ -2677,8 +2677,8 @@ _nvnth_266:
     br x17
     .globl _nvnth_267
 _nvnth_267:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #4272
     add x16, x16, x17
     mov x17, #1
@@ -2687,8 +2687,8 @@ _nvnth_267:
     br x17
     .globl _nvnth_268
 _nvnth_268:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #4288
     add x16, x16, x17
     mov x17, #1
@@ -2697,8 +2697,8 @@ _nvnth_268:
     br x17
     .globl _nvnth_269
 _nvnth_269:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #4304
     add x16, x16, x17
     mov x17, #1
@@ -2707,8 +2707,8 @@ _nvnth_269:
     br x17
     .globl _nvnth_270
 _nvnth_270:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #4320
     add x16, x16, x17
     mov x17, #1
@@ -2717,8 +2717,8 @@ _nvnth_270:
     br x17
     .globl _nvnth_271
 _nvnth_271:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #4336
     add x16, x16, x17
     mov x17, #1
@@ -2727,8 +2727,8 @@ _nvnth_271:
     br x17
     .globl _nvnth_272
 _nvnth_272:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #4352
     add x16, x16, x17
     mov x17, #1
@@ -2737,8 +2737,8 @@ _nvnth_272:
     br x17
     .globl _nvnth_273
 _nvnth_273:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #4368
     add x16, x16, x17
     mov x17, #1
@@ -2747,8 +2747,8 @@ _nvnth_273:
     br x17
     .globl _nvnth_274
 _nvnth_274:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #4384
     add x16, x16, x17
     mov x17, #1
@@ -2757,8 +2757,8 @@ _nvnth_274:
     br x17
     .globl _nvnth_275
 _nvnth_275:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #4400
     add x16, x16, x17
     mov x17, #1
@@ -2767,8 +2767,8 @@ _nvnth_275:
     br x17
     .globl _nvnth_276
 _nvnth_276:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #4416
     add x16, x16, x17
     mov x17, #1
@@ -2777,8 +2777,8 @@ _nvnth_276:
     br x17
     .globl _nvnth_277
 _nvnth_277:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #4432
     add x16, x16, x17
     mov x17, #1
@@ -2787,8 +2787,8 @@ _nvnth_277:
     br x17
     .globl _nvnth_278
 _nvnth_278:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #4448
     add x16, x16, x17
     mov x17, #1
@@ -2797,8 +2797,8 @@ _nvnth_278:
     br x17
     .globl _nvnth_279
 _nvnth_279:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #4464
     add x16, x16, x17
     mov x17, #1
@@ -2807,8 +2807,8 @@ _nvnth_279:
     br x17
     .globl _nvnth_280
 _nvnth_280:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #4480
     add x16, x16, x17
     mov x17, #1
@@ -2817,8 +2817,8 @@ _nvnth_280:
     br x17
     .globl _nvnth_281
 _nvnth_281:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #4496
     add x16, x16, x17
     mov x17, #1
@@ -2827,8 +2827,8 @@ _nvnth_281:
     br x17
     .globl _nvnth_282
 _nvnth_282:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #4512
     add x16, x16, x17
     mov x17, #1
@@ -2837,8 +2837,8 @@ _nvnth_282:
     br x17
     .globl _nvnth_283
 _nvnth_283:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #4528
     add x16, x16, x17
     mov x17, #1
@@ -2847,8 +2847,8 @@ _nvnth_283:
     br x17
     .globl _nvnth_284
 _nvnth_284:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #4544
     add x16, x16, x17
     mov x17, #1
@@ -2857,8 +2857,8 @@ _nvnth_284:
     br x17
     .globl _nvnth_285
 _nvnth_285:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #4560
     add x16, x16, x17
     mov x17, #1
@@ -2867,8 +2867,8 @@ _nvnth_285:
     br x17
     .globl _nvnth_286
 _nvnth_286:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #4576
     add x16, x16, x17
     mov x17, #1
@@ -2877,8 +2877,8 @@ _nvnth_286:
     br x17
     .globl _nvnth_287
 _nvnth_287:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #4592
     add x16, x16, x17
     mov x17, #1
@@ -2887,8 +2887,8 @@ _nvnth_287:
     br x17
     .globl _nvnth_288
 _nvnth_288:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #4608
     add x16, x16, x17
     mov x17, #1
@@ -2897,8 +2897,8 @@ _nvnth_288:
     br x17
     .globl _nvnth_289
 _nvnth_289:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #4624
     add x16, x16, x17
     mov x17, #1
@@ -2907,8 +2907,8 @@ _nvnth_289:
     br x17
     .globl _nvnth_290
 _nvnth_290:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #4640
     add x16, x16, x17
     mov x17, #1
@@ -2917,8 +2917,8 @@ _nvnth_290:
     br x17
     .globl _nvnth_291
 _nvnth_291:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #4656
     add x16, x16, x17
     mov x17, #1
@@ -2927,8 +2927,8 @@ _nvnth_291:
     br x17
     .globl _nvnth_292
 _nvnth_292:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #4672
     add x16, x16, x17
     mov x17, #1
@@ -2937,8 +2937,8 @@ _nvnth_292:
     br x17
     .globl _nvnth_293
 _nvnth_293:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #4688
     add x16, x16, x17
     mov x17, #1
@@ -2947,8 +2947,8 @@ _nvnth_293:
     br x17
     .globl _nvnth_294
 _nvnth_294:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #4704
     add x16, x16, x17
     mov x17, #1
@@ -2957,8 +2957,8 @@ _nvnth_294:
     br x17
     .globl _nvnth_295
 _nvnth_295:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #4720
     add x16, x16, x17
     mov x17, #1
@@ -2967,8 +2967,8 @@ _nvnth_295:
     br x17
     .globl _nvnth_296
 _nvnth_296:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #4736
     add x16, x16, x17
     mov x17, #1
@@ -2977,8 +2977,8 @@ _nvnth_296:
     br x17
     .globl _nvnth_297
 _nvnth_297:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #4752
     add x16, x16, x17
     mov x17, #1
@@ -2987,8 +2987,8 @@ _nvnth_297:
     br x17
     .globl _nvnth_298
 _nvnth_298:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #4768
     add x16, x16, x17
     mov x17, #1
@@ -2997,8 +2997,8 @@ _nvnth_298:
     br x17
     .globl _nvnth_299
 _nvnth_299:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #4784
     add x16, x16, x17
     mov x17, #1
@@ -3007,8 +3007,8 @@ _nvnth_299:
     br x17
     .globl _nvnth_300
 _nvnth_300:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #4800
     add x16, x16, x17
     mov x17, #1
@@ -3017,8 +3017,8 @@ _nvnth_300:
     br x17
     .globl _nvnth_301
 _nvnth_301:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #4816
     add x16, x16, x17
     mov x17, #1
@@ -3027,8 +3027,8 @@ _nvnth_301:
     br x17
     .globl _nvnth_302
 _nvnth_302:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #4832
     add x16, x16, x17
     mov x17, #1
@@ -3037,8 +3037,8 @@ _nvnth_302:
     br x17
     .globl _nvnth_303
 _nvnth_303:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #4848
     add x16, x16, x17
     mov x17, #1
@@ -3047,8 +3047,8 @@ _nvnth_303:
     br x17
     .globl _nvnth_304
 _nvnth_304:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #4864
     add x16, x16, x17
     mov x17, #1
@@ -3057,8 +3057,8 @@ _nvnth_304:
     br x17
     .globl _nvnth_305
 _nvnth_305:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #4880
     add x16, x16, x17
     mov x17, #1
@@ -3067,8 +3067,8 @@ _nvnth_305:
     br x17
     .globl _nvnth_306
 _nvnth_306:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #4896
     add x16, x16, x17
     mov x17, #1
@@ -3077,8 +3077,8 @@ _nvnth_306:
     br x17
     .globl _nvnth_307
 _nvnth_307:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #4912
     add x16, x16, x17
     mov x17, #1
@@ -3087,8 +3087,8 @@ _nvnth_307:
     br x17
     .globl _nvnth_308
 _nvnth_308:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #4928
     add x16, x16, x17
     mov x17, #1
@@ -3097,8 +3097,8 @@ _nvnth_308:
     br x17
     .globl _nvnth_309
 _nvnth_309:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #4944
     add x16, x16, x17
     mov x17, #1
@@ -3107,8 +3107,8 @@ _nvnth_309:
     br x17
     .globl _nvnth_310
 _nvnth_310:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #4960
     add x16, x16, x17
     mov x17, #1
@@ -3117,8 +3117,8 @@ _nvnth_310:
     br x17
     .globl _nvnth_311
 _nvnth_311:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #4976
     add x16, x16, x17
     mov x17, #1
@@ -3127,8 +3127,8 @@ _nvnth_311:
     br x17
     .globl _nvnth_312
 _nvnth_312:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #4992
     add x16, x16, x17
     mov x17, #1
@@ -3137,8 +3137,8 @@ _nvnth_312:
     br x17
     .globl _nvnth_313
 _nvnth_313:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #5008
     add x16, x16, x17
     mov x17, #1
@@ -3147,8 +3147,8 @@ _nvnth_313:
     br x17
     .globl _nvnth_314
 _nvnth_314:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #5024
     add x16, x16, x17
     mov x17, #1
@@ -3157,8 +3157,8 @@ _nvnth_314:
     br x17
     .globl _nvnth_315
 _nvnth_315:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #5040
     add x16, x16, x17
     mov x17, #1
@@ -3167,8 +3167,8 @@ _nvnth_315:
     br x17
     .globl _nvnth_316
 _nvnth_316:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #5056
     add x16, x16, x17
     mov x17, #1
@@ -3177,8 +3177,8 @@ _nvnth_316:
     br x17
     .globl _nvnth_317
 _nvnth_317:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #5072
     add x16, x16, x17
     mov x17, #1
@@ -3187,8 +3187,8 @@ _nvnth_317:
     br x17
     .globl _nvnth_318
 _nvnth_318:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #5088
     add x16, x16, x17
     mov x17, #1
@@ -3197,8 +3197,8 @@ _nvnth_318:
     br x17
     .globl _nvnth_319
 _nvnth_319:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #5104
     add x16, x16, x17
     mov x17, #1
@@ -3207,8 +3207,8 @@ _nvnth_319:
     br x17
     .globl _nvnth_320
 _nvnth_320:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #5120
     add x16, x16, x17
     mov x17, #1
@@ -3217,8 +3217,8 @@ _nvnth_320:
     br x17
     .globl _nvnth_321
 _nvnth_321:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #5136
     add x16, x16, x17
     mov x17, #1
@@ -3227,8 +3227,8 @@ _nvnth_321:
     br x17
     .globl _nvnth_322
 _nvnth_322:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #5152
     add x16, x16, x17
     mov x17, #1
@@ -3237,8 +3237,8 @@ _nvnth_322:
     br x17
     .globl _nvnth_323
 _nvnth_323:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #5168
     add x16, x16, x17
     mov x17, #1
@@ -3247,8 +3247,8 @@ _nvnth_323:
     br x17
     .globl _nvnth_324
 _nvnth_324:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #5184
     add x16, x16, x17
     mov x17, #1
@@ -3257,8 +3257,8 @@ _nvnth_324:
     br x17
     .globl _nvnth_325
 _nvnth_325:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #5200
     add x16, x16, x17
     mov x17, #1
@@ -3267,8 +3267,8 @@ _nvnth_325:
     br x17
     .globl _nvnth_326
 _nvnth_326:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #5216
     add x16, x16, x17
     mov x17, #1
@@ -3277,8 +3277,8 @@ _nvnth_326:
     br x17
     .globl _nvnth_327
 _nvnth_327:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #5232
     add x16, x16, x17
     mov x17, #1
@@ -3287,8 +3287,8 @@ _nvnth_327:
     br x17
     .globl _nvnth_328
 _nvnth_328:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #5248
     add x16, x16, x17
     mov x17, #1
@@ -3297,8 +3297,8 @@ _nvnth_328:
     br x17
     .globl _nvnth_329
 _nvnth_329:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #5264
     add x16, x16, x17
     mov x17, #1
@@ -3307,8 +3307,8 @@ _nvnth_329:
     br x17
     .globl _nvnth_330
 _nvnth_330:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #5280
     add x16, x16, x17
     mov x17, #1
@@ -3317,8 +3317,8 @@ _nvnth_330:
     br x17
     .globl _nvnth_331
 _nvnth_331:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #5296
     add x16, x16, x17
     mov x17, #1
@@ -3327,8 +3327,8 @@ _nvnth_331:
     br x17
     .globl _nvnth_332
 _nvnth_332:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #5312
     add x16, x16, x17
     mov x17, #1
@@ -3337,8 +3337,8 @@ _nvnth_332:
     br x17
     .globl _nvnth_333
 _nvnth_333:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #5328
     add x16, x16, x17
     mov x17, #1
@@ -3347,8 +3347,8 @@ _nvnth_333:
     br x17
     .globl _nvnth_334
 _nvnth_334:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #5344
     add x16, x16, x17
     mov x17, #1
@@ -3357,8 +3357,8 @@ _nvnth_334:
     br x17
     .globl _nvnth_335
 _nvnth_335:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #5360
     add x16, x16, x17
     mov x17, #1
@@ -3367,8 +3367,8 @@ _nvnth_335:
     br x17
     .globl _nvnth_336
 _nvnth_336:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #5376
     add x16, x16, x17
     mov x17, #1
@@ -3377,8 +3377,8 @@ _nvnth_336:
     br x17
     .globl _nvnth_337
 _nvnth_337:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #5392
     add x16, x16, x17
     mov x17, #1
@@ -3387,8 +3387,8 @@ _nvnth_337:
     br x17
     .globl _nvnth_338
 _nvnth_338:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #5408
     add x16, x16, x17
     mov x17, #1
@@ -3397,8 +3397,8 @@ _nvnth_338:
     br x17
     .globl _nvnth_339
 _nvnth_339:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #5424
     add x16, x16, x17
     mov x17, #1
@@ -3407,8 +3407,8 @@ _nvnth_339:
     br x17
     .globl _nvnth_340
 _nvnth_340:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #5440
     add x16, x16, x17
     mov x17, #1
@@ -3417,8 +3417,8 @@ _nvnth_340:
     br x17
     .globl _nvnth_341
 _nvnth_341:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #5456
     add x16, x16, x17
     mov x17, #1
@@ -3427,8 +3427,8 @@ _nvnth_341:
     br x17
     .globl _nvnth_342
 _nvnth_342:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #5472
     add x16, x16, x17
     mov x17, #1
@@ -3437,8 +3437,8 @@ _nvnth_342:
     br x17
     .globl _nvnth_343
 _nvnth_343:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #5488
     add x16, x16, x17
     mov x17, #1
@@ -3447,8 +3447,8 @@ _nvnth_343:
     br x17
     .globl _nvnth_344
 _nvnth_344:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #5504
     add x16, x16, x17
     mov x17, #1
@@ -3457,8 +3457,8 @@ _nvnth_344:
     br x17
     .globl _nvnth_345
 _nvnth_345:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #5520
     add x16, x16, x17
     mov x17, #1
@@ -3467,8 +3467,8 @@ _nvnth_345:
     br x17
     .globl _nvnth_346
 _nvnth_346:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #5536
     add x16, x16, x17
     mov x17, #1
@@ -3477,8 +3477,8 @@ _nvnth_346:
     br x17
     .globl _nvnth_347
 _nvnth_347:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #5552
     add x16, x16, x17
     mov x17, #1
@@ -3487,8 +3487,8 @@ _nvnth_347:
     br x17
     .globl _nvnth_348
 _nvnth_348:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #5568
     add x16, x16, x17
     mov x17, #1
@@ -3497,8 +3497,8 @@ _nvnth_348:
     br x17
     .globl _nvnth_349
 _nvnth_349:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #5584
     add x16, x16, x17
     mov x17, #1
@@ -3507,8 +3507,8 @@ _nvnth_349:
     br x17
     .globl _nvnth_350
 _nvnth_350:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #5600
     add x16, x16, x17
     mov x17, #1
@@ -3517,8 +3517,8 @@ _nvnth_350:
     br x17
     .globl _nvnth_351
 _nvnth_351:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #5616
     add x16, x16, x17
     mov x17, #1
@@ -3527,8 +3527,8 @@ _nvnth_351:
     br x17
     .globl _nvnth_352
 _nvnth_352:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #5632
     add x16, x16, x17
     mov x17, #1
@@ -3537,8 +3537,8 @@ _nvnth_352:
     br x17
     .globl _nvnth_353
 _nvnth_353:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #5648
     add x16, x16, x17
     mov x17, #1
@@ -3547,8 +3547,8 @@ _nvnth_353:
     br x17
     .globl _nvnth_354
 _nvnth_354:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #5664
     add x16, x16, x17
     mov x17, #1
@@ -3557,8 +3557,8 @@ _nvnth_354:
     br x17
     .globl _nvnth_355
 _nvnth_355:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #5680
     add x16, x16, x17
     mov x17, #1
@@ -3567,8 +3567,8 @@ _nvnth_355:
     br x17
     .globl _nvnth_356
 _nvnth_356:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #5696
     add x16, x16, x17
     mov x17, #1
@@ -3577,8 +3577,8 @@ _nvnth_356:
     br x17
     .globl _nvnth_357
 _nvnth_357:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #5712
     add x16, x16, x17
     mov x17, #1
@@ -3587,8 +3587,8 @@ _nvnth_357:
     br x17
     .globl _nvnth_358
 _nvnth_358:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #5728
     add x16, x16, x17
     mov x17, #1
@@ -3597,8 +3597,8 @@ _nvnth_358:
     br x17
     .globl _nvnth_359
 _nvnth_359:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #5744
     add x16, x16, x17
     mov x17, #1
@@ -3607,8 +3607,8 @@ _nvnth_359:
     br x17
     .globl _nvnth_360
 _nvnth_360:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #5760
     add x16, x16, x17
     mov x17, #1
@@ -3617,8 +3617,8 @@ _nvnth_360:
     br x17
     .globl _nvnth_361
 _nvnth_361:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #5776
     add x16, x16, x17
     mov x17, #1
@@ -3627,8 +3627,8 @@ _nvnth_361:
     br x17
     .globl _nvnth_362
 _nvnth_362:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #5792
     add x16, x16, x17
     mov x17, #1
@@ -3637,8 +3637,8 @@ _nvnth_362:
     br x17
     .globl _nvnth_363
 _nvnth_363:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #5808
     add x16, x16, x17
     mov x17, #1
@@ -3647,8 +3647,8 @@ _nvnth_363:
     br x17
     .globl _nvnth_364
 _nvnth_364:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #5824
     add x16, x16, x17
     mov x17, #1
@@ -3657,8 +3657,8 @@ _nvnth_364:
     br x17
     .globl _nvnth_365
 _nvnth_365:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #5840
     add x16, x16, x17
     mov x17, #1
@@ -3667,8 +3667,8 @@ _nvnth_365:
     br x17
     .globl _nvnth_366
 _nvnth_366:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #5856
     add x16, x16, x17
     mov x17, #1
@@ -3677,8 +3677,8 @@ _nvnth_366:
     br x17
     .globl _nvnth_367
 _nvnth_367:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #5872
     add x16, x16, x17
     mov x17, #1
@@ -3687,8 +3687,8 @@ _nvnth_367:
     br x17
     .globl _nvnth_368
 _nvnth_368:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #5888
     add x16, x16, x17
     mov x17, #1
@@ -3697,8 +3697,8 @@ _nvnth_368:
     br x17
     .globl _nvnth_369
 _nvnth_369:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #5904
     add x16, x16, x17
     mov x17, #1
@@ -3707,8 +3707,8 @@ _nvnth_369:
     br x17
     .globl _nvnth_370
 _nvnth_370:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #5920
     add x16, x16, x17
     mov x17, #1
@@ -3717,8 +3717,8 @@ _nvnth_370:
     br x17
     .globl _nvnth_371
 _nvnth_371:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #5936
     add x16, x16, x17
     mov x17, #1
@@ -3727,8 +3727,8 @@ _nvnth_371:
     br x17
     .globl _nvnth_372
 _nvnth_372:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #5952
     add x16, x16, x17
     mov x17, #1
@@ -3737,8 +3737,8 @@ _nvnth_372:
     br x17
     .globl _nvnth_373
 _nvnth_373:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #5968
     add x16, x16, x17
     mov x17, #1
@@ -3747,8 +3747,8 @@ _nvnth_373:
     br x17
     .globl _nvnth_374
 _nvnth_374:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #5984
     add x16, x16, x17
     mov x17, #1
@@ -3757,8 +3757,8 @@ _nvnth_374:
     br x17
     .globl _nvnth_375
 _nvnth_375:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #6000
     add x16, x16, x17
     mov x17, #1
@@ -3767,8 +3767,8 @@ _nvnth_375:
     br x17
     .globl _nvnth_376
 _nvnth_376:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #6016
     add x16, x16, x17
     mov x17, #1
@@ -3777,8 +3777,8 @@ _nvnth_376:
     br x17
     .globl _nvnth_377
 _nvnth_377:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #6032
     add x16, x16, x17
     mov x17, #1
@@ -3787,8 +3787,8 @@ _nvnth_377:
     br x17
     .globl _nvnth_378
 _nvnth_378:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #6048
     add x16, x16, x17
     mov x17, #1
@@ -3797,8 +3797,8 @@ _nvnth_378:
     br x17
     .globl _nvnth_379
 _nvnth_379:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #6064
     add x16, x16, x17
     mov x17, #1
@@ -3807,8 +3807,8 @@ _nvnth_379:
     br x17
     .globl _nvnth_380
 _nvnth_380:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #6080
     add x16, x16, x17
     mov x17, #1
@@ -3817,8 +3817,8 @@ _nvnth_380:
     br x17
     .globl _nvnth_381
 _nvnth_381:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #6096
     add x16, x16, x17
     mov x17, #1
@@ -3827,8 +3827,8 @@ _nvnth_381:
     br x17
     .globl _nvnth_382
 _nvnth_382:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #6112
     add x16, x16, x17
     mov x17, #1
@@ -3837,8 +3837,8 @@ _nvnth_382:
     br x17
     .globl _nvnth_383
 _nvnth_383:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #6128
     add x16, x16, x17
     mov x17, #1
@@ -3847,8 +3847,8 @@ _nvnth_383:
     br x17
     .globl _nvnth_384
 _nvnth_384:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #6144
     add x16, x16, x17
     mov x17, #1
@@ -3857,8 +3857,8 @@ _nvnth_384:
     br x17
     .globl _nvnth_385
 _nvnth_385:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #6160
     add x16, x16, x17
     mov x17, #1
@@ -3867,8 +3867,8 @@ _nvnth_385:
     br x17
     .globl _nvnth_386
 _nvnth_386:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #6176
     add x16, x16, x17
     mov x17, #1
@@ -3877,8 +3877,8 @@ _nvnth_386:
     br x17
     .globl _nvnth_387
 _nvnth_387:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #6192
     add x16, x16, x17
     mov x17, #1
@@ -3887,8 +3887,8 @@ _nvnth_387:
     br x17
     .globl _nvnth_388
 _nvnth_388:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #6208
     add x16, x16, x17
     mov x17, #1
@@ -3897,8 +3897,8 @@ _nvnth_388:
     br x17
     .globl _nvnth_389
 _nvnth_389:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #6224
     add x16, x16, x17
     mov x17, #1
@@ -3907,8 +3907,8 @@ _nvnth_389:
     br x17
     .globl _nvnth_390
 _nvnth_390:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #6240
     add x16, x16, x17
     mov x17, #1
@@ -3917,8 +3917,8 @@ _nvnth_390:
     br x17
     .globl _nvnth_391
 _nvnth_391:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #6256
     add x16, x16, x17
     mov x17, #1
@@ -3927,8 +3927,8 @@ _nvnth_391:
     br x17
     .globl _nvnth_392
 _nvnth_392:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #6272
     add x16, x16, x17
     mov x17, #1
@@ -3937,8 +3937,8 @@ _nvnth_392:
     br x17
     .globl _nvnth_393
 _nvnth_393:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #6288
     add x16, x16, x17
     mov x17, #1
@@ -3947,8 +3947,8 @@ _nvnth_393:
     br x17
     .globl _nvnth_394
 _nvnth_394:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #6304
     add x16, x16, x17
     mov x17, #1
@@ -3957,8 +3957,8 @@ _nvnth_394:
     br x17
     .globl _nvnth_395
 _nvnth_395:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #6320
     add x16, x16, x17
     mov x17, #1
@@ -3967,8 +3967,8 @@ _nvnth_395:
     br x17
     .globl _nvnth_396
 _nvnth_396:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #6336
     add x16, x16, x17
     mov x17, #1
@@ -3977,8 +3977,8 @@ _nvnth_396:
     br x17
     .globl _nvnth_397
 _nvnth_397:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #6352
     add x16, x16, x17
     mov x17, #1
@@ -3987,8 +3987,8 @@ _nvnth_397:
     br x17
     .globl _nvnth_398
 _nvnth_398:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #6368
     add x16, x16, x17
     mov x17, #1
@@ -3997,8 +3997,8 @@ _nvnth_398:
     br x17
     .globl _nvnth_399
 _nvnth_399:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #6384
     add x16, x16, x17
     mov x17, #1
@@ -4007,8 +4007,8 @@ _nvnth_399:
     br x17
     .globl _nvnth_400
 _nvnth_400:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #6400
     add x16, x16, x17
     mov x17, #1
@@ -4017,8 +4017,8 @@ _nvnth_400:
     br x17
     .globl _nvnth_401
 _nvnth_401:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #6416
     add x16, x16, x17
     mov x17, #1
@@ -4027,8 +4027,8 @@ _nvnth_401:
     br x17
     .globl _nvnth_402
 _nvnth_402:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #6432
     add x16, x16, x17
     mov x17, #1
@@ -4037,8 +4037,8 @@ _nvnth_402:
     br x17
     .globl _nvnth_403
 _nvnth_403:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #6448
     add x16, x16, x17
     mov x17, #1
@@ -4047,8 +4047,8 @@ _nvnth_403:
     br x17
     .globl _nvnth_404
 _nvnth_404:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #6464
     add x16, x16, x17
     mov x17, #1
@@ -4057,8 +4057,8 @@ _nvnth_404:
     br x17
     .globl _nvnth_405
 _nvnth_405:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #6480
     add x16, x16, x17
     mov x17, #1
@@ -4067,8 +4067,8 @@ _nvnth_405:
     br x17
     .globl _nvnth_406
 _nvnth_406:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #6496
     add x16, x16, x17
     mov x17, #1
@@ -4077,8 +4077,8 @@ _nvnth_406:
     br x17
     .globl _nvnth_407
 _nvnth_407:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #6512
     add x16, x16, x17
     mov x17, #1
@@ -4087,8 +4087,8 @@ _nvnth_407:
     br x17
     .globl _nvnth_408
 _nvnth_408:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #6528
     add x16, x16, x17
     mov x17, #1
@@ -4097,8 +4097,8 @@ _nvnth_408:
     br x17
     .globl _nvnth_409
 _nvnth_409:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #6544
     add x16, x16, x17
     mov x17, #1
@@ -4107,8 +4107,8 @@ _nvnth_409:
     br x17
     .globl _nvnth_410
 _nvnth_410:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #6560
     add x16, x16, x17
     mov x17, #1
@@ -4117,8 +4117,8 @@ _nvnth_410:
     br x17
     .globl _nvnth_411
 _nvnth_411:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #6576
     add x16, x16, x17
     mov x17, #1
@@ -4127,8 +4127,8 @@ _nvnth_411:
     br x17
     .globl _nvnth_412
 _nvnth_412:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #6592
     add x16, x16, x17
     mov x17, #1
@@ -4137,8 +4137,8 @@ _nvnth_412:
     br x17
     .globl _nvnth_413
 _nvnth_413:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #6608
     add x16, x16, x17
     mov x17, #1
@@ -4147,8 +4147,8 @@ _nvnth_413:
     br x17
     .globl _nvnth_414
 _nvnth_414:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #6624
     add x16, x16, x17
     mov x17, #1
@@ -4157,8 +4157,8 @@ _nvnth_414:
     br x17
     .globl _nvnth_415
 _nvnth_415:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #6640
     add x16, x16, x17
     mov x17, #1
@@ -4167,8 +4167,8 @@ _nvnth_415:
     br x17
     .globl _nvnth_416
 _nvnth_416:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #6656
     add x16, x16, x17
     mov x17, #1
@@ -4177,8 +4177,8 @@ _nvnth_416:
     br x17
     .globl _nvnth_417
 _nvnth_417:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #6672
     add x16, x16, x17
     mov x17, #1
@@ -4187,8 +4187,8 @@ _nvnth_417:
     br x17
     .globl _nvnth_418
 _nvnth_418:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #6688
     add x16, x16, x17
     mov x17, #1
@@ -4197,8 +4197,8 @@ _nvnth_418:
     br x17
     .globl _nvnth_419
 _nvnth_419:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #6704
     add x16, x16, x17
     mov x17, #1
@@ -4207,8 +4207,8 @@ _nvnth_419:
     br x17
     .globl _nvnth_420
 _nvnth_420:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #6720
     add x16, x16, x17
     mov x17, #1
@@ -4217,8 +4217,8 @@ _nvnth_420:
     br x17
     .globl _nvnth_421
 _nvnth_421:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #6736
     add x16, x16, x17
     mov x17, #1
@@ -4227,8 +4227,8 @@ _nvnth_421:
     br x17
     .globl _nvnth_422
 _nvnth_422:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #6752
     add x16, x16, x17
     mov x17, #1
@@ -4237,8 +4237,8 @@ _nvnth_422:
     br x17
     .globl _nvnth_423
 _nvnth_423:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #6768
     add x16, x16, x17
     mov x17, #1
@@ -4247,8 +4247,8 @@ _nvnth_423:
     br x17
     .globl _nvnth_424
 _nvnth_424:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #6784
     add x16, x16, x17
     mov x17, #1
@@ -4257,8 +4257,8 @@ _nvnth_424:
     br x17
     .globl _nvnth_425
 _nvnth_425:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #6800
     add x16, x16, x17
     mov x17, #1
@@ -4267,8 +4267,8 @@ _nvnth_425:
     br x17
     .globl _nvnth_426
 _nvnth_426:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #6816
     add x16, x16, x17
     mov x17, #1
@@ -4277,8 +4277,8 @@ _nvnth_426:
     br x17
     .globl _nvnth_427
 _nvnth_427:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #6832
     add x16, x16, x17
     mov x17, #1
@@ -4287,8 +4287,8 @@ _nvnth_427:
     br x17
     .globl _nvnth_428
 _nvnth_428:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #6848
     add x16, x16, x17
     mov x17, #1
@@ -4297,8 +4297,8 @@ _nvnth_428:
     br x17
     .globl _nvnth_429
 _nvnth_429:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #6864
     add x16, x16, x17
     mov x17, #1
@@ -4307,8 +4307,8 @@ _nvnth_429:
     br x17
     .globl _nvnth_430
 _nvnth_430:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #6880
     add x16, x16, x17
     mov x17, #1
@@ -4317,8 +4317,8 @@ _nvnth_430:
     br x17
     .globl _nvnth_431
 _nvnth_431:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #6896
     add x16, x16, x17
     mov x17, #1
@@ -4327,8 +4327,8 @@ _nvnth_431:
     br x17
     .globl _nvnth_432
 _nvnth_432:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #6912
     add x16, x16, x17
     mov x17, #1
@@ -4337,8 +4337,8 @@ _nvnth_432:
     br x17
     .globl _nvnth_433
 _nvnth_433:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #6928
     add x16, x16, x17
     mov x17, #1
@@ -4347,8 +4347,8 @@ _nvnth_433:
     br x17
     .globl _nvnth_434
 _nvnth_434:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #6944
     add x16, x16, x17
     mov x17, #1
@@ -4357,8 +4357,8 @@ _nvnth_434:
     br x17
     .globl _nvnth_435
 _nvnth_435:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #6960
     add x16, x16, x17
     mov x17, #1
@@ -4367,8 +4367,8 @@ _nvnth_435:
     br x17
     .globl _nvnth_436
 _nvnth_436:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #6976
     add x16, x16, x17
     mov x17, #1
@@ -4377,8 +4377,8 @@ _nvnth_436:
     br x17
     .globl _nvnth_437
 _nvnth_437:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #6992
     add x16, x16, x17
     mov x17, #1
@@ -4387,8 +4387,8 @@ _nvnth_437:
     br x17
     .globl _nvnth_438
 _nvnth_438:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #7008
     add x16, x16, x17
     mov x17, #1
@@ -4397,8 +4397,8 @@ _nvnth_438:
     br x17
     .globl _nvnth_439
 _nvnth_439:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #7024
     add x16, x16, x17
     mov x17, #1
@@ -4407,8 +4407,8 @@ _nvnth_439:
     br x17
     .globl _nvnth_440
 _nvnth_440:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #7040
     add x16, x16, x17
     mov x17, #1
@@ -4417,8 +4417,8 @@ _nvnth_440:
     br x17
     .globl _nvnth_441
 _nvnth_441:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #7056
     add x16, x16, x17
     mov x17, #1
@@ -4427,8 +4427,8 @@ _nvnth_441:
     br x17
     .globl _nvnth_442
 _nvnth_442:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #7072
     add x16, x16, x17
     mov x17, #1
@@ -4437,8 +4437,8 @@ _nvnth_442:
     br x17
     .globl _nvnth_443
 _nvnth_443:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #7088
     add x16, x16, x17
     mov x17, #1
@@ -4447,8 +4447,8 @@ _nvnth_443:
     br x17
     .globl _nvnth_444
 _nvnth_444:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #7104
     add x16, x16, x17
     mov x17, #1
@@ -4457,8 +4457,8 @@ _nvnth_444:
     br x17
     .globl _nvnth_445
 _nvnth_445:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #7120
     add x16, x16, x17
     mov x17, #1
@@ -4467,8 +4467,8 @@ _nvnth_445:
     br x17
     .globl _nvnth_446
 _nvnth_446:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #7136
     add x16, x16, x17
     mov x17, #1
@@ -4477,8 +4477,8 @@ _nvnth_446:
     br x17
     .globl _nvnth_447
 _nvnth_447:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #7152
     add x16, x16, x17
     mov x17, #1
@@ -4487,8 +4487,8 @@ _nvnth_447:
     br x17
     .globl _nvnth_448
 _nvnth_448:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #7168
     add x16, x16, x17
     mov x17, #1
@@ -4497,8 +4497,8 @@ _nvnth_448:
     br x17
     .globl _nvnth_449
 _nvnth_449:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #7184
     add x16, x16, x17
     mov x17, #1
@@ -4507,8 +4507,8 @@ _nvnth_449:
     br x17
     .globl _nvnth_450
 _nvnth_450:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #7200
     add x16, x16, x17
     mov x17, #1
@@ -4517,8 +4517,8 @@ _nvnth_450:
     br x17
     .globl _nvnth_451
 _nvnth_451:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #7216
     add x16, x16, x17
     mov x17, #1
@@ -4527,8 +4527,8 @@ _nvnth_451:
     br x17
     .globl _nvnth_452
 _nvnth_452:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #7232
     add x16, x16, x17
     mov x17, #1
@@ -4537,8 +4537,8 @@ _nvnth_452:
     br x17
     .globl _nvnth_453
 _nvnth_453:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #7248
     add x16, x16, x17
     mov x17, #1
@@ -4547,8 +4547,8 @@ _nvnth_453:
     br x17
     .globl _nvnth_454
 _nvnth_454:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #7264
     add x16, x16, x17
     mov x17, #1
@@ -4557,8 +4557,8 @@ _nvnth_454:
     br x17
     .globl _nvnth_455
 _nvnth_455:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #7280
     add x16, x16, x17
     mov x17, #1
@@ -4567,8 +4567,8 @@ _nvnth_455:
     br x17
     .globl _nvnth_456
 _nvnth_456:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #7296
     add x16, x16, x17
     mov x17, #1
@@ -4577,8 +4577,8 @@ _nvnth_456:
     br x17
     .globl _nvnth_457
 _nvnth_457:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #7312
     add x16, x16, x17
     mov x17, #1
@@ -4587,8 +4587,8 @@ _nvnth_457:
     br x17
     .globl _nvnth_458
 _nvnth_458:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #7328
     add x16, x16, x17
     mov x17, #1
@@ -4597,8 +4597,8 @@ _nvnth_458:
     br x17
     .globl _nvnth_459
 _nvnth_459:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #7344
     add x16, x16, x17
     mov x17, #1
@@ -4607,8 +4607,8 @@ _nvnth_459:
     br x17
     .globl _nvnth_460
 _nvnth_460:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #7360
     add x16, x16, x17
     mov x17, #1
@@ -4617,8 +4617,8 @@ _nvnth_460:
     br x17
     .globl _nvnth_461
 _nvnth_461:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #7376
     add x16, x16, x17
     mov x17, #1
@@ -4627,8 +4627,8 @@ _nvnth_461:
     br x17
     .globl _nvnth_462
 _nvnth_462:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #7392
     add x16, x16, x17
     mov x17, #1
@@ -4637,8 +4637,8 @@ _nvnth_462:
     br x17
     .globl _nvnth_463
 _nvnth_463:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #7408
     add x16, x16, x17
     mov x17, #1
@@ -4647,8 +4647,8 @@ _nvnth_463:
     br x17
     .globl _nvnth_464
 _nvnth_464:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #7424
     add x16, x16, x17
     mov x17, #1
@@ -4657,8 +4657,8 @@ _nvnth_464:
     br x17
     .globl _nvnth_465
 _nvnth_465:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #7440
     add x16, x16, x17
     mov x17, #1
@@ -4667,8 +4667,8 @@ _nvnth_465:
     br x17
     .globl _nvnth_466
 _nvnth_466:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #7456
     add x16, x16, x17
     mov x17, #1
@@ -4677,8 +4677,8 @@ _nvnth_466:
     br x17
     .globl _nvnth_467
 _nvnth_467:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #7472
     add x16, x16, x17
     mov x17, #1
@@ -4687,8 +4687,8 @@ _nvnth_467:
     br x17
     .globl _nvnth_468
 _nvnth_468:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #7488
     add x16, x16, x17
     mov x17, #1
@@ -4697,8 +4697,8 @@ _nvnth_468:
     br x17
     .globl _nvnth_469
 _nvnth_469:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #7504
     add x16, x16, x17
     mov x17, #1
@@ -4707,8 +4707,8 @@ _nvnth_469:
     br x17
     .globl _nvnth_470
 _nvnth_470:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #7520
     add x16, x16, x17
     mov x17, #1
@@ -4717,8 +4717,8 @@ _nvnth_470:
     br x17
     .globl _nvnth_471
 _nvnth_471:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #7536
     add x16, x16, x17
     mov x17, #1
@@ -4727,8 +4727,8 @@ _nvnth_471:
     br x17
     .globl _nvnth_472
 _nvnth_472:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #7552
     add x16, x16, x17
     mov x17, #1
@@ -4737,8 +4737,8 @@ _nvnth_472:
     br x17
     .globl _nvnth_473
 _nvnth_473:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #7568
     add x16, x16, x17
     mov x17, #1
@@ -4747,8 +4747,8 @@ _nvnth_473:
     br x17
     .globl _nvnth_474
 _nvnth_474:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #7584
     add x16, x16, x17
     mov x17, #1
@@ -4757,8 +4757,8 @@ _nvnth_474:
     br x17
     .globl _nvnth_475
 _nvnth_475:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #7600
     add x16, x16, x17
     mov x17, #1
@@ -4767,8 +4767,8 @@ _nvnth_475:
     br x17
     .globl _nvnth_476
 _nvnth_476:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #7616
     add x16, x16, x17
     mov x17, #1
@@ -4777,8 +4777,8 @@ _nvnth_476:
     br x17
     .globl _nvnth_477
 _nvnth_477:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #7632
     add x16, x16, x17
     mov x17, #1
@@ -4787,8 +4787,8 @@ _nvnth_477:
     br x17
     .globl _nvnth_478
 _nvnth_478:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #7648
     add x16, x16, x17
     mov x17, #1
@@ -4797,8 +4797,8 @@ _nvnth_478:
     br x17
     .globl _nvnth_479
 _nvnth_479:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #7664
     add x16, x16, x17
     mov x17, #1
@@ -4807,8 +4807,8 @@ _nvnth_479:
     br x17
     .globl _nvnth_480
 _nvnth_480:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #7680
     add x16, x16, x17
     mov x17, #1
@@ -4817,8 +4817,8 @@ _nvnth_480:
     br x17
     .globl _nvnth_481
 _nvnth_481:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #7696
     add x16, x16, x17
     mov x17, #1
@@ -4827,8 +4827,8 @@ _nvnth_481:
     br x17
     .globl _nvnth_482
 _nvnth_482:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #7712
     add x16, x16, x17
     mov x17, #1
@@ -4837,8 +4837,8 @@ _nvnth_482:
     br x17
     .globl _nvnth_483
 _nvnth_483:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #7728
     add x16, x16, x17
     mov x17, #1
@@ -4847,8 +4847,8 @@ _nvnth_483:
     br x17
     .globl _nvnth_484
 _nvnth_484:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #7744
     add x16, x16, x17
     mov x17, #1
@@ -4857,8 +4857,8 @@ _nvnth_484:
     br x17
     .globl _nvnth_485
 _nvnth_485:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #7760
     add x16, x16, x17
     mov x17, #1
@@ -4867,8 +4867,8 @@ _nvnth_485:
     br x17
     .globl _nvnth_486
 _nvnth_486:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #7776
     add x16, x16, x17
     mov x17, #1
@@ -4877,8 +4877,8 @@ _nvnth_486:
     br x17
     .globl _nvnth_487
 _nvnth_487:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #7792
     add x16, x16, x17
     mov x17, #1
@@ -4887,8 +4887,8 @@ _nvnth_487:
     br x17
     .globl _nvnth_488
 _nvnth_488:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #7808
     add x16, x16, x17
     mov x17, #1
@@ -4897,8 +4897,8 @@ _nvnth_488:
     br x17
     .globl _nvnth_489
 _nvnth_489:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #7824
     add x16, x16, x17
     mov x17, #1
@@ -4907,8 +4907,8 @@ _nvnth_489:
     br x17
     .globl _nvnth_490
 _nvnth_490:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #7840
     add x16, x16, x17
     mov x17, #1
@@ -4917,8 +4917,8 @@ _nvnth_490:
     br x17
     .globl _nvnth_491
 _nvnth_491:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #7856
     add x16, x16, x17
     mov x17, #1
@@ -4927,8 +4927,8 @@ _nvnth_491:
     br x17
     .globl _nvnth_492
 _nvnth_492:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #7872
     add x16, x16, x17
     mov x17, #1
@@ -4937,8 +4937,8 @@ _nvnth_492:
     br x17
     .globl _nvnth_493
 _nvnth_493:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #7888
     add x16, x16, x17
     mov x17, #1
@@ -4947,8 +4947,8 @@ _nvnth_493:
     br x17
     .globl _nvnth_494
 _nvnth_494:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #7904
     add x16, x16, x17
     mov x17, #1
@@ -4957,8 +4957,8 @@ _nvnth_494:
     br x17
     .globl _nvnth_495
 _nvnth_495:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #7920
     add x16, x16, x17
     mov x17, #1
@@ -4967,8 +4967,8 @@ _nvnth_495:
     br x17
     .globl _nvnth_496
 _nvnth_496:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #7936
     add x16, x16, x17
     mov x17, #1
@@ -4977,8 +4977,8 @@ _nvnth_496:
     br x17
     .globl _nvnth_497
 _nvnth_497:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #7952
     add x16, x16, x17
     mov x17, #1
@@ -4987,8 +4987,8 @@ _nvnth_497:
     br x17
     .globl _nvnth_498
 _nvnth_498:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #7968
     add x16, x16, x17
     mov x17, #1
@@ -4997,8 +4997,8 @@ _nvnth_498:
     br x17
     .globl _nvnth_499
 _nvnth_499:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #7984
     add x16, x16, x17
     mov x17, #1
@@ -5007,8 +5007,8 @@ _nvnth_499:
     br x17
     .globl _nvnth_500
 _nvnth_500:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #8000
     add x16, x16, x17
     mov x17, #1
@@ -5017,8 +5017,8 @@ _nvnth_500:
     br x17
     .globl _nvnth_501
 _nvnth_501:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #8016
     add x16, x16, x17
     mov x17, #1
@@ -5027,8 +5027,8 @@ _nvnth_501:
     br x17
     .globl _nvnth_502
 _nvnth_502:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #8032
     add x16, x16, x17
     mov x17, #1
@@ -5037,8 +5037,8 @@ _nvnth_502:
     br x17
     .globl _nvnth_503
 _nvnth_503:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #8048
     add x16, x16, x17
     mov x17, #1
@@ -5047,8 +5047,8 @@ _nvnth_503:
     br x17
     .globl _nvnth_504
 _nvnth_504:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #8064
     add x16, x16, x17
     mov x17, #1
@@ -5057,8 +5057,8 @@ _nvnth_504:
     br x17
     .globl _nvnth_505
 _nvnth_505:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #8080
     add x16, x16, x17
     mov x17, #1
@@ -5067,8 +5067,8 @@ _nvnth_505:
     br x17
     .globl _nvnth_506
 _nvnth_506:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #8096
     add x16, x16, x17
     mov x17, #1
@@ -5077,8 +5077,8 @@ _nvnth_506:
     br x17
     .globl _nvnth_507
 _nvnth_507:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #8112
     add x16, x16, x17
     mov x17, #1
@@ -5087,8 +5087,8 @@ _nvnth_507:
     br x17
     .globl _nvnth_508
 _nvnth_508:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #8128
     add x16, x16, x17
     mov x17, #1
@@ -5097,8 +5097,8 @@ _nvnth_508:
     br x17
     .globl _nvnth_509
 _nvnth_509:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #8144
     add x16, x16, x17
     mov x17, #1
@@ -5107,8 +5107,8 @@ _nvnth_509:
     br x17
     .globl _nvnth_510
 _nvnth_510:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #8160
     add x16, x16, x17
     mov x17, #1
@@ -5117,8 +5117,8 @@ _nvnth_510:
     br x17
     .globl _nvnth_511
 _nvnth_511:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #8176
     add x16, x16, x17
     mov x17, #1
@@ -5127,8 +5127,8 @@ _nvnth_511:
     br x17
     .globl _nvnth_512
 _nvnth_512:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #8192
     add x16, x16, x17
     mov x17, #1
@@ -5137,8 +5137,8 @@ _nvnth_512:
     br x17
     .globl _nvnth_513
 _nvnth_513:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #8208
     add x16, x16, x17
     mov x17, #1
@@ -5147,8 +5147,8 @@ _nvnth_513:
     br x17
     .globl _nvnth_514
 _nvnth_514:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #8224
     add x16, x16, x17
     mov x17, #1
@@ -5157,8 +5157,8 @@ _nvnth_514:
     br x17
     .globl _nvnth_515
 _nvnth_515:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #8240
     add x16, x16, x17
     mov x17, #1
@@ -5167,8 +5167,8 @@ _nvnth_515:
     br x17
     .globl _nvnth_516
 _nvnth_516:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #8256
     add x16, x16, x17
     mov x17, #1
@@ -5177,8 +5177,8 @@ _nvnth_516:
     br x17
     .globl _nvnth_517
 _nvnth_517:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #8272
     add x16, x16, x17
     mov x17, #1
@@ -5187,8 +5187,8 @@ _nvnth_517:
     br x17
     .globl _nvnth_518
 _nvnth_518:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #8288
     add x16, x16, x17
     mov x17, #1
@@ -5197,8 +5197,8 @@ _nvnth_518:
     br x17
     .globl _nvnth_519
 _nvnth_519:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #8304
     add x16, x16, x17
     mov x17, #1
@@ -5207,8 +5207,8 @@ _nvnth_519:
     br x17
     .globl _nvnth_520
 _nvnth_520:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #8320
     add x16, x16, x17
     mov x17, #1
@@ -5217,8 +5217,8 @@ _nvnth_520:
     br x17
     .globl _nvnth_521
 _nvnth_521:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #8336
     add x16, x16, x17
     mov x17, #1
@@ -5227,8 +5227,8 @@ _nvnth_521:
     br x17
     .globl _nvnth_522
 _nvnth_522:
-    adrp x16, _nvn_slot@PAGE
-    add x16, x16, _nvn_slot@PAGEOFF
+    adrp x16, nvn_slot
+    add x16, x16, :lo12:nvn_slot
     mov x17, #8352
     add x16, x16, x17
     mov x17, #1
@@ -5237,8 +5237,8 @@ _nvnth_522:
     br x17
     .data
     .p2align 3
-    .globl _nvn_thunk
-_nvn_thunk:
+    .globl nvn_thunk
+nvn_thunk:
     .quad _nvnth_0
     .quad _nvnth_1
     .quad _nvnth_2
@@ -5762,8 +5762,8 @@ _nvn_thunk:
     .quad _nvnth_520
     .quad _nvnth_521
     .quad _nvnth_522
-    .globl _nvn_names
-_nvn_names:
+    .globl nvn_names
+nvn_names:
     .quad Ln0
     .quad Ln1
     .quad Ln2
@@ -6287,7 +6287,7 @@ _nvn_names:
     .quad Ln520
     .quad Ln521
     .quad Ln522
-    .cstring
+.section .rodata
 Ln0: .asciz "nvnDeviceBuilderSetDefaults"
 Ln1: .asciz "nvnDeviceBuilderSetFlags"
 Ln2: .asciz "nvnDeviceBuilderGetFlags"

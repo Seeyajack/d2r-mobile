@@ -29,3 +29,6 @@ dm/android/local.env
 
 # ===== 我们的独有：排障构建备份目录 =====
 dm/ohos/app/entry/build.bak-*/
+# ===== 游戏数据与派生内容：绝不入库（移植计划 3.4 红线；上游 dm/games 也是空的）=====
+# profile / shader_map / 各种 tsv 都由游戏文件现场生成，随构建临时产物走
+/dm/games/

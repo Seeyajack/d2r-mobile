@@ -49,14 +49,14 @@
 // ---------- 槽表、跳板、未实现桩 ----------
 // ---------- Slot table, thunks, unimplemented stubs ----------
 typedef struct { _Atomic uint64_t cnt; void *fn; } nvn_slot_t;
-nvn_slot_t nvn_slot[NVN_NFUNC];                 // 跳板按 i*16 访问，布局不可改 | The thunk accesses it by i*16; the layout must not change
+__attribute__((visibility("hidden"))) nvn_slot_t nvn_slot[NVN_NFUNC];   // ELF/PIC：隐藏可见性，nvn_thunks.S 里的 adrp/add 才能直接相对寻址（np237） 跳板按 i*16 访问，布局不可改 | The thunk accesses it by i*16; the layout must not change
 _Static_assert(sizeof(nvn_slot_t) == 16, "跳板按 16 字节步长寻址");
 extern void *nvn_thunk[NVN_NFUNC];
 extern const char *nvn_names[NVN_NFUNC];
 extern void nvn_unimpl_entry(void);
 extern void nvn_prof_entry(void);
-void *nvn_real[NVN_NFUNC];               // DM_NVN_PROF：计时包装调用的真实现 | DM_NVN_PROF: the real implementation called by the timing wrapper
-_Atomic uint64_t nvn_prof_ticks[NVN_NFUNC]; // DM_NVN_PROF：各函数累计耗时（cntvct 计数） | DM_NVN_PROF: cumulative time of each function (cntvct counts)
+__attribute__((visibility("hidden"))) void *nvn_real[NVN_NFUNC];               // 同上（np237） DM_NVN_PROF：计时包装调用的真实现 | DM_NVN_PROF: the real implementation called by the timing wrapper
+__attribute__((visibility("hidden"))) _Atomic uint64_t nvn_prof_ticks[NVN_NFUNC]; // 同上（np237） DM_NVN_PROF：各函数累计耗时（cntvct 计数） | DM_NVN_PROF: cumulative time of each function (cntvct counts)
 static uint8_t g_unimpl_seen[NVN_NFUNC];
 
 uint64_t nvn_unimpl_c(nvn_slot_t *slot, uint64_t x0, uint64_t x1, uint64_t x2) {
