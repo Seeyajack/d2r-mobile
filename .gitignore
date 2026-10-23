@@ -41,3 +41,6 @@ oh_modules/
 .vscode/
 .idea/
 Thumbs.db
+
+# 构建备份目录（排障时手工留的，不入库）
+dm/ohos/app/entry/build.bak-*/
