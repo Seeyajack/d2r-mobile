@@ -2,6 +2,7 @@
 // Diagnostics: probes DM_PROBE, UI message bus DM_UIMSG, main-thread sampling DM_SAMPLE. Split out of crash.c (crash.c only handles signals).
 #include "dm_prof.h"
 #include "dm.h"
+#include "dm_uctx.h"
 #include "dm_hud.h"
 #include "dm_cursor.h"
 #include "dm_hud_exp.h"
@@ -167,25 +168,25 @@ static void probe_dump_once(void) {
     LOG("探针转储 %s+%s 长 %s → %s", mod, o, n, f ? f : def);
 }
 static int probe_hit(ucontext_t *uc) {   // 由 probe_install 注册给 crash.c 的 SIGTRAP 分支 | Registered by probe_install with the SIGTRAP branch of crash.c
-    uint64_t pc = uc->uc_mcontext->__ss.__pc;
+    uint64_t pc = UC_PC(uc);
     for (int i = 0; i < g_nprobe; i++) if (g_probe[i].at == pc) {
         probe_dump_once();
-        if (g_probe[i].fn) { g_probe[i].hits++; g_probe[i].fn(uc); uc->uc_mcontext->__ss.__pc = (uint64_t)g_probe[i].slot; return 1; }
+        if (g_probe[i].fn) { g_probe[i].hits++; g_probe[i].fn(uc); UC_PC(uc) = (uint64_t)g_probe[i].slot; return 1; }
         { extern uint64_t g_t0_ns; uint64_t now_ns(void); fprintf(stderr, "[dm] PROBE %s #%u [%.4fs]", g_probe[i].name, ++g_probe[i].hits, (now_ns() - g_t0_ns) / 1e9); }
-        for (int r = 0; r < 4; r++) { uint64_t v = uc->uc_mcontext->__ss.__x[r]; fprintf(stderr, " x%d=%#llx", r, v); probe_str(v); }
-        for (int r = 19; r < 24; r++) fprintf(stderr, " x%d=%#llx", r, uc->uc_mcontext->__ss.__x[r]);
-        { uint64_t x8 = uc->uc_mcontext->__ss.__x[8]; Dl_info di; fprintf(stderr, " x8=%#llx", x8);   // x8：间接调用目标常在这里（blr x8 前下探针） | x8: indirect call targets are often here (probe placed before blr x8)
+        for (int r = 0; r < 4; r++) { uint64_t v = UC_X(uc, r); fprintf(stderr, " x%d=%#llx", r, v); probe_str(v); }
+        for (int r = 19; r < 24; r++) fprintf(stderr, " x%d=%#llx", r, UC_X(uc, r));
+        { uint64_t x8 = UC_X(uc, 8); Dl_info di; fprintf(stderr, " x8=%#llx", x8);   // x8：间接调用目标常在这里（blr x8 前下探针） | x8: indirect call targets are often here (probe placed before blr x8)
           if (dladdr((void *)x8, &di) && di.dli_sname) fprintf(stderr, "（%s+%#lx）", di.dli_sname, (unsigned long)(x8 - (uint64_t)di.dli_saddr)); }
         if (g_probe[i].dump >= 0) {
             uint8_t b[16]; vm_size_t got = 0;
-            uint64_t at = uc->uc_mcontext->__ss.__x[0] + (g_probe[i].dump & 0xffffff);
+            uint64_t at = UC_X(uc, 0) + (g_probe[i].dump & 0xffffff);
             if (g_probe[i].dump & 0x1000000) { uint64_t p = 0; vm_size_t g = 0; if (!vm_read_overwrite(mach_task_self(), at, 8, (vm_address_t)&p, &g)) at = p; else at = 0; }   // @*偏移：先解引用再转储 | @*offset: dereference first, then dump
             if (at && !vm_read_overwrite(mach_task_self(), at, 16, (vm_address_t)b, &got) && got == 16) {
                 fprintf(stderr, " [%s%#lx]=", (g_probe[i].dump & 0x1000000) ? "*x0+" : "x0+", g_probe[i].dump & 0xffffff); for (int k = 0; k < 16; k++) fprintf(stderr, "%02x", b[k]); }
         }
         fputc('\n', stderr);
-        dm_backtrace(uc->uc_mcontext->__ss.__fp);
-        uc->uc_mcontext->__ss.__pc = (uint64_t)g_probe[i].slot;
+        dm_backtrace(UC_FP(uc));
+        UC_PC(uc) = (uint64_t)g_probe[i].slot;
         return 1;
     }
     return 0;
@@ -259,7 +260,7 @@ static void json_str(FILE *f, const char *s) {
 // Segments: ① host loading ② SDK initialization ③ init_array (marked in main.c); ④ nnMain→ToFrontEnd ⑤ loading panel open→close ⑥ →MainMenuButtonRibbon (marked by UI messages).
 // Each segment records wall clock and the delta of each counter; wait-type counters are summed over all threads (thread-seconds), with 「主线程等」(main thread wait) listed separately. A table is printed on reaching MainMenuButtonRibbon.
 static _Atomic uint64_t g_pns[PROF_N], g_pby[PROF_N];
-static const char *const g_pname[PROF_N] = {"RomFS读", "锁等", "条件变量等", "地址等", "同步对象等", "Sleep", "主线程等", "出图等(图形)", "着色器/管线(图形)", "TACT解码"};
+static const char *const g_pname[PROF_N] = {"RomFS读", "锁等", "条件变量等", "地址等", "同步对象等", "Sleep", "主线程等", "出图等(图形)", "着色器/管线(图形)", "TACT解码", "BC软解(图形)"};
 #define MAX_SEG 12
 static struct { const char *name; uint64_t t, ns[PROF_N], by[PROF_N]; } g_seg[MAX_SEG];
 static int g_nseg, g_prof_done;
@@ -295,12 +296,28 @@ void dm_prof_mark(const char *seg) {
     pthread_mutex_unlock(&g_proflock);
 }
 static _Atomic uint64_t g_ribbon_ns;
+// 进局装载段（DM_BOOTPROF=1）：读取画面开 → 撤，记墙钟与同一组计数器的增量；进日志并追加到 loadprof.txt（日志在进局时常被冲掉）
+// In-run load segment (DM_BOOTPROF=1): loading screen open → taken down; wall clock and deltas of the same counters; logged and appended to loadprof.txt (the log is often flushed out while entering)
+static struct { uint64_t t, ns[PROF_N], by[PROF_N]; int on; } g_ld;
+static void prof_load_begin(void) {
+    if (!g_flag.bootprof || g_ld.on) return; uint64_t now_ns(void);
+    g_ld.t = now_ns(); for (int k = 0; k < PROF_N; k++) { g_ld.ns[k] = g_pns[k]; g_ld.by[k] = g_pby[k]; } g_ld.on = 1;
+}
+static void prof_load_end(void) {
+    if (!g_flag.bootprof || !g_ld.on) return; uint64_t now_ns(void); g_ld.on = 0;
+    char line[1024]; size_t o = snprintf(line, sizeof line, "进局装载 墙钟 %.3f s：", (now_ns() - g_ld.t) / 1e9);
+    for (int k = 0; k < PROF_N && o < sizeof line; k++) o += snprintf(line + o, sizeof line - o, " %s %.3f", g_pname[k], (g_pns[k] - g_ld.ns[k]) / 1e9);
+    if (o < sizeof line) snprintf(line + o, sizeof line - o, " 读 %.1f MiB 解码 %.1f MiB", (g_pby[PROF_FS_READ] - g_ld.by[PROF_FS_READ]) / 1048576.0, (g_pby[PROF_TACT] - g_ld.by[PROF_TACT]) / 1048576.0);
+    LOG("%s", line);
+    FILE *f = fopen("loadprof.txt", "a"); if (f) { time_t w = time(NULL); struct tm tmv; localtime_r(&w, &tmv); char ts[16]; strftime(ts, sizeof ts, "%H:%M:%S", &tmv); fprintf(f, "%s\t%s\n", ts, line); fclose(f); }
+}
 static void prof_on_uimsg(uint64_t act, const char *arg) {   // UI 消息边界（动作哈希按 FNV-1a） | UI message boundary (action hash by FNV-1a)
     if (!g_flag.bootprof) return;
     static int seen_fe, seen_open, seen_close;
     if (act == 0x61b685f774a14250ull && !seen_fe) { seen_fe = 1; dm_prof_mark("④ nnMain → ToFrontEnd"); }
     else if (!strcmp(arg, "MainMenuLoadingPanel") && act == 0x723d40e52f74e229ull && !seen_open) { seen_open = 1; dm_prof_mark("④b ToFrontEnd → 装载面板打开"); }
     else if (!strcmp(arg, "MainMenuLoadingPanel") && act != 0x723d40e52f74e229ull && seen_open && !seen_close) { seen_close = 1; dm_prof_mark("⑤ 装载期（装载面板开 → 关）"); }
+    if (!strcmp(arg, "LoadScreenPanel") && act == 0x723d40e52f74e229ull) prof_load_begin();
     else if (!strcmp(arg, "MainMenuButtonRibbon")) { if (!g_ribbon_ns) { uint64_t now_ns(void); g_ribbon_ns = now_ns(); } dm_prof_mark("⑥ → MainMenuButtonRibbon"); }
 }
 uint64_t dm_prof_ribbon_ns(void) { return g_ribbon_ns; }   // 第一次 OpenPanel MainMenuButtonRibbon 的 now_ns 时刻；未出现为 0（需 DM_BOOTPROF=1） | now_ns time of the first OpenPanel MainMenuButtonRibbon; 0 if it has not appeared (needs DM_BOOTPROF=1)
@@ -336,17 +353,18 @@ void uimsg_subscribe(void (*fn)(const char *cat, const char *act, const char *ar
 #define UIH_MONSTERHEALTH 0xd3a07a5ecad1a9a3ull
 #define UIH_SETINFO       0x40ffba2d98a3ff97ull
 static void monres_on_setinfo(const uint64_t *regs, uint64_t payload) {
-    int dm_custom_get(const char *key); if (!dm_custom_get("item_notes") || dm_lang_index() != 8) return;   // 物品注释一系只有简中版（英文版：别的语言不显示；注释只写进 zhCN 一列） | the item-notes family exists only in Simplified Chinese (English version: not shown in other languages; notes are written only into the zhCN column)
+    int dm_custom_get(const char *key), lang = dm_lang_index(); if (!dm_custom_get("item_notes") || (lang != 8 && lang != 2 && lang != 10)) return;   // 物品注释一系做了简中与西语（zhCN、esES、esMX 三列，annot_strings.py LANGS）；别的语言不显示 | The item-annotation family (物品注释) is done in Simplified Chinese and Spanish (three columns zhCN, esES, esMX; annot_strings.py LANGS); other languages do not show it
     module_t *mm = NULL; for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) mm = &g_mod[i];
     uint64_t unit = regs[19], name = 0; uint32_t type = 0; vm_size_t got = 0;
     if (!mm || !unit || vm_read_overwrite(mach_task_self(), unit, 4, (vm_address_t)&type, &got) || type != 1) return;   // 只认怪物（单位类型 1） | Monsters only (unit type 1)
     if (vm_read_overwrite(mach_task_self(), payload, 8, (vm_address_t)&name, &got) || !name) return;
     int (*get)(uint64_t, int, int) = (int (*)(uint64_t, int, int))(mm->base + 0x5b9290);
     static const int id[6] = {36, 37, 39, 41, 43, 45};
-    static const char *lb[6] = {"物", "魔", "火", "电", "冰", "毒"}, *cc[6] = {"\xee\x81\xbe" "4", "\xee\x81\xbe" "8", "\xee\x81\xbe" "1", "\xee\x81\xbe" "9", "\xee\x81\xbe" "3", "\xee\x81\xbe" "2"};   // 颜色：字符串表加载时把「ÿc<码>」换成私用区 U+E07E + <码>（UTF-8 EE 81 BE，读缓冲区实测），这里直接写换后的形式（暗金 / 橙 / 红 / 黄 / 蓝 / 绿） | Colors: when the string table loads, "ÿc<code>" is replaced by private-use U+E07E + <code> (UTF-8 EE 81 BE, measured by reading the buffer); here we write the replaced form directly (unique gold / orange / red / yellow / blue / green)
+    static const char *lb[6] = {"物", "魔", "火", "电", "冰", "毒"}, *lbes[6] = {"Fís", "Mág", "Fue", "Ray", "Frí", "Ven"}, *cc[6] = {"\xee\x81\xbe" "4", "\xee\x81\xbe" "8", "\xee\x81\xbe" "1", "\xee\x81\xbe" "9", "\xee\x81\xbe" "3", "\xee\x81\xbe" "2"};   // 颜色：字符串表加载时把「ÿc<码>」换成私用区 U+E07E + <码>（UTF-8 EE 81 BE，读缓冲区实测），这里直接写换后的形式（暗金 / 橙 / 红 / 黄 / 蓝 / 绿） | Colors: when the string table loads, "ÿc<code>" is replaced by private-use U+E07E + <code> (UTF-8 EE 81 BE, measured by reading the buffer); here we write the replaced form directly (unique gold / orange / red / yellow / blue / green)
     char add[160] = ""; size_t n = 0;
     for (int i = 0; i < 6; i++) { int v = get(unit, id[i], 0); if (!v) continue;
-        int w = v >= 100 ? snprintf(add + n, sizeof add - n, " %s%s免", cc[i], lb[i]) : snprintf(add + n, sizeof add - n, " %s%s%d", cc[i], lb[i], v);
+        int w = lang != 8 ? (v >= 100 ? snprintf(add + n, sizeof add - n, " %s%s inm", cc[i], lbes[i]) : snprintf(add + n, sizeof add - n, " %s%s %d", cc[i], lbes[i], v))   // 西语：简称与数字之间空一格，免疫写 inm（inmune） | Spanish: one space between the abbreviation and the number; immunity is written inm (inmune)
+                          : v >= 100 ? snprintf(add + n, sizeof add - n, " %s%s免", cc[i], lb[i]) : snprintf(add + n, sizeof add - n, " %s%s%d", cc[i], lb[i], v);
         if (w < 0 || (size_t)w >= sizeof add - n) return; n += (size_t)w; }
     { static int lg = -1; static uint64_t last; if (lg < 0) lg = getenv("DM_TEST_MONRES_LOG") != NULL;   // 回归判据：单位换了才记一行（拼出的串 + 六项属性原值） | Regression criterion: log a line only when the unit changes (the assembled string + the raw values of the six stats)
       if (lg && unit != last) { last = unit; int v[6]; for (int i = 0; i < 6; i++) v[i] = get(unit, id[i], 0);
@@ -483,8 +501,8 @@ static void on_sample(int sig, siginfo_t *si, void *uc_) {
     unsigned i = atomic_load(&g_shead) % SRING;
     extern uint64_t now_ns(void);
     uint32_t thr_cur_handle(void);
-    g_sring[i].h = thr_cur_handle(); g_sring[i].t = now_ns(); g_sring[i].pc = uc->uc_mcontext->__ss.__pc; g_sring[i].lr = uc->uc_mcontext->__ss.__lr;
-    uint64_t fp = uc->uc_mcontext->__ss.__fp; int n = 0;
+    g_sring[i].h = thr_cur_handle(); g_sring[i].t = now_ns(); g_sring[i].pc = UC_PC(uc); g_sring[i].lr = UC_LR(uc);
+    uint64_t fp = UC_FP(uc); int n = 0;
     // 帧链用安全读：被打断的函数可能把 x29 当普通寄存器用（直接解引用曾段错误）
     // The frame chain uses safe reads: the interrupted function may be using x29 as an ordinary register (a direct dereference once segfaulted)
     for (; n < 16 && fp && !(fp & 7); n++) {
@@ -1520,7 +1538,7 @@ static int g_loadscreen_seen;
 int dm_loadscreen_up(void);
 void dm_longframe_note(const char *what) {
     static const char *path; static int init; static unsigned n;
-    if (!init) { init = 1; const char *e = getenv("DM_PERF_FILE"); path = e ? (strcmp(e, "0") ? e : NULL) : (TARGET_OS_IPHONE ? "perf.txt" : NULL); }
+    if (!init) { init = 1; const char *e = getenv("DM_PERF_FILE"); path = e ? (strcmp(e, "0") ? e : NULL) : (DM_PHONE ? "perf.txt" : NULL); }
     dm_hud_info h; dm_hud_get(&h); char ctx[160];
     snprintf(ctx, sizeof ctx, "读取画面 %s，面板 %s，区域 %d%s", g_loadscreen_seen ? (dm_loadscreen_up() ? "盖着" : "已撤") : "未见过", g_lf_panel[0] ? g_lf_panel : "无", h.area, h.valid ? "" : "（未读到玩家）");
     LOG("[长帧] %s；%s", what, ctx);
@@ -1531,7 +1549,7 @@ void dm_longframe_note(const char *what) {
 }
 void dm_perf_present(double iv) {   // 出图线程每帧调一次（滞后 8 帧的实际上屏间隔 ms；−1 = 被系统丢弃，0 = 无读数） | Called once per frame by the present thread (the actual present interval in ms, lagging by 8 frames; −1 = dropped by the system, 0 = no reading)
     static const char *path; static int init; static unsigned c16, c25, c33, disc; static double sum; static uint64_t t0, f0, cpu0, tstart;
-    if (!init) { init = 1; const char *e = getenv("DM_PERF_FILE"); path = e ? (strcmp(e, "0") ? e : NULL) : (TARGET_OS_IPHONE ? "perf.txt" : NULL); t0 = tstart = now_ns(); f0 = dm_nvn_frame_count(); cpu0 = dm_nvn_sub_cpu_ns(); }
+    if (!init) { init = 1; const char *e = getenv("DM_PERF_FILE"); path = e ? (strcmp(e, "0") ? e : NULL) : (DM_PHONE ? "perf.txt" : NULL); t0 = tstart = now_ns(); f0 = dm_nvn_frame_count(); cpu0 = dm_nvn_sub_cpu_ns(); }
     dm_3d_scale_feed(iv);   // 动态 3D 比例的控制器吃同一份上屏间隔（hle_oe.c） | The dynamic 3D scale controller consumes the same present intervals (hle_oe.c)
     if (!path) return;
     if (iv < 0) disc++; else if (iv > 0) { sum += iv; if (iv <= 20.8) c16++; else if (iv <= 29.2) c25++; else c33++; }
@@ -1791,7 +1809,7 @@ static void loadscreen_close_now(unsigned generation) {
     pthread_mutex_lock(&g_shotgate_mu);
     if (generation == g_loadscreen_generation && g_loadscreen_unload_pending) {
         g_loadscreen_unload_pending = 0; g_loadscreen_open = 0;
-        LOG("读取画面已撤");
+        LOG("读取画面已撤"); prof_load_end();
     }
     pthread_mutex_unlock(&g_shotgate_mu);
     if (!dm_loadscreen_up()) { lhold_release(); atomic_store(&g_lhold_giveup, 0); }
@@ -1834,14 +1852,14 @@ static void loadscreen_on_uimsg(const char *cat, const char *act, const char *ar
     if (strcmp(arg, "LoadScreenPanel")) return;
     pthread_mutex_lock(&g_shotgate_mu);
     if (!strcmp(act, "OpenPanel") || !strcmp(act, "OpenExclusivePanel")) {
-        g_loadscreen_seen = 1; g_loadscreen_open = 1; g_loadscreen_unload_pending = 0; g_loadscreen_generation++;
+        g_loadscreen_seen = 1; g_loadscreen_open = 1; g_loadscreen_unload_pending = 0; g_loadscreen_generation++; prof_load_begin();
         pthread_mutex_unlock(&g_shotgate_mu); return;
     }
     if (strcmp(act, "UnloadPanel") && strcmp(act, "ClosePanel")) { pthread_mutex_unlock(&g_shotgate_mu); return; }
     g_loadscreen_seen = 1; g_loadscreen_generation++;
     if (!g_loadscreen_delay_ms) {
         g_loadscreen_open = 0; g_loadscreen_unload_pending = 0;
-        pthread_mutex_unlock(&g_shotgate_mu); LOG("读取画面已撤"); lhold_release(); return;
+        pthread_mutex_unlock(&g_shotgate_mu); LOG("读取画面已撤"); prof_load_end(); lhold_release(); return;
     }
     g_loadscreen_unload_pending = 1;
     unsigned *generation = malloc(sizeof *generation); *generation = g_loadscreen_generation;

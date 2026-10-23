@@ -182,10 +182,10 @@ int main(void) {
     CHECK(h_fs_MountSave("save", NULL) == RES_OK && write_save("save:/a", "ok3") == RES_OK && h_fs_Commit("save") == RES_OK, "去掉注入重新挂载：事务式照常，写 a=ok3 提交成功");
     snprintf(p, sizeof p, "%s/a", save); CHECK(same(p, "ok3"), "已提交 a = ok3");
 
-    // 语言开关改写设置文件（settings_lang_apply）：期望值按规则手算——只在「与开关不符」时把 Language / VoiceLanguage 改成 0（英文）或 8（简中），别的键和别的语言不动
-    // Language switch rewriting the settings file (settings_lang_apply): expected values computed by hand from the rule -- only when it "does not match the switch" are Language / VoiceLanguage changed to 0 (English) or 8 (Simplified Chinese); other keys and other languages are untouched
-    { extern int g_t_lang; char sd[1200], sf[1300], gotj[512]; snprintf(sd, sizeof sd, "%s/langt", root); mkdir(sd, 0755); snprintf(sf, sizeof sf, "%s/Settings", sd); mkdir(sf, 0755); snprintf(sf, sizeof sf, "%s/Settings/Settings.json", sd);
-      #define LANGCASE(dm, in, want, what) do { g_t_lang = (dm); put(sf, (in)); settings_lang_apply(sd); FILE *lf = fopen(sf, "rb"); size_t ln_ = lf ? fread(gotj, 1, sizeof gotj - 1, lf) : 0; if (lf) fclose(lf); gotj[ln_] = 0; CHECK(!strcmp(gotj, (want)), "语言开关：%s", (what)); } while (0)
+    // 语言开关改写设置文件（settings_lang_apply）：期望值按规则手算——只在「与开关不符」时把 Language / VoiceLanguage 改成 0（英文）、8（简中）、2 / 10（西语）、7（俄语）或 5（韩语），配音按 voice_for 走中英，别的键和别的语言不动
+    { extern int g_t_lang, g_t_voice; char sd[1200], sf[1300], gotj[512]; snprintf(sd, sizeof sd, "%s/langt", root); mkdir(sd, 0755); snprintf(sf, sizeof sf, "%s/Settings", sd); mkdir(sf, 0755); snprintf(sf, sizeof sf, "%s/Settings/Settings.json", sd);
+      #define LANGCASE(dm, in, want, what) do { g_t_lang = (dm); g_t_voice = -1; put(sf, (in)); settings_lang_apply(sd); FILE *lf = fopen(sf, "rb"); size_t ln_ = lf ? fread(gotj, 1, sizeof gotj - 1, lf) : 0; if (lf) fclose(lf); gotj[ln_] = 0; CHECK(!strcmp(gotj, (want)), "语言开关：%s", (what)); } while (0)
+      #define VOICECASE(dm, voice, in, want, what) do { g_t_lang = (dm); g_t_voice = (voice); put(sf, (in)); settings_lang_apply(sd); FILE *lf = fopen(sf, "rb"); size_t ln_ = lf ? fread(gotj, 1, sizeof gotj - 1, lf) : 0; if (lf) fclose(lf); gotj[ln_] = 0; CHECK(!strcmp(gotj, (want)), "单独配音：%s", (what)); } while (0)
       LANGCASE(-1, "{ \"Language\": 8, \"VoiceLanguage\": 8 }", "{ \"Language\": 8, \"VoiceLanguage\": 8 }", "没点过应用：一个字不动");
       LANGCASE(1, "{ \"A\": 1, \"Language\": 8, \"VoiceLanguage\": 8, \"B\": 2 }", "{ \"A\": 1, \"Language\": 0, \"VoiceLanguage\": 0, \"B\": 2 }", "开关 = 英文、文件是简中：文字和语音都改成 0，别的键不动");
       LANGCASE(0, "{ \"Language\": 0, \"VoiceLanguage\": 0 }", "{ \"Language\": 8, \"VoiceLanguage\": 8 }", "开关 = 中文、文件是英文：都改成 8");
@@ -193,7 +193,34 @@ int main(void) {
       LANGCASE(1, "{ \"Language\": 0, \"VoiceLanguage\": 0 }", "{ \"Language\": 0, \"VoiceLanguage\": 0 }", "开关 = 英文、文件已是英文：不动");
       LANGCASE(1, "{ \"Language\": 0, \"VoiceLanguage\": 8 }", "{ \"Language\": 0, \"VoiceLanguage\": 0 }", "开关 = 英文、文字已英文但语音还是中文：语音跟上");
       LANGCASE(1, "{ \"Language\": 12 }", "{\n    \"VoiceLanguage\": 0, \"Language\": 0 }", "开关 = 英文、两位数的语言号且没有语音键：改写并补上语音键");
-      g_t_lang = -1; }
+      // 西语（开关 = 2）：只有简中与英文的配音在资源包里，西语文字配英文配音；宿主没有系统语言可问时按 esES（2）
+      // Spanish (switch = 2): only Simplified Chinese and English voice-overs are in the resource pack, Spanish text gets the English voice-over; when the host has no system language to ask, use esES (2)
+      LANGCASE(2, "{ \"Language\": 8, \"VoiceLanguage\": 8 }", "{ \"Language\": 2, \"VoiceLanguage\": 0 }", "开关 = 西语、文件是简中：文字 esES、语音英文");
+      LANGCASE(2, "{ \"Language\": 10, \"VoiceLanguage\": 0 }", "{ \"Language\": 10, \"VoiceLanguage\": 0 }", "开关 = 西语、文件已是拉美西语：不动");
+      LANGCASE(2, "{ \"Language\": 2, \"VoiceLanguage\": 2 }", "{ \"Language\": 2, \"VoiceLanguage\": 0 }", "开关 = 西语、语音是不在包里的西语配音：语音改英文");
+      LANGCASE(1, "{ \"Language\": 2, \"VoiceLanguage\": 0 }", "{ \"Language\": 0, \"VoiceLanguage\": 0 }", "开关 = 英文、文件是西语：文字改英文");
+      LANGCASE(0, "{ \"Language\": 10, \"VoiceLanguage\": 0 }", "{ \"Language\": 8, \"VoiceLanguage\": 8 }", "开关 = 中文、文件是拉美西语：都改成 8");
+      // 俄语（开关 = 3）：原版只有一种俄文 = 7 ruRU；俄语配音在分块 16，资源里有这个分块时语音跟着改成俄语，没有（我们出的包裁掉了）就配英文；已在俄语就不动
+      // Russian (switch = 3): the original has a single Russian = 7 ruRU; the Russian voice-over is in chunk 16 - when the resources have that chunk the voice switches to Russian too, otherwise (our packages strip it) it stays English; already Russian = untouched
+      { char rr[1200], rd[1300]; snprintf(rr, sizeof rr, "%s/romfs_ru", root); snprintf(rd, sizeof rd, "%s/data", rr); mkdir(rr, 0755); mkdir(rd, 0755); setenv("DM_ROMFS", rr, 1);
+        LANGCASE(3, "{ \"Language\": 0, \"VoiceLanguage\": 0 }", "{ \"Language\": 7, \"VoiceLanguage\": 0 }", "开关 = 俄语、资源里没有俄语配音分块：文字改 ruRU，语音配英文");
+        snprintf(rd, sizeof rd, "%s/data/16-00000001.data", rr); put(rd, "x"); }
+      LANGCASE(3, "{ \"Language\": 0, \"VoiceLanguage\": 0 }", "{ \"Language\": 7, \"VoiceLanguage\": 7 }", "开关 = 俄语、文件是英文：文字与语音都改成 ruRU");
+      LANGCASE(3, "{ \"Language\": 7, \"VoiceLanguage\": 7 }", "{ \"Language\": 7, \"VoiceLanguage\": 7 }", "开关 = 俄语、文件已是俄文配俄语语音：不动");
+      LANGCASE(3, "{ \"Language\": 7, \"VoiceLanguage\": 0 }", "{ \"Language\": 7, \"VoiceLanguage\": 7 }", "开关 = 俄语、文件是俄文配英文语音：语音跟上");
+      LANGCASE(1, "{ \"Language\": 7, \"VoiceLanguage\": 7 }", "{ \"Language\": 0, \"VoiceLanguage\": 0 }", "开关 = 英文、文件是俄文：文字与语音都改英文");
+      // 韩语（开关 = 4）：原版韩文 = 5 koKR；韩语配音在分块 11，规则同俄语（资源目录还是上面那个，此刻只有 16 号分块）
+      LANGCASE(4, "{ \"Language\": 0, \"VoiceLanguage\": 0 }", "{ \"Language\": 5, \"VoiceLanguage\": 0 }", "开关 = 韩语、资源里没有韩语配音分块：文字改 koKR，语音配英文");
+      { char rd[1300]; snprintf(rd, sizeof rd, "%s/romfs_ru/data/11-00000001.data", root); put(rd, "x"); }
+      LANGCASE(4, "{ \"Language\": 0, \"VoiceLanguage\": 0 }", "{ \"Language\": 5, \"VoiceLanguage\": 5 }", "开关 = 韩语、资源里有 11 号分块：文字与语音都改成 koKR");
+      LANGCASE(4, "{ \"Language\": 5, \"VoiceLanguage\": 5 }", "{ \"Language\": 5, \"VoiceLanguage\": 5 }", "开关 = 韩语、文件已是韩文配韩语语音：不动");
+      LANGCASE(3, "{ \"Language\": 5, \"VoiceLanguage\": 5 }", "{ \"Language\": 7, \"VoiceLanguage\": 7 }", "开关 = 俄语、文件是韩文：文字与语音都改成 ruRU");
+      LANGCASE(1, "{ \"Language\": 5, \"VoiceLanguage\": 5 }", "{ \"Language\": 0, \"VoiceLanguage\": 0 }", "开关 = 英文、文件是韩文：文字与语音都改英文");
+      VOICECASE(0, 1, "{ \"Language\": 8, \"VoiceLanguage\": 8 }", "{ \"Language\": 8, \"VoiceLanguage\": 0 }", "中文文字 + English 配音，只改 VoiceLanguage");
+      VOICECASE(0, 0, "{ \"Language\": 8, \"VoiceLanguage\": 0 }", "{ \"Language\": 8, \"VoiceLanguage\": 8 }", "中文文字 + 中文配音，只改 VoiceLanguage");
+      VOICECASE(-1, 1, "{ \"Language\": 9, \"VoiceLanguage\": 9 }", "{ \"Language\": 9, \"VoiceLanguage\": 0 }", "没动语言行，只把繁中配音改成 English，文字保持繁中");
+      unsetenv("DM_ROMFS");
+      g_t_lang = g_t_voice = -1; }
 
     char cmd[1200]; snprintf(cmd, sizeof cmd, "rm -rf '%s'", root); system(cmd);
     printf("== %d 项，失败 %d ==\n", checks, fails);

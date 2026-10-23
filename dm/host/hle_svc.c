@@ -4,11 +4,6 @@
 // Register convention: inputs w1.. / outputs w0=Result, x1=value (GetInfo / SetHeapSize), consistent with the public Horizon ABI.
 #include "dm.h"
 #include "hle.h"
-#if defined(__OHOS__)
-// 鸿蒙侧：svc 同步原语（事件/仲裁锁/进程级 key/多对象等待）。见 dm/ohos/dm_svc_sync.c。
-// On HarmonyOS: svc synchronisation primitives; see dm/ohos/dm_svc_sync.c.
-#include "dm_svc_sync.h"
-#endif
 #include <stdatomic.h>
 #include <sys/mman.h>
 #include <errno.h>
@@ -18,33 +13,14 @@
 #include <time.h>
 
 // 预留一整块客体地址空间，按 Horizon 分区（地址值直接用宿主 mmap 得到的真地址）。只占地址、不占内存。
-// 大小 5 GB：游戏要的是开头 1 GB（别名区、栈）+ 一整块堆（应用内存池 3285 MiB，见下面 APP_POOL），合计约 4.2 GB；
-// iOS 上不带「扩展虚拟寻址」权限时一次最多能预留 6 GB（真机实读：6 GB 成、7 GB 不成），所以不能留得更宽——
+// 大小从 5 GB 起降档重试（部分设备预留 5 GB 返回 ENOMEM(12)），下限 4864 MiB（游戏要 1 GB 别名+栈 + 3728 MB 堆，4864 − 1024 = 3840 > 3728 + 余量）。
+// iOS 上不带「扩展虚拟寻址」权限时上限随设备型号不同（实测：有的 6 GB 成、有的 5120 MiB 不成，需要降到 4864 MiB）——
 // 留到 8 GB 的话，签不了那项权限的开发者账号（免费账号）出的包在这一步就退出。
-// Reserve one whole block of guest address space, partitioned the Horizon way (address values are the real addresses returned by the host's mmap).
-// It only takes address space, not memory.
-// Size 5 GB: the game needs the first 1 GB (alias region, stacks) + one whole heap block (application memory pool of 3285 MiB, see APP_POOL below),
-// about 4.2 GB in total; on iOS without the "extended virtual addressing" entitlement a single reservation can be at most 6 GB
-// (read on a real device: 6 GB succeeds, 7 GB fails), so it cannot be made any wider --
-// with an 8 GB reservation, builds from developer accounts that cannot sign that entitlement (free accounts) would exit at this step.
-#define RESERVE (5ull << 30)
-// 鸿蒙：客体堆可以改成 **Vulkan 分配的内存**（图形层零拷贝的前提，见 dm/ohos/图形层实施方案-Vulkan.md
-// 阶段 3）。那时堆不再落在预留块内——预留块只剩「前缀 256 MB + 别名 512 MB + 栈 256 MB」= 1 GB，
-// 堆有它自己的地址（由 Vulkan 给，`I_HeapAddr` / `SetHeapSize` 照常报给游戏）。
-// **缺省关闭**（`DM_VK_HEAP=1` 才开）：宿主还没能整批链接进 App，这条路没法在真机上验证，
-// 所以先让它默认走原路——改错了也影响不到现有行为。苹果侧逐字符不变（g_heap_vk 恒为 0）。
-// On HarmonyOS the guest heap may be Vulkan-allocated (the zero-copy prerequisite of the graphics
-// layer). It then lives outside the reservation, which shrinks to 1 GB, and gets its own address from
-// Vulkan. Off by default (DM_VK_HEAP=1 enables it): the host is not linked into the app yet, so this
-// path cannot be verified on a device -- defaulting to the old path leaves existing behaviour intact.
-// The Apple side is byte-for-byte unchanged (g_heap_vk is always 0 there).
-static int g_heap_vk;              // 客体堆是否来自 Vulkan（0 = 原路：预留块内的匿名内存） | heap from Vulkan? (0 = the old path)
-static size_t as_reserve(void) { return g_heap_vk ? (RESERVE - 0x40000000) : RESERVE; }
-#if defined(__OHOS__)
-// 鸿蒙侧的客体堆预留（dm/ohos/vk_ctx_ohos.c）：Vulkan 分配 + 映射，返回 CPU 地址。
-// 这里只声明，不包含它的头——上游文件不该依赖平台头（苹果构建也编得到这一行之外的代码）。
-void *dm_ohos_heap_reserve(uint64_t size);
-#endif
+// Reserve one contiguous guest address space, partitioned like Horizon (address values are the real addresses returned by the host mmap). It only takes address space, not memory.
+// The size starts at 5 GB and steps down on retry (on some devices reserving 5 GB returns ENOMEM(12)), floor 4864 MiB (the game needs 1 GB alias+stack + a 3728 MB heap; 4864 − 1024 = 3840 > 3728 + margin).
+// On iOS without the extended virtual addressing entitlement the limit depends on the device model (measured: 6 GB works on some, 5120 MiB fails on others and must drop to 4864 MiB) —
+// reserving up to 8 GB would make builds from developer accounts that cannot sign that entitlement (free accounts) exit at this step.
+static size_t g_reserve;           // 实际预留大小（逐档降级后成功的值） | Actual reserved size (the value that succeeded after stepping down)
 static uint8_t *g_as;              // ASLR 区基址 = 整块 | ASLR region base = the whole block
 static uint8_t *g_heap; static size_t g_heap_cur, g_heap_cap; static int g_heap_rejects;
 // 地址段整个落在客体堆当前已开放（可读写）的范围内：这种读不用陷内核核对，直接 memcpy（diag.c tk_rd 等每拍读客体内存的地方用）
@@ -55,32 +31,21 @@ static uint8_t *g_stack; static size_t g_stack_cap;
 
 static void mem_init(void) {
     if (g_as) return;
-    // 鸿蒙分叉：预留大小可用 DM_GUEST_AS_MB（MB）调小——门回路/探针等小场景用不上 5GB 预留，
-    // 应用进程的 VA 限制下大预留可能失败。未设置时保持 RESERVE 原值，苹果/正式装载零变化。
-    uint64_t reserve = RESERVE;
-    const char *e_as = getenv("DM_GUEST_AS_MB");
-    if (e_as) { reserve = (uint64_t)atol(e_as) << 20; LOG("guest AS 预留按 DM_GUEST_AS_MB 调整为 %#llx", (unsigned long long)reserve); }
-    g_as = mmap(NULL, reserve, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
-    if (g_as == MAP_FAILED) die("reserve guest AS");
+    // 从 5120 MiB 起逐档降级（每档减 128 MiB），下限 4864 MiB（堆容量 = reserve − 1 GB ≥ 3728 MB + 余量）
+    // Step down from 5120 MiB (128 MiB per step), floor 4864 MiB (heap capacity = reserve − 1 GB ≥ 3728 MB + margin)
+    const size_t start = 5ull << 30, step = 128ull << 20, limit = 4864ull << 20;
+    for (size_t sz = start; sz >= limit; sz -= step) {
+        g_as = mmap(NULL, sz, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
+        if (g_as != MAP_FAILED) { g_reserve = sz; break; }
+        int err = errno; LOG("【红】reserve %zu MiB: mmap 失败 errno=%d (%s)，降档重试", sz >> 20, err, strerror(err));
+        if (sz == limit) die("reserve guest AS: 试过 %zu–%zu MiB，全部失败", limit >> 20, start >> 20);
+    }
     // 固定划分（都在预留块内）：alias 512MB、stack 256MB、heap 其余从 2GB 处起
     // Fixed partition (all inside the reserved block): alias 512MB, stack 256MB, heap the rest starting at 2GB
     g_alias = g_as + 0x10000000; g_alias_cap = 0x20000000;
     g_stack = g_as + 0x30000000; g_stack_cap = 0x10000000;
-#if defined(__OHOS__)
-    // DM_VK_HEAP=1：堆改由 Vulkan 分配（零拷贝的前提）。别名区 / 栈区仍在上面的预留块里，
-    // 所以只有堆搬了出去——`as_reserve()` 会把报给 SDK 的区间跟着缩到 1 GB。
-    if (getenv("DM_VK_HEAP")) {
-        g_heap = (uint8_t *)dm_ohos_heap_reserve(RESERVE - 0x40000000);
-        if (!g_heap) die("reserve guest heap (Vulkan)：dm_ohos_heap_reserve 失败");
-        g_heap_cap = RESERVE - 0x40000000;
-        g_heap_vk = 1;
-        LOG("guest AS %p +%#llx（别名 %p 栈 %p）  heap **Vulkan** %p +%#zx",
-            g_as, (unsigned long long)(RESERVE - 0x40000000), g_alias, g_stack, g_heap, g_heap_cap);
-        return;
-    }
-#endif
-    g_heap  = g_as + 0x40000000; g_heap_cap  = RESERVE - 0x40000000;   // 4 GB，容得下游戏那一整块约 3.2 GB 的堆 | 4 GB, enough to hold the game's single heap block of about 3.2 GB
-    LOG("guest AS %p +%#llx  heap %p alias %p stack %p", g_as, (unsigned long long)RESERVE, g_heap, g_alias, g_stack);
+    g_heap  = g_as + 0x40000000; g_heap_cap  = g_reserve - 0x40000000;
+    LOG("guest AS %p +%zu MiB（降档后实际预留 %zu MiB）  heap %p alias %p stack %p", g_as, g_reserve >> 20, g_reserve >> 20, g_heap, g_alias, g_stack);
 }
 
 // 应用内存池 = Switch（4 GB 机型）给应用的 3285 MB。游戏启动（main+0x1b66160）把 QueryMemoryInfo 报的总量整块设成堆、失败就减 2 MB 重试，
@@ -135,7 +100,7 @@ HLE_FORCE("_ZN2nn3mem17StandardAllocator8AllocateEmm", "照原版分配，只在
 
 // 内存账（memstat.m）用：客体地址空间整块范围（未初始化时 base = NULL）
 // For memory accounting (memstat.m): the range of the whole guest address space block (base = NULL when not initialized)
-void svc_guest_range(uint8_t **base, size_t *size) { *base = g_as; *size = as_reserve(); }
+void svc_guest_range(uint8_t **base, size_t *size) { *base = g_as; *size = g_reserve; }
 
 enum { I_CoreMask=0, I_PriorityMask=1, I_AliasAddr=2, I_AliasSize=3, I_HeapAddr=4, I_HeapSize=5,
        I_TotalMem=6, I_UsedMem=7, I_DebuggerAttached=8, I_ResourceLimit=9, I_IdleTick=10, I_RandomEntropy=11,
@@ -143,8 +108,6 @@ enum { I_CoreMask=0, I_PriorityMask=1, I_AliasAddr=2, I_AliasSize=3, I_HeapAddr=
        I_ProgramId=18, I_InitProcIdRange=19, I_UserExcAddr=20, I_TotalNonSys=21, I_UsedNonSys=22, I_IsApplication=23 };
 
 static uint8_t g_seen[256];
-// IPC 记账（M2 第一步）：连接次数 / 请求次数。用 unsigned long 是为了在日志被截断时也能看出量级。
-static unsigned long g_nport, g_nipc;
 
 // 已映射区间登记（MapMemory 栈、MapPhysicalMemory alias 页），QueryMemory 据此回报；SDK 靠它找空位
 // Registry of mapped ranges (MapMemory stacks, MapPhysicalMemory alias pages), QueryMemory reports from it; the SDK relies on it to find free space
@@ -167,17 +130,9 @@ static void map_del(int i) { pthread_mutex_lock(&g_map_lock); g_map[i] = g_map[-
 int svc_thread(int num, uint64_t *regs);   // hle_thread.c：线程与同步类 | hle_thread.c: thread and synchronization kind
 
 uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
-    LOG("svc_dispatch：进入 num=%#x", num);            // 诊断：门回路死点定位（与 hle.c 的命中日志配对）
     { void hlecount_svc(int); hlecount_svc(num); }   // DM_HLECOUNT：svc 按号计数 | DM_HLECOUNT: svc counts by number
     mem_init();
-    LOG("svc_dispatch：mem_init 完成 num=%#x", num);   // 诊断：门回路死点定位
     if (svc_thread(num, regs)) return regs[0];
-    if (svc_thread(num, regs)) return regs[0];
-#if defined(__OHOS__)
-    // 同步原语优先（0x11/0x12/0x17/0x18/0x19/0x1A/0x1B/0x1C/0x1D）。
-    // 现在没人调它们（main 的 nn::os 仍走宿主实现）⇒ 零行为变化；切到 sdk 的 nn::os 后才生效。
-    { uint64_t r = 0; if (dm_svc_sync_dispatch(num, regs, &r)) { regs[0] = r; return r; } }
-#endif
     { uint64_t svc_host_call(int, uint64_t *); if (num >= 0x80 && svc_host_call(num, regs)) return regs[0]; }   // 0x80 起：剪口约定的宿主调用（hle_tact.c） | from 0x80: host calls by cut convention (hle_tact.c)
     switch (num) {
     case 0x01: {  // SetHeapSize(out_addr*, size)  → x1 = heap base
@@ -185,14 +140,8 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         if (size > g_heap_cap) { LOG("SetHeapSize OOM: req %#zx > cap %#zx", size, g_heap_cap); regs[0] = 0xD401; return 0; }
         if (size + image_bytes() > app_pool()) { g_heap_rejects++; regs[0] = 0x10801; return 0; }   // 超出应用内存池：ResultLimitReached。游戏启动时按 2 MB 递减重试直到放得下（main+0x1b66184） | exceeds the application memory pool: ResultLimitReached. At startup the game retries in 2 MB decrements until it fits (main+0x1b66184)
         int rc = 0;
-        // 原路（匿名预留）：堆是 PROT_NONE 预留的，要靠 mprotect 一段段开放。
-        // Vulkan 路：整块内存一分配就是已映射可读写的，没有"逐段开放"这回事，跳过。
-        // Old path: the heap is reserved PROT_NONE and opened piecewise with mprotect.
-        // Vulkan path: the whole block is mapped read-write on allocation, so there is nothing to open.
-        if (!g_heap_vk) {
-            if (size > g_heap_cur) rc = mprotect(g_heap + g_heap_cur, size - g_heap_cur, PROT_READ | PROT_WRITE);
-            else if (size < g_heap_cur) rc = mprotect(g_heap + size, g_heap_cur - size, PROT_NONE);
-        }
+        if (size > g_heap_cur) rc = mprotect(g_heap + g_heap_cur, size - g_heap_cur, PROT_READ | PROT_WRITE);
+        else if (size < g_heap_cur) rc = mprotect(g_heap + size, g_heap_cur - size, PROT_NONE);
         if (g_flag.svc) LOG("SetHeapSize %#zx -> base %p mprotect=%d errno=%d", size, g_heap, rc, errno);
         { static int said; if (!said && size) { said = 1; LOG("SetHeapSize：首次设堆成功 %zu MB（应用内存池 %llu MB − 映像 %zu MB；此前被拒 %d 次）", size >> 20, (unsigned long long)(app_pool() >> 20), image_bytes() >> 20, g_heap_rejects); } }
         g_heap_cur = size;
@@ -230,15 +179,10 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         int k;
         if (a >= g_heap && a < g_heap + g_heap_cur) { base=(uint64_t)g_heap; size=g_heap_cur; state=5/*Heap*/; perm=3; }
         else if ((k = map_find(addr, 1))) { base=g_map[k-1].base; size=g_map[k-1].size; state=g_map[k-1].state; perm=3; }
-        else if (a >= g_as && a < g_as + as_reserve()) {   // 空闲：到相邻映射/堆边界为止 | free: up to the adjacent mapping/heap boundary
-            uint64_t lo = (uint64_t)g_as, hi = (uint64_t)g_as + as_reserve();
-            // 原路：堆在预留块内，空闲区间要在堆边界处截断。Vulkan 路：堆在预留块外，不参与这里。
-            // Old path: the heap sits inside the reservation, so free space stops at its boundary.
-            // Vulkan path: the heap is outside the reservation and plays no part here.
-            if (!g_heap_vk) {
-                if (a >= g_heap) lo = (uint64_t)g_heap + g_heap_cur;
-                else if (hi > (uint64_t)g_heap) hi = (uint64_t)g_heap;
-            }
+        else if (a >= g_as && a < g_as + g_reserve) {   // 空闲：到相邻映射/堆边界为止 | free: up to the adjacent mapping/heap boundary
+            uint64_t lo = (uint64_t)g_as, hi = (uint64_t)g_as + g_reserve;
+            if (a >= g_heap) lo = (uint64_t)g_heap + g_heap_cur;
+            else if (hi > (uint64_t)g_heap) hi = (uint64_t)g_heap;
             for (int i = 0; i < g_nmap; i++) {
                 uint64_t e = g_map[i].base + g_map[i].size;
                 if (e <= addr && e > lo) lo = e;
@@ -254,18 +198,7 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
             // later nn::os::GetCurrentStackInfo asserts that sp is still inside that range and aborts if not. Previously every address outside the guest address space was reported as "the 4 KiB page containing it",
             // so the main thread stack was recorded as one page. Whether the sp at init and a later sp share a page depends on the absolute position of the host stack top, which moves with the total length of environment variables / launch arguments (a different environment occasionally aborts at startup).
             // This Diablo build does not call GetCurrentStackInfo (main / subsdk0 do not import it and the SDK has no internal call site; the host reaches the main menu with 12 different environment padding lengths), so it was never hit; reporting "one page" is wrong in itself, so fix it anyway.
-#if defined(__OHOS__)
-            // 鸿蒙：musl 没有 pthread_get_stack*_np（苹果专有）。pthread_getattr_np 拿栈底+大小，
-            // 换算成「栈顶 = 底 + 大小」后语义与苹果分支完全一致。
-            pthread_attr_t at__; void *st_lo = 0; size_t st_sz = 0;
-            if (pthread_getattr_np(pthread_self(), &at__) == 0) {
-                pthread_attr_getstack(&at__, &st_lo, &st_sz);
-                pthread_attr_destroy(&at__);
-            }
-            uint64_t top = (uint64_t)st_lo + st_sz, ssz = st_sz;
-#else
             uint64_t top = (uint64_t)pthread_get_stackaddr_np(pthread_self()), ssz = pthread_get_stacksize_np(pthread_self());
-#endif
             if (addr < top && addr >= top - ssz) { base = top - ssz; size = ssz; state = 0xB/*Stack*/; perm = 3; }
             else { base=addr & ~0xFFFull; size=0x1000; state=3/*Code*/; perm=5; } }
         if (mi) { uint64_t *m=(uint64_t*)mi; m[0]=base; m[1]=size; ((uint32_t*)mi)[4]=state; ((uint32_t*)mi)[5]=0; ((uint32_t*)mi)[6]=perm; ((uint32_t*)mi)[7]=0; ((uint32_t*)mi)[8]=0; }
@@ -285,11 +218,8 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         module_t *mm = module_of((void *)regs[30]);
         static int nb;
         LOG("Break#%d reason=%#llx Result=%#x svc 位于 %s+%#llx", ++nb, regs[0], res, mm ? mm->name : "?", orig_addr);
-        LOG("Break：dm_backtrace 前");                       // 诊断：门回路返回路径夹点
         dm_backtrace(regs[29]);
-        LOG("Break：通知检查前 regs=%p x0=%#llx x1=%#llx x2=%#llx", (void *)regs, (unsigned long long)regs[0], (unsigned long long)regs[1], (unsigned long long)regs[2]);   // 诊断：门回路返回路径夹点
-        if (regs[0] & 0x80000000ull) return 0;   // 仅通知，可继续 | notification only, can continue（诊断 LOG 已撤：它本身疑似死点）
-        LOG("Break：⚠ 通知位未命中，走到 _exit(42) regs[0]=%#llx", (unsigned long long)regs[0]);   // 判别实验：出现=if 没被判中
+        if (regs[0] & 0x80000000ull) return 0;   // 仅通知，可继续 | notification only, can continue
         _exit(42);
     }
     case 0x1E: regs[0] = 0; regs[1] = guest_ns() * 12 / 625; return 0;   // GetSystemTick
@@ -304,7 +234,7 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         case I_PriorityMask: v = 0; break;
         case I_AliasAddr: v = (uint64_t)g_alias; break;   case I_AliasSize: v = g_alias_cap; break;
         case I_HeapAddr:  v = (uint64_t)g_heap;  break;   case I_HeapSize:  v = g_heap_cap;  break;
-        case I_AslrAddr:  v = (uint64_t)g_as;    break;   case I_AslrSize:  v = as_reserve();     break;
+        case I_AslrAddr:  v = (uint64_t)g_as;    break;   case I_AslrSize:  v = g_reserve;     break;
         case I_StackAddr: v = (uint64_t)g_stack; break;   case I_StackSize: v = g_stack_cap; break;
         case I_TotalMem: case I_TotalNonSys: v = app_pool(); break;
         case I_UsedMem:  case I_UsedNonSys:  v = g_heap_cur + image_bytes(); break;   // 已用 = 堆 + 映像，与 SetHeapSize 的核对同一口径（原先写死 64 MB）。sdk 的 QueryMemoryInfo（sdk+0x34f4ec）只拿它算「程序占用」那一格； | Used = heap + image, the same accounting as the check in SetHeapSize (it used to be hard-coded to 64 MB). The sdk's QueryMemoryInfo (sdk+0x34f4ec) only uses it to compute the "program usage" field;
@@ -319,28 +249,6 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         default: v = 0; break;
         }
         regs[0] = 0; regs[1] = v; return 0;
-    }
-    // ── IPC 段（2026-10-22，M2 第一步）──
-    // 离线发现：0x1F（ConnectToNamedPort）/ 0x20（SendSyncRequest）以前**没有 case**，落到 default：
-    // "返回 0 = 成功，但什么都不写"。后果不是"失败"，而是更糟：
-    //   · ConnectToNamedPort(out_handle*, name)：out_handle **从没被写过** ⇒ 客户端拿的是**栈上垃圾**当会话句柄；
-    //   · SendSyncRequest(handle)：应答缓冲区原封不动 ⇒ 客户端解析的是**未初始化的栈**，返回值随栈内容漂。
-    // 这正是"M2 那 7 个构造函数崩在空指针上 / hid 静默返回 0"的机制。
-    // 这一步先做到"确定化"：写一个**确定的假句柄** + 记账（谁在连、连了几次、发了多少请求）。
-    // 依然不实现 CMIF 协议（真协议要对齐 nn::sf 的应答头，属下一步），但行为不再随机。
-    case 0x1F: {   // ConnectToNamedPort(Handle *out, const char *name)
-        uint64_t out = regs[0];
-        if (out) *(uint64_t *)(uintptr_t)out = 0x49430000ull + (uint64_t)g_nport;   // 确定的假句柄（'IC' 前缀）
-        g_nport++;
-        if (g_nport <= 32 || (g_nport % 64) == 0) LOG("[IPC] ConnectToNamedPort #%d → 句柄 %#llx（name 指针 %#llx，未解析）",
-                                                     g_nport, 0x49430000ull + (uint64_t)g_nport - 1, (unsigned long long)regs[1]);
-        regs[0] = 0; return 0;
-    }
-    case 0x20: {   // SendSyncRequest(Handle)
-        g_nipc++;
-        if (g_nipc <= 8 || (g_nipc % 256) == 0) LOG("[IPC] SendSyncRequest #%d（句柄 %#llx）—— 应答缓冲区未实现，客户端会读到未初始化数据",
-                                                   g_nipc, (unsigned long long)regs[0]);
-        regs[0] = 0; return 0;
     }
     default:
         if (!g_seen[num & 0xff]) { g_seen[num & 0xff] = 1; LOG("SVC %#x x0=%#llx x1=%#llx x2=%#llx (占位返回成功)", num, regs[0], regs[1], regs[2]); }

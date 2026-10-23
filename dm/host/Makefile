@@ -5,6 +5,22 @@ DM_ROOT ?= $(HOME)/dm-work
 # The packaging script (tools/mac_app.sh) takes the same number through print-macos-min, writes it into Info.plist, and checks that the number in the executable equals it
 MACOS_MIN ?= 26.0
 CFLAGS=-O1 -g -Wall -Wno-unused-function -mmacosx-version-min=$(MACOS_MIN)
+MOVIE_FFMPEG ?= 0
+MOVIE_PREFIX ?=
+ifeq ($(MOVIE_FFMPEG),1)
+ifneq ($(MOVIE_PREFIX),)
+# iOS 交叉编译使用已经编好的静态库，不依赖宿主 pkg-config（脚本见 dm/ios/tools/build_ffmpeg_ios.sh）。
+CFLAGS += -DDM_MOVIE_FFMPEG=1 -I$(MOVIE_PREFIX)/include
+MOVIE_LIBS = $(MOVIE_PREFIX)/lib/libavformat.a $(MOVIE_PREFIX)/lib/libavcodec.a $(MOVIE_PREFIX)/lib/libswscale.a $(MOVIE_PREFIX)/lib/libavutil.a
+else
+MOVIE_PACKAGES = libavformat libavcodec libavutil libswscale
+ifeq ($(shell pkg-config --exists $(MOVIE_PACKAGES) && echo yes),)
+$(error MOVIE_FFMPEG=1 requires pkg-config and FFmpeg development libraries, or MOVIE_PREFIX pointing to a static FFmpeg build)
+endif
+CFLAGS += -DDM_MOVIE_FFMPEG=1 $(shell pkg-config --cflags $(MOVIE_PACKAGES))
+MOVIE_LIBS = $(shell pkg-config --libs $(MOVIE_PACKAGES))
+endif
+endif
 # 服务层接管 hle_*.c 按通配纳入：新增文件不改这一行（免合并冲突）
 # 一行一个、按字母序（先本目录的，再 ../ 开头的，最后是通配那一项）：加源文件时插到自己的位置，别的分支加的在别的行，变基不再整行冲突
 # The service-layer hle_*.c files are included by wildcard: adding a file does not change this line (no merge conflicts)
@@ -37,6 +53,7 @@ SRC=\
 	dm_i18n.c \
 	dm_kills.c \
 	dm_lootfilter.c \
+	dm_movie_decode.c \
 	dm_namegen.c \
 	dm_padmode.c \
 	dm_pages.c \
@@ -77,7 +94,7 @@ LIBDEFLATE=../third_party/libdeflate/lib/deflate_decompress.c ../third_party/lib
 .DEFAULT_GOAL := dmhost   # 下面先写了表头生成规则，缺省目标要明说（否则 make 只生成表头、不编宿主） | The header generation rules are written first below, so the default goal must be stated explicitly (otherwise make only generates the headers and does not build the host)
 print-macos-min:
 	@echo $(MACOS_MIN)
-# 老接口版（图形后端不用 Metal 4，见 gfx/nvn/nvn_mtl.m 的 DM_NVN_M3）：最低系统单独一个数；包名另起，存档与日志目录跟着包名走、不与正式包共用
+# 旧接口版（图形后端不用 Metal 4，见 gfx/nvn/nvn_mtl.m 的 DM_NVN_M3）：最低系统单独一个数；包名另起，存档与日志目录跟着包名走、不与正式包共用
 # Older-API build (graphics backend without Metal 4, see DM_NVN_M3 in gfx/nvn/nvn_mtl.m): its minimum system is a separate number; the package gets its own name, and the save and log directory follows the package name instead of being shared with the regular package
 MACOS_MIN_M3 ?= 15.0
 CFLAGS_M3=$(subst -mmacosx-version-min=$(MACOS_MIN),-mmacosx-version-min=$(MACOS_MIN_M3),$(CFLAGS)) -DDM_NVN_M3=1 -DAPP_NAME='"D2R Mobile M3"'
@@ -97,9 +114,9 @@ dm_hud_exp.h: ../ios/tools/gen_hud_exp.py ../ios/tools/romfs_art.py
 dm_bright_levels.inc: ../tools/gen_bright_levels.py ../ios/tools/touch_layout.py
 	$(NEED_ROMFS)
 	python3 ../tools/gen_bright_levels.py "$(ROMFS)" > $@.tmp && mv $@.tmp $@
-dmhost: $(SRC) $(GFX) $(LIBDEFLATE) dm.h hle.h dm_input.h front.h touch_mac.h dm_cursor.h dm_i18n_tab.h ../ios/Sources/dm_touch_controls.[ch] $(GFX_H) $(GENH)
-	clang $(CFLAGS) -I. -I../gfx/nvn/include -fobjc-arc -o $@ $(SRC) $(GFX) $(LIBDEFLATE) -framework Cocoa -framework QuartzCore -framework Metal -framework AudioToolbox -framework CoreAudio -framework ImageIO -framework UniformTypeIdentifiers -framework GameController -framework Network
-# 老接口版宿主（图形后端不用 Metal 4，目标 macOS 15.0）：同一棵树、同一份源码，只多一个编译开关；不在缺省目标里，要用时 make dmhost_m3
+dmhost: $(SRC) $(GFX) $(LIBDEFLATE) dm.h hle.h dm_input.h front.h touch_mac.h dm_cursor.h dm_movie_decode.h dm_i18n_tab.h app_mac_overlay.h ../ios/Sources/dm_touch_controls.[ch] $(GFX_H) $(GENH)
+	clang $(CFLAGS) -I. -I../gfx/nvn/include -fobjc-arc -o $@ $(SRC) $(GFX) $(LIBDEFLATE) $(MOVIE_LIBS) -framework Cocoa -framework QuartzCore -framework Metal -framework AudioToolbox -framework CoreAudio -framework ImageIO -framework UniformTypeIdentifiers -framework GameController -framework Network
+# 旧接口版宿主（图形后端不用 Metal 4，目标 macOS 15.0）：同一棵树、同一份源码，只多一个编译开关；不在缺省目标里，要用时 make dmhost_m3
 # Older-API host (graphics backend without Metal 4, target macOS 15.0): the same tree and the same source, with just one more compile switch; not in the default targets, run make dmhost_m3 when needed
-dmhost_m3: $(SRC) $(GFX) $(LIBDEFLATE) dm.h hle.h dm_input.h front.h touch_mac.h dm_cursor.h dm_i18n_tab.h ../ios/Sources/dm_touch_controls.[ch] $(GFX_H) $(GENH)
-	clang $(CFLAGS_M3) -I. -I../gfx/nvn/include -fobjc-arc -o $@ $(SRC) $(GFX) $(LIBDEFLATE) -framework Cocoa -framework QuartzCore -framework Metal -framework AudioToolbox -framework CoreAudio -framework ImageIO -framework UniformTypeIdentifiers -framework GameController -framework Network
+dmhost_m3: $(SRC) $(GFX) $(LIBDEFLATE) dm.h hle.h dm_input.h front.h touch_mac.h dm_cursor.h dm_movie_decode.h dm_i18n_tab.h app_mac_overlay.h ../ios/Sources/dm_touch_controls.[ch] $(GFX_H) $(GENH)
+	clang $(CFLAGS_M3) -I. -I../gfx/nvn/include -fobjc-arc -o $@ $(SRC) $(GFX) $(LIBDEFLATE) $(MOVIE_LIBS) -framework Cocoa -framework QuartzCore -framework Metal -framework AudioToolbox -framework CoreAudio -framework ImageIO -framework UniformTypeIdentifiers -framework GameController -framework Network

@@ -6,27 +6,11 @@
 // such parameters are always declared as int/unsigned and truncated by ourselves. Variadic arguments go on the stack on Apple and in registers on Switch ⇒ variadic functions cannot use C's "..." directly.
 #pragma once
 #include "dm.h"
+#include "dm_sect.h"
 typedef struct { const char *name; void *fn; } hle_ent;
-
-// 登记表用「自定义段 + 链接器 __start_/__stop_ 符号」定位（真机实验 C 验证过这条机制）。
-// 苹果的段名写成 "__DATA,swhle"（段名,节名，逗号分隔）；鸿蒙/ELF 上段名必须是**合法的 C 标识符**，
-// 链接器才会生成 __start_<名字> / __stop_<名字> 两个符号，所以鸿蒙侧换成 dmswhle / dmswforce。
-// 两边只是**名字**不同，宏的写法零差异。
-// The registry tables are located with a custom section plus the linker __start_/__stop_ symbols
-// (verified on device by experiment C). Apple writes the name as "__DATA,swhle" (segment,section); on
-// ELF the name must be a valid C identifier so that the linker emits __start_<name> / __stop_<name>,
-// hence dmswhle / dmswforce here. Only the name differs; the macros are otherwise identical.
-#if defined(__OHOS__)
-#define DM_HLE_SECTION    "dmswhle"
-#define DM_FORCE_SECTION  "dmswforce"
-#else
-#define DM_HLE_SECTION    "__DATA,swhle"
-#define DM_FORCE_SECTION  "__DATA,swforce"
-#endif
-
 #define HLE(mangled, ret, cname, ...)                                                             \
     static ret cname(__VA_ARGS__);                                                                \
-    __attribute__((used, section(DM_HLE_SECTION))) static const hle_ent hle_ent_##cname = {mangled, (void *)cname}; \
+    DM_SECT(swhle) static const hle_ent hle_ent_##cname = {mangled, (void *)cname}; \
     static ret cname(__VA_ARGS__)
 
 typedef uint32_t Result;   // nn::Result：w0，0 = 成功 | nn::Result: w0, 0 = success
@@ -56,7 +40,7 @@ void guest_clock_freeze_for(int reason, int on);   // 按原因冻结（1 后台
 typedef struct { const char *name; void *fn; const char *why; } hle_force_ent;
 #define HLE_FORCE(mangled, why, ret, cname, ...)                                                   \
     static ret cname(__VA_ARGS__);                                                                \
-    __attribute__((used, section(DM_FORCE_SECTION))) static const hle_force_ent hle_force_##cname = {mangled, (void *)cname, why}; \
+    DM_SECT(swforce) static const hle_force_ent hle_force_##cname = {mangled, (void *)cname, why}; \
     static ret cname(__VA_ARGS__)
 
 // 运行模式（0 掌机 / 1 主机）：hle_oe.c 持有，hid 的手柄样式跟它走；前端可在运行中切换

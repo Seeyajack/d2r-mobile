@@ -1,47 +1,49 @@
 // nn::audio AudioOut：游戏（FMOD nx 输出层）按块追加 PCM 缓冲，播完由系统放回「已释放」队列并触发事件。
-// 宿主：真出声 = CoreAudio AudioUnit（Mac DefaultOutput / iOS RemoteIO）；静音接收端 = 按真实时间消耗缓冲（不出声，节奏与真机一致）。
+// 宿主：真出声 = CoreAudio AudioUnit（Mac DefaultOutput / iOS RemoteIO）、安卓 AAudio；静音接收端 = 按真实时间消耗缓冲（不出声，节奏与真机一致）。
 //       iOS 缺省真出声（产品必须有声音），测试要静音显式 DM_AUDIO=0；Mac 命令行宿主缺省静音接收端（回放 / 闸门不出声），DM_AUDIO=1 真出声；
 //       Mac App（app_mac.m）是产品，启动时设 DM_AUDIO=1（「没有声音」：之前 App 也走了命令行的缺省，从来不出声）。
 //       声卡打不开（没有输出设备等）不再退出：记红，这一路改由静音接收端按实时消耗，游戏照常跑。
 // AudioOut / AudioOutBuffer / AudioOutParameter 的内容只经下列接口读写，宿主自定内部布局，只写结构体前部。
 // nn::audio AudioOut: the game (FMOD's nx output layer) appends PCM buffers in blocks; once played the system puts them back on the "released" queue and signals an event.
-// Host: real sound = CoreAudio AudioUnit (Mac DefaultOutput / iOS RemoteIO); silent sink = buffers consumed in real time (no sound, same pacing as the device).
-//       iOS plays real sound by default (the product must have sound), tests set DM_AUDIO=0 explicitly for silence; the Mac command-line host defaults to the silent sink (replays / gates are silent), DM_AUDIO=1 for real sound;
-//       the Mac App (app_mac.m) is the product and sets DM_AUDIO=1 at launch ("no sound": the App used to take the command-line default and never played sound).
-//       If the sound card cannot be opened (no output device etc.) it no longer exits: logs red, and this channel is consumed in real time by the silent sink while the game runs on.
+// Host: real sound = CoreAudio AudioUnit (Mac DefaultOutput / iOS RemoteIO), Android AAudio; silent sink = buffers consumed in real time (no sound, same pacing as the device).
+// iOS plays real sound by default (the product must have sound), tests set DM_AUDIO=0 explicitly for silence; the Mac command-line host defaults to the silent sink (replays / gates are silent), DM_AUDIO=1 for real sound;
+// the Mac App (app_mac.m) is the product and sets DM_AUDIO=1 at launch ("no sound": the App used to take the command-line default and never played sound).
+// If the sound card cannot be opened (no output device etc.) it no longer exits: logs red, and this channel is consumed in real time by the silent sink while the game runs on.
 // The contents of AudioOut / AudioOutBuffer / AudioOutParameter are read and written only through the interfaces below; the host defines its own internal layout and writes only the front part of each struct.
 #include "hle.h"
-#if !defined(__OHOS__)
-#include <AudioToolbox/AudioToolbox.h>   // 苹果的 CoreAudio；鸿蒙侧换成 OHAudio，见下面的收口块
-#endif
+#include <pthread/qos.h>
+#ifdef __APPLE__
+#include <AudioToolbox/AudioToolbox.h>
 #include <TargetConditionals.h>
 #include <dispatch/dispatch.h>
+typedef AudioUnit dm_audev;            // 声卡（出声端）句柄 | Sound card (output side) handle
+typedef dispatch_semaphore_t dm_sem;
+static dm_sem sem_new(void) { return dispatch_semaphore_create(0); }
+static void sem_up(dm_sem s) { dispatch_semaphore_signal(s); }
+static void sem_down(dm_sem s) { dispatch_semaphore_wait(s, DISPATCH_TIME_FOREVER); }
+static void sem_free(dm_sem s) { dispatch_release(s); }
+#elif defined(__OHOS__)
+#include <ohaudio/native_audiorenderer.h>
+#include <ohaudio/native_audiostreambuilder.h>
+#include <semaphore.h>
+typedef OH_AudioRenderer *dm_audev;
+typedef sem_t *dm_sem;
+static dm_sem sem_new(void) { dm_sem s = malloc(sizeof *s); if (!s || sem_init(s, 0, 0)) die("音频信号量"); return s; }
+static void sem_up(dm_sem s) { sem_post(s); }
+static void sem_down(dm_sem s) { while (sem_wait(s)) {} }
+static void sem_free(dm_sem s) { sem_destroy(s); free(s); }
+#else
+#include <aaudio/AAudio.h>
+#include <semaphore.h>
+typedef AAudioStream *dm_audev;
+typedef sem_t *dm_sem;
+static dm_sem sem_new(void) { dm_sem s = malloc(sizeof *s); if (!s || sem_init(s, 0, 0)) die("音频信号量"); return s; }
+static void sem_up(dm_sem s) { sem_post(s); }
+static void sem_down(dm_sem s) { while (sem_wait(s)) {} }
+static void sem_free(dm_sem s) { sem_destroy(s); free(s); }
+#endif
 #include <stdatomic.h>
 #include <unistd.h>
-
-// ---------- 音频后端收口 ----------
-// 苹果是 CoreAudio AudioUnit，鸿蒙是 OHAudio（实现在 dm/ohos/audio_ohos.c）。
-// 本文件**只有下面这组名字与后端有关**：调用点不认识 AudioUnit，也不认识 OHAudio，
-// 两边的差异全在这里吸收。方案与已核实的官方接口见 `dm/ohos/音频后端方案-从CoreAudio到OHAudio.md`。
-// Audio backend funnel: Apple is CoreAudio AudioUnit, HarmonyOS is OHAudio (implemented in
-// dm/ohos/audio_ohos.c). Only the names below are backend-aware; call sites know neither AudioUnit
-// nor OHAudio, and the differences are absorbed right here.
-#if defined(__OHOS__)
-#include "audio_ohos.h"
-typedef void *dm_au_t;              // 流句柄；空 = 没有真出声后端，调用点会自然走静音接收端
-typedef int   dm_au_status_t;       // 0 = 成功
-#define DM_AO_OPEN(a)   ((a)->au = dm_ao_open((a)->ch, RATE))
-#define DM_AO_START(a)  dm_ao_start((a)->au)
-#define DM_AO_STOP(a)   dm_ao_stop((a)->au)
-#define DM_AO_CLOSE(a)  dm_ao_close((a)->au)
-#else
-typedef AudioUnit dm_au_t;
-typedef OSStatus  dm_au_status_t;
-#define DM_AO_OPEN(a)   au_open(a)
-#define DM_AO_START(a)  AudioOutputUnitStart((a)->au)
-#define DM_AO_STOP(a)   AudioOutputUnitStop((a)->au)
-#define DM_AO_CLOSE(a)  do { AudioUnitUninitialize((a)->au); AudioComponentInstanceDispose((a)->au); } while (0)
-#endif
 
 enum { FMT_PCM16 = 2, STATE_STARTED = 0, STATE_STOPPED = 1, RATE = 48000 };
 
@@ -56,11 +58,11 @@ typedef struct {
     gbuf *q[QMAX]; _Atomic uint32_t q_head, q_tail;       // 待播：游戏侧写，出声端读 | Pending: written by the game side, read by the output side
     gbuf *rel[RELMAX]; _Atomic uint32_t rel_head, rel_tail; // 已释放：出声端写，游戏侧读 | Released: written by the output side, read by the game side
     uint64_t pos;                      // 当前块已播字节 | Bytes already played of the current block
-    dm_au_t au;                        // 真出声后端句柄（苹果 AudioUnit / 鸿蒙 OHAudio 流）；空 = 静音接收端 | Real-output backend handle; NULL = silent sink
+    dm_audev au;                       // 声卡；NULL = 没开成（走静音接收端） | Sound card; NULL = not opened (the silent sink is used)
     int mix;                           // 1 = 游戏给 5.1（6 声道），交给 CoreAudio 前我们自己下混成双声道（au_render） | 1 = the game gives 5.1 (6 channels), downmixed to stereo by us before handing to CoreAudio (au_render)
     int16_t *mixbuf;                   // 下混用的 6 声道暂存（MIXMAX 帧） | 6-channel staging for the downmix (MIXMAX frames)
     pthread_t null_th; _Atomic int null_run;
-    dispatch_semaphore_t notify_sem;
+    dm_sem notify_sem;
     pthread_t notify_th; _Atomic int notify_run, notify_pending, notify_armed;
     _Atomic uint64_t notify_ns;        // 最近一次「有缓冲释放、要通知」的时刻（量通知线程被叫醒的延迟） | Time of the most recent "buffer released, needs notifying" event (to measure the notification thread's wake-up latency)
     int dry;                           // 这次声卡回调里待播队列空了（在播放态）= 一次欠载（断音） | The pending playback queue was empty in this audio callback (while playing) = one underrun (audio dropout)
@@ -96,12 +98,15 @@ static void notify_release(aout *a) {
     atomic_store_explicit(&a->notify_ns, now_ns(), memory_order_relaxed);
     atomic_store_explicit(&a->notify_pending, 1, memory_order_release);
     if (atomic_exchange_explicit(&a->notify_armed, 1, memory_order_acq_rel) == 0)
-        dispatch_semaphore_signal(a->notify_sem);
+        sem_up(a->notify_sem);
 }
 
 static void *event_notify(void *p) {
     aout *a = p; int applied = -1;
     if (g_nq_base == QOS_CLASS_UNSPECIFIED) g_nq_base = qos_class_self();
+#ifdef __OHOS__
+    { void front_gtx_register(int); front_gtx_register(2); }   // OpenGTX 关键线程 | OpenGTX key thread
+#endif
     for (;;) {
         int ph = nq_phase();
         if (ph != applied) {   // 换相：先报上一相这段的读数，再改本线程 QoS | Phase switch: first report the readings of the previous phase's segment, then change this thread's QoS
@@ -110,7 +115,7 @@ static void *event_notify(void *p) {
             if (e) LOG("【红】音频通知线程：设 QoS 失败（%d）", e);
             else if (g_nq_mode && ph) LOG("音频通知线程：QoS → 交互级"); else if (g_nq_mode) LOG("音频通知线程：QoS → 现状");
             applied = ph; }
-        dispatch_semaphore_wait(a->notify_sem, DISPATCH_TIME_FOREVER);
+        sem_down(a->notify_sem);
         { uint64_t t0 = atomic_load_explicit(&a->notify_ns, memory_order_relaxed), dt = t0 ? now_ns() - t0 : 0; int q = applied < 0 ? 0 : applied;
           atomic_fetch_add(&g_nq_wake[q], 1); atomic_fetch_add(&g_nq_lat_sum[q], dt); if (dt > 2000000) atomic_fetch_add(&g_nq_lat_2ms[q], 1);
           uint64_t mx = atomic_load(&g_nq_lat_max[q]); while (dt > mx && !atomic_compare_exchange_weak(&g_nq_lat_max[q], &mx, dt)) {} }
@@ -120,7 +125,7 @@ static void *event_notify(void *p) {
         if (!atomic_load_explicit(&a->notify_run, memory_order_acquire)) break;
         if (atomic_load_explicit(&a->notify_pending, memory_order_acquire) &&
             atomic_exchange_explicit(&a->notify_armed, 1, memory_order_acq_rel) == 0)
-            dispatch_semaphore_signal(a->notify_sem);
+            sem_up(a->notify_sem);
     }
     return NULL;
 }
@@ -167,25 +172,24 @@ static void downmix51(const int16_t *in, int16_t *out, unsigned frames) {
         int32_t l = (23170 * in[0] + 16384 * in[2] + 16384 * in[4]) >> 15, r = (23170 * in[1] + 16384 * in[2] + 16384 * in[5]) >> 15;
         out[0] = (int16_t)(l > 32767 ? 32767 : l < -32768 ? -32768 : l); out[1] = (int16_t)(r > 32767 ? 32767 : r < -32768 ? -32768 : r); }
 }
-
-#if !defined(__OHOS__)
-// 苹果的渲染回调与建流。鸿蒙侧换成 OHAudio，实现在 dm/ohos/audio_ohos.c——
-// 那边的回调体里调的也是同一个 pull()，参数含义一一对应（往给定指针写给定字节数）。
-// Apple's render callback and stream setup. HarmonyOS uses OHAudio in dm/ohos/audio_ohos.c; that
-// callback calls the same pull() with one-to-one parameter meanings (write N bytes at a given pointer).
-static OSStatus au_render(void *ctx, AudioUnitRenderActionFlags *f, const AudioTimeStamp *ts, UInt32 bus, UInt32 frames, AudioBufferList *bl) {
-    (void)f; (void)ts; (void)bus; (void)frames;
-    aout *a = ctx;
+// 声卡回调的公共部分（两个平台同一份）：填满 bytes 字节的输出缓冲
+// Common part of the sound card callback (one copy for both platforms): fill an output buffer of bytes bytes
+static void render(aout *a, void *data, uint32_t bytes) {
     atomic_fetch_add_explicit(&g_render_calls, 1, memory_order_relaxed);
     a->dry = 0;
-    if (!a->mix) pull(a, bl->mBuffers[0].mData, bl->mBuffers[0].mDataByteSize);
-    else { int16_t *o = bl->mBuffers[0].mData; unsigned left = bl->mBuffers[0].mDataByteSize / 4;   // 双声道 16 位：每帧 4 字节 | stereo 16-bit: 4 bytes per frame
+    if (!a->mix) pull(a, data, bytes);
+    else { int16_t *o = data; unsigned left = bytes / 4;   // 双声道 16 位：每帧 4 字节 | stereo 16-bit: 4 bytes per frame
         while (left) { unsigned k = left < MIXMAX ? left : MIXMAX; pull(a, (uint8_t *)a->mixbuf, (uint64_t)k * 12); downmix51(a->mixbuf, o, k); o += 2 * k; left -= k; } }
     // 诊断开关 DM_AUDIO_OUT_DUMP=<文件>：交给 CoreAudio 的那份数据原样续写（下混后是双声道）。本机没有回环设备录不到系统输出，判「对白有没有交出去」看这份
     // Diagnostic switch DM_AUDIO_OUT_DUMP=<file>: append the data handed to CoreAudio as is (stereo after the downmix). This machine has no loopback device and cannot record the system output; to tell whether the dialogue was handed over, look at this file
     { static FILE *df; static int on = -1; if (on < 0) { const char *e = getenv("DM_AUDIO_OUT_DUMP"); on = e != NULL; if (on && !(df = fopen(e, "wb"))) LOG("【红】DM_AUDIO_OUT_DUMP 打不开 %s", e); }
-      if (df) fwrite(bl->mBuffers[0].mData, 1, bl->mBuffers[0].mDataByteSize, df); }
+      if (df) fwrite(data, 1, bytes, df); }
     { int q = nq_phase(); atomic_fetch_add_explicit(&g_nq_calls[q], 1, memory_order_relaxed); if (a->dry) atomic_fetch_add_explicit(&g_nq_dry[q], 1, memory_order_relaxed); }   // 通知线程 QoS 对照：按当前相记 | Notification thread QoS comparison: recorded per current phase
+}
+#ifdef __APPLE__
+static OSStatus au_render(void *ctx, AudioUnitRenderActionFlags *f, const AudioTimeStamp *ts, UInt32 bus, UInt32 frames, AudioBufferList *bl) {
+    (void)f; (void)ts; (void)bus; (void)frames;
+    render(ctx, bl->mBuffers[0].mData, bl->mBuffers[0].mDataByteSize);
     return noErr;
 }
 #if !TARGET_OS_IPHONE
@@ -225,6 +229,125 @@ static int au_open(aout *a) {   // 0 = 声卡开好了；-1 = 开不了（a->au 
 #endif
     return 0;
 }
+static int dev_start(aout *a) { return AudioOutputUnitStart(a->au) ? -1 : 0; }
+static void dev_stop(aout *a) { AudioOutputUnitStop(a->au); }
+static void dev_close(aout *a) { AudioUnitUninitialize(a->au); AudioComponentInstanceDispose(a->au); a->au = NULL; }
+#elif defined(__OHOS__)
+// 鸿蒙：OHAudio 低时延渲染流（16 位、48 kHz、游戏用途），写数据回调直接调 render。
+// 系统报错（音频服务重启等）时与安卓一样交给普通线程关掉重开，原来在播就接着播；路由切换（耳机、蓝牙）由 OHAudio 自行跟随。
+// HarmonyOS: OHAudio low-latency renderer (16-bit, 48 kHz, game usage); the write-data callback calls render directly.
+// On a system error (e.g. the audio service restarting) an ordinary thread closes and reopens it, as on Android, resuming if it
+// was playing; route changes (headphones, Bluetooth) are followed by OHAudio itself.
+static int32_t oh_write(OH_AudioRenderer *r, void *ctx, void *data, int32_t length) {
+    (void)r; render(ctx, data, (uint32_t)length); return 0;
+}
+static int32_t oh_event(OH_AudioRenderer *r, void *ctx, OH_AudioStream_Event e) { (void)r; (void)ctx; LOG("audio：OHAudio 流事件 %d", (int)e); return 0; }
+static int32_t oh_interrupt(OH_AudioRenderer *r, void *ctx, OH_AudioInterrupt_ForceType t, OH_AudioInterrupt_Hint h) {
+    (void)r; (void)ctx; LOG("audio：音频焦点中断 type=%d hint=%d", (int)t, (int)h); return 0;
+}
+static void *null_sink(void *p);
+static int au_open(aout *a);
+static void *oh_reopen(void *p) {
+    aout *a = p;
+    pthread_mutex_lock(&g_aos_lock);
+    if (a->au) {
+        int playing = !g_suspended && atomic_load_explicit(&a->state, memory_order_acquire) == STATE_STARTED;
+        OH_AudioRenderer_Release(a->au); a->au = NULL;
+        if (au_open(a)) { LOG("【红】音频流出错后重开失败：这一路改用静音接收端（不出声）");
+                          if (playing) { atomic_store_explicit(&a->null_run, 1, memory_order_release); pthread_create(&a->null_th, NULL, null_sink, a); } }
+        else if (playing && OH_AudioRenderer_Start(a->au) != AUDIOSTREAM_SUCCESS) LOG("【红】音频流重开后启动失败");
+        else LOG("audio：音频流出错，已重开");
+    }
+    pthread_mutex_unlock(&g_aos_lock);
+    return NULL;
+}
+static int32_t oh_error(OH_AudioRenderer *r, void *ctx, OH_AudioStream_Result err) {
+    (void)r; LOG("【红】OHAudio 流错误 %d，交给线程重开", (int)err);
+    pthread_t th; if (!pthread_create(&th, NULL, oh_reopen, ctx)) pthread_detach(th);
+    return 0;
+}
+static int au_open(aout *a) {   // 0 = 声卡开好了；-1 = 开不了（a->au 置空，调用方走静音接收端） | 0 = the sound card is open; -1 = it cannot be opened (a->au set to null, the caller uses the silent sink)
+    a->mix = a->ch == 6; if (a->mix && !a->mixbuf) a->mixbuf = malloc(MIXMAX * 12);   // 5.1：我们自己下混，声卡只收双声道 | 5.1: we downmix ourselves, the sound card only takes stereo
+    if (a->mix && !a->mixbuf) { a->au = NULL; LOG("【红】下混暂存申请不到：这一路改用静音接收端（不出声）"); return -1; }
+    int och = a->mix ? 2 : a->ch;
+    OH_AudioStreamBuilder *b = NULL;
+    if (OH_AudioStreamBuilder_Create(&b, AUDIOSTREAM_TYPE_RENDERER) != AUDIOSTREAM_SUCCESS) { a->au = NULL; LOG("【红】OHAudio 建不出来：这一路改用静音接收端（不出声）"); return -1; }
+    OH_AudioStreamBuilder_SetSamplingRate(b, RATE);
+    OH_AudioStreamBuilder_SetChannelCount(b, och);
+    OH_AudioStreamBuilder_SetSampleFormat(b, AUDIOSTREAM_SAMPLE_S16LE);
+    OH_AudioStreamBuilder_SetEncodingType(b, AUDIOSTREAM_ENCODING_TYPE_RAW);
+    OH_AudioStreamBuilder_SetRendererInfo(b, AUDIOSTREAM_USAGE_GAME);
+    OH_AudioStreamBuilder_SetLatencyMode(b, AUDIOSTREAM_LATENCY_MODE_FAST);
+    OH_AudioRenderer_Callbacks cb = {.OH_AudioRenderer_OnWriteData = oh_write, .OH_AudioRenderer_OnStreamEvent = oh_event,
+                                     .OH_AudioRenderer_OnInterruptEvent = oh_interrupt, .OH_AudioRenderer_OnError = oh_error};
+    OH_AudioStreamBuilder_SetRendererCallback(b, cb, a);
+    OH_AudioStream_Result r = OH_AudioStreamBuilder_GenerateRenderer(b, &a->au);
+    OH_AudioStreamBuilder_Destroy(b);
+    if (r != AUDIOSTREAM_SUCCESS) { a->au = NULL; LOG("【红】OHAudio 打开失败 %d：这一路改用静音接收端（不出声）", (int)r); return -1; }
+    if (a->mix) LOG("audio：游戏给 6 声道（5.1）→ 交给声卡前自己下混成双声道（中置 / 后环绕 ×0.707 并入左右，低音不并入，整体 −3 dB、饱和截断）");
+    int32_t rate = 0, chn = 0, fpc = 0; OH_AudioRenderer_GetSamplingRate(a->au, &rate); OH_AudioRenderer_GetChannelCount(a->au, &chn); OH_AudioRenderer_GetFrameSizeInCallback(a->au, &fpc);
+    LOG("audio：OHAudio 流 %d Hz %d 声道，每次回调 %d 帧", (int)rate, (int)chn, (int)fpc);
+    return 0;
+}
+static int dev_start(aout *a) { return OH_AudioRenderer_Start(a->au) == AUDIOSTREAM_SUCCESS ? 0 : -1; }
+static void dev_stop(aout *a) { OH_AudioRenderer_Stop(a->au); }
+static void dev_close(aout *a) { OH_AudioRenderer_Release(a->au); a->au = NULL; }
+#else
+// 安卓：AAudio 低延迟输出流（16 位、48 kHz、游戏用途），回调直接调 render。
+// 流断开（耳机插拔、蓝牙切换、系统音频服务重启）时 AAudio 在错误回调里通知：回调里不能关流，交给一条普通线程关掉重开，原来在播就接着播。
+// Android: AAudio low-latency output stream (16-bit, 48 kHz, game usage), the callback calls render directly.
+// When the stream is disconnected (headphones plugged / unplugged, Bluetooth switch, system audio service restart) AAudio notifies in the error callback: the stream must not be closed inside the callback, so an ordinary thread closes and reopens it, and resumes playback if it was playing.
+static aaudio_data_callback_result_t aa_render(AAudioStream *st, void *ctx, void *data, int32_t frames) {
+    render(ctx, data, (uint32_t)frames * (uint32_t)AAudioStream_getChannelCount(st) * 2u);
+    return AAUDIO_CALLBACK_RESULT_CONTINUE;
+}
+static void *null_sink(void *p);
+static int au_open(aout *a);
+static void *aa_reopen(void *p) {
+    aout *a = p;
+    pthread_mutex_lock(&g_aos_lock);
+    if (a->au) {
+        int playing = !g_suspended && atomic_load_explicit(&a->state, memory_order_acquire) == STATE_STARTED;
+        AAudioStream_close(a->au); a->au = NULL;
+        if (au_open(a)) { LOG("【红】音频流断开后重开失败：这一路改用静音接收端（不出声）");
+                          if (playing) { atomic_store_explicit(&a->null_run, 1, memory_order_release); pthread_create(&a->null_th, NULL, null_sink, a); } }
+        else if (playing && AAudioStream_requestStart(a->au) != AAUDIO_OK) LOG("【红】音频流重开后启动失败");
+        else LOG("audio：音频流断开（输出设备变化），已重开");
+    }
+    pthread_mutex_unlock(&g_aos_lock);
+    return NULL;
+}
+static void aa_error(AAudioStream *st, void *ctx, aaudio_result_t err) {
+    (void)st;
+    if (err != AAUDIO_ERROR_DISCONNECTED) { LOG("【红】音频流错误 %d（%s）", (int)err, AAudio_convertResultToText(err)); return; }
+    pthread_t th; if (!pthread_create(&th, NULL, aa_reopen, ctx)) pthread_detach(th);
+}
+static int au_open(aout *a) {   // 0 = 声卡开好了；-1 = 开不了（a->au 置空，调用方走静音接收端） | 0 = the sound card is open; -1 = it cannot be opened (a->au set to null, the caller uses the silent sink)
+    a->mix = a->ch == 6; if (a->mix && !a->mixbuf) a->mixbuf = malloc(MIXMAX * 12);   // 5.1：我们自己下混，声卡只收双声道 | 5.1: we downmix ourselves, the sound card only takes stereo
+    if (a->mix && !a->mixbuf) { a->au = NULL; LOG("【红】下混暂存申请不到：这一路改用静音接收端（不出声）"); return -1; }
+    int och = a->mix ? 2 : a->ch;
+    AAudioStreamBuilder *b = NULL;
+    if (AAudio_createStreamBuilder(&b) != AAUDIO_OK) { a->au = NULL; LOG("【红】AAudio 建不出来：这一路改用静音接收端（不出声）"); return -1; }
+    AAudioStreamBuilder_setDirection(b, AAUDIO_DIRECTION_OUTPUT);
+    AAudioStreamBuilder_setSampleRate(b, RATE);
+    AAudioStreamBuilder_setChannelCount(b, och);
+    AAudioStreamBuilder_setFormat(b, AAUDIO_FORMAT_PCM_I16);
+    AAudioStreamBuilder_setPerformanceMode(b, AAUDIO_PERFORMANCE_MODE_LOW_LATENCY);
+    AAudioStreamBuilder_setUsage(b, AAUDIO_USAGE_GAME);
+    AAudioStreamBuilder_setContentType(b, AAUDIO_CONTENT_TYPE_SONIFICATION);
+    AAudioStreamBuilder_setDataCallback(b, aa_render, a);
+    AAudioStreamBuilder_setErrorCallback(b, aa_error, a);
+    aaudio_result_t r = AAudioStreamBuilder_openStream(b, &a->au);
+    AAudioStreamBuilder_delete(b);
+    if (r != AAUDIO_OK) { a->au = NULL; LOG("【红】AAudio 打开失败 %d（%s）：这一路改用静音接收端（不出声）", (int)r, AAudio_convertResultToText(r)); return -1; }
+    if (a->mix) LOG("audio：游戏给 6 声道（5.1）→ 交给声卡前自己下混成双声道（中置 / 后环绕 ×0.707 并入左右，低音不并入，整体 −3 dB、饱和截断）");
+    LOG("audio：AAudio 流 %d Hz %d 声道，性能模式 %d，每次回调 %d 帧，缓冲 %d / %d 帧", AAudioStream_getSampleRate(a->au), AAudioStream_getChannelCount(a->au),
+        (int)AAudioStream_getPerformanceMode(a->au), AAudioStream_getFramesPerBurst(a->au), AAudioStream_getBufferSizeInFrames(a->au), AAudioStream_getBufferCapacityInFrames(a->au));
+    return 0;
+}
+static int dev_start(aout *a) { return AAudioStream_requestStart(a->au) == AAUDIO_OK ? 0 : -1; }
+static void dev_stop(aout *a) { AAudioStream_requestStop(a->au); }
+static void dev_close(aout *a) { AAudioStream_close(a->au); a->au = NULL; }
 #endif
 // 静音接收端：每 5 ms 按 48 kHz 实时消耗
 // Silent sink: consumes in real time at 48 kHz every 5 ms
@@ -237,7 +360,7 @@ static void *null_sink(void *p) {
     }
     return NULL;
 }
-static int real_audio(void) { const char *e = getenv("DM_AUDIO"); return e ? atoi(e) != 0 : TARGET_OS_IPHONE; }
+static int real_audio(void) { const char *e = getenv("DM_AUDIO"); return e ? atoi(e) != 0 : DM_PHONE; }
 
 // AudioOutParameter = { int32 sampleRate; uint16 channelCount; uint16 _r; ... }，0 = 系统默认（48 kHz / 2 声道）
 // AudioOutParameter = { int32 sampleRate; uint16 channelCount; uint16 _r; ... }, 0 = system default (48 kHz / 2 channels)
@@ -247,7 +370,7 @@ HLE_FORCE("_ZN2nn5audio13ListAudioOutsEPNS0_12AudioOutInfoEi", "音频输出设�
     if (n < 1) return 0;
     memset(info, 0, 256); strcpy(info, "DeviceOut"); return 1;
 }
-HLE_FORCE("_ZN2nn5audio12OpenAudioOutEPNS0_8AudioOutEPNS_2os11SystemEventEPKcRKNS0_17AudioOutParameterE", "连 audout 服务；宿主真出声后端 / 静音接收端",
+HLE_FORCE("_ZN2nn5audio12OpenAudioOutEPNS0_8AudioOutEPNS_2os11SystemEventEPKcRKNS0_17AudioOutParameterE", "连 audout 服务；宿主 AudioUnit / 静音接收端",
           Result, h_au_Open, void *g, void *ev, const char *name, const uint8_t *param) {
     int ch = *(const uint16_t *)(param + 4); int rate = *(const int32_t *)param;
     if (!ch) ch = 2;
@@ -259,7 +382,7 @@ HLE_FORCE("_ZN2nn5audio12OpenAudioOutEPNS0_8AudioOutEPNS_2os11SystemEventEPKcRKN
     atomic_init(&a->rel_head, 0); atomic_init(&a->rel_tail, 0);
     atomic_init(&a->null_run, 0); atomic_init(&a->notify_run, 1);
     atomic_init(&a->notify_pending, 0); atomic_init(&a->notify_armed, 0);
-    a->notify_sem = dispatch_semaphore_create(0);
+    a->notify_sem = sem_new();
     pthread_create(&a->notify_th, NULL, event_notify, a);
     if (ev) hle_bind_system_event(ev, 1);   // 缓冲释放事件：客体线程上绑内核事件（自动清除），之后由音频线程触发 | Buffer release event: bind a kernel event on the guest thread (auto-clear), afterwards signaled by the audio thread
     objmap_put(g, a);
@@ -269,17 +392,14 @@ HLE_FORCE("_ZN2nn5audio12OpenAudioOutEPNS0_8AudioOutEPNS_2os11SystemEventEPKcRKN
     g_aos[slot] = a;
     pthread_mutex_unlock(&g_aos_lock);
     LOG("audio::OpenAudioOut %s 声道 %d %s", name ? name : "(默认)", ch, real_audio() ? "真出声" : "静音接收端");
-    if (real_audio()) DM_AO_OPEN(a);   // 开不了就 a->au 为空，开始播放时走静音接收端（与上游本次"打开失败改为降级"的语义一致，鸿蒙侧本来就返回 NULL） | if it cannot be opened, a->au is null and playback goes to the silent sink
+    if (real_audio()) au_open(a);   // 开不了就 a->au 为空，开始播放时走静音接收端 | if it cannot be opened, a->au is null, and playback goes to the silent sink when it starts
     return RES_OK;
 }
 HLE_FORCE("_ZN2nn5audio13StartAudioOutEPNS0_8AudioOutE", "开始播放", Result, h_au_Start, void *g) {
     aout *a = ao(g);
     pthread_mutex_lock(&a->m); int was = atomic_load_explicit(&a->state, memory_order_relaxed); atomic_store_explicit(&a->state, STATE_STARTED, memory_order_release); pthread_mutex_unlock(&a->m);
     if (was == STATE_STARTED) return RES_OK;
-    if (a->au && !g_suspended && DM_AO_START(a)) {
-        LOG("【红】音频输出启动失败：这一路改用静音接收端（不出声）");
-        DM_AO_CLOSE(a); a->au = NULL;      // 鸿蒙侧 dm_au_t 是 void*，置空安全；与上游"释放后降级"同语义 | HarmonyOS dm_au_t is void*, safe to null; same semantics as upstream
-    }
+    if (a->au && !g_suspended && dev_start(a)) { LOG("【红】声卡启动失败：这一路改用静音接收端（不出声）"); dev_close(a); }
     if (!a->au || g_suspended) { atomic_store_explicit(&a->null_run, 1, memory_order_release); pthread_create(&a->null_th, NULL, null_sink, a); }
     return RES_OK;
 }
@@ -288,20 +408,20 @@ HLE_FORCE("_ZN2nn5audio12StopAudioOutEPNS0_8AudioOutE", "停止播放", void, h_
     pthread_mutex_lock(&a->m); int was = atomic_load_explicit(&a->state, memory_order_relaxed); atomic_store_explicit(&a->state, STATE_STOPPED, memory_order_release); pthread_mutex_unlock(&a->m);
     if (was != STATE_STARTED) return;
     pthread_mutex_lock(&g_aos_lock); int susp = g_suspended; pthread_mutex_unlock(&g_aos_lock);
-    if (a->au && !susp) DM_AO_STOP(a);
+    if (a->au && !susp) dev_stop(a);
     else { atomic_store_explicit(&a->null_run, 0, memory_order_release); pthread_join(a->null_th, NULL); }   // 静音接收端（含暂停期间接手的） | Silent sink (including one that took over during suspension)
 }
 HLE_FORCE("_ZN2nn5audio13CloseAudioOutEPNS0_8AudioOutE", "关闭音频输出", void, h_au_Close, void *g) {
     h_au_Stop(g);
     aout *a = objmap_del(g);
     atomic_store_explicit(&a->notify_run, 0, memory_order_release);
-    dispatch_semaphore_signal(a->notify_sem);
+    sem_up(a->notify_sem);
     pthread_join(a->notify_th, NULL);
     pthread_mutex_lock(&g_aos_lock);
     for (int i = 0; i < AOMAX; i++) if (g_aos[i] == a) g_aos[i] = NULL;
     pthread_mutex_unlock(&g_aos_lock);
-    if (a->au) DM_AO_CLOSE(a);
-    dispatch_release(a->notify_sem);
+    if (a->au) dev_close(a);
+    sem_free(a->notify_sem);
     free(a->mixbuf); pthread_mutex_destroy(&a->m); free(a);
 }
 HLE_FORCE("_ZN2nn5audio16GetAudioOutStateEPKNS0_8AudioOutE", "播放状态", int, h_au_State, const void *g) { return atomic_load_explicit(&ao(g)->state, memory_order_acquire); }
@@ -353,11 +473,11 @@ void dm_audio_suspend(int on) {
             if (!a || !a->au || atomic_load_explicit(&a->state, memory_order_acquire) != STATE_STARTED) continue;
             // 暂停期间改由静音接收端按实时消耗：否则缓冲不再释放，FMOD 输出线程永久等待、游戏音频节奏卡死（来电打断同理）
             // While suspended the silent sink consumes in real time instead: otherwise buffers are no longer released, the FMOD output thread waits forever and the game's audio pacing stalls (same for an incoming call interruption)
-            if (on) { DM_AO_STOP(a); atomic_store_explicit(&a->null_run, 1, memory_order_release); pthread_create(&a->null_th, NULL, null_sink, a); }
+            if (on) { dev_stop(a); atomic_store_explicit(&a->null_run, 1, memory_order_release); pthread_create(&a->null_th, NULL, null_sink, a); }
             else { atomic_store_explicit(&a->null_run, 0, memory_order_release); pthread_join(a->null_th, NULL);
-                   dm_au_status_t st = DM_AO_START(a);
+                   int st = dev_start(a);
                    if (st) {   // 会话还被别人占着（通话没挂就切回游戏、打断结束时人还在别的 App）：不致命，继续由静音接收端顶着，等下一次恢复再试 | The session is still held by someone else (switched back to the game with a call not yet hung up, or the user is still in another app when the interruption ends): not fatal, the silent sink keeps covering, and we retry at the next resume
-                       LOG("【红】音频输出恢复失败（状态 %d）：保持静音接收端，等下次恢复重试", (int)st);
+                       LOG("【红】声卡恢复失败（状态 %d）：保持静音接收端，等下次恢复重试", st);
                        atomic_store_explicit(&a->null_run, 1, memory_order_release); pthread_create(&a->null_th, NULL, null_sink, a); failed = 1; } }
         }
         if (failed) g_suspended = 1;   // 没恢复成：状态留在「暂停」，下次调 0 会再试 | Resume did not succeed: the state stays "suspended", and the next call with 0 will retry

@@ -33,13 +33,15 @@ The App contains only our own program. The rewritten game program, the shader li
 
 Version and build number can be set: `DM_MAC_VERSION` (default 1.0) and `DM_MAC_BUILD` (default: the current month-day-hour-minute).
 
+The App gets the project's own icon (`dm/ios/Assets.xcassets/AppIcon.appiconset/AppIcon1024.png`). Use your own picture with `DM_MAC_ICON_SOURCE=<image>` (an opaque square that fills the whole picture; macOS 26 and later round the corners themselves, and a picture with transparent margins is shown shrunk inside a gray frame), or build without an icon with `DM_MAC_ICON_SOURCE=none`.
+
 ## First launch
 
 Double-click the App. The first launch asks you to choose the **game resource folder**: pick `~/dm-work/data/switch/3.3.94012/Update` (or the `RomFS` inside it); it must contain a `data` folder. Choosing the folder that directly holds the `.data` files and `build_manifest.psv` also works. A wrong choice is explained and you are asked again; a correct one is remembered.
 
 A key reference is then shown once; afterwards it is under Help in the menu bar.
 
-Language: the first launch follows the system language (Chinese systems start in Chinese, everything else in English). To change it: Options → Custom, the language switch in the first row → Accept All → close and reopen the App.
+Language: the first launch follows the system language (Chinese systems start in Chinese, Spanish in Spanish, Russian in Russian, everything else in English). To change it: Options → Custom, the language switch in the first row → Accept All → close and reopen the App.
 
 ## Keyboard ↔ gamepad
 
@@ -62,6 +64,8 @@ With a keyboard, the button prompts on screen (the hint bar at the bottom, skill
 **Creating a character, start to finish**: on the main menu press `=` (or click "New Character") → choose a class with the arrow keys and press Return (or click that class's figure) → on the mode page press Return or Space → on the naming page press Return to open the input box, type, Return → press Return once more to create.
 
 A gamepad works as soon as it is connected, alongside the keyboard. The menu bar has View → Full Screen (⌃⌘F) and Quit (⌘Q). The window can be resized freely. In game the picture fills the window or screen at its own aspect ratio (on a 16:10 MacBook both windowed and full screen are filled, with the interface along the bottom, centred while a large panel is open); the front-end pages such as the main menu and character select stay 16:9 with bars above and below.
+
+The mouse pointer hides itself after it has rested over the game window for 3 seconds (handy when playing with the keyboard or a gamepad) and comes back the moment the mouse moves. It never hides over the menu bar, other windows or a dialog. To change the delay: `defaults write org.d2rmobile.mac CursorHideSeconds -float 5` (seconds; `0` turns it off; the older-API build uses `org.d2rmobile.mac.m3`), then restart the App.
 
 ## Mouse
 
@@ -94,7 +98,7 @@ What it cannot do yet:
 - No sound: at launch the log has a line `audio：输出设备「…」…，系统缺省输出「…」…` (the output device in use and the system default output; a mismatch is marked red), and on exit a line `声卡回调累计 N` — N = 0 means no sound was played this time. (These log lines are in Chinese.)
 - The older-API build (`D2R Mobile M3.app`) uses a separate pair of directories with M3 in the name.
 
-**iCloud save sync: not available in an App you build from this repository.** The program has the same sync as on iPhone / iPad wired in, but it needs the App to carry the iCloud signing entitlement; an App you build yourself is signed locally without it, so saves stay on this Mac, the log records one line saying iCloud is unavailable and only local saves are used, and the game runs as usual. To bring your phone's progress over, import it by hand as below.
+**iCloud save sync: off by default in an App you build from this repository; a paid developer account can turn it on.** The program has the same sync as on iPhone / iPad wired in, but it needs the App to carry the iCloud signing entitlement. By default the App is signed locally without it, so saves stay on this Mac, the log records one line saying iCloud is unavailable and only local saves are used, and the game runs as usual. With a paid developer account, download a Mac provisioning profile that carries iCloud, put the `.provisionprofile` into `~/dm-work/mac-sign` (or point `DM_MAC_SIGN_DIR` at its folder) and build with `DM_MAC_ICLOUD=1 dm/tools/mac_app.sh`: the script reads the team, bundle identifier and entitlements from the profile and signs with the matching certificate in your keychain. The bundle identifier in the profile decides the iCloud container, so a profile for your iOS App's identifier syncs with your iPhone / iPad. Contributed by [@xielh96](https://github.com/xielh96) ([#121](https://github.com/jhaizhou-ops/d2r-mobile/pull/121)). Without a paid account, bring your phone's progress over by importing it by hand as below.
 
 ### Importing saves from an iPhone / iPad
 
@@ -140,5 +144,5 @@ After a forced quit or a crash, the system's "reopen windows?" dialog no longer 
 - "Prompts switch back to gamepad letters when a gamepad is used" was verified by simulation; no physical gamepad has been connected.
 - The free town portal on ZR + Space of a gamepad is not there.
 - The quest bar on the left in rifts is not there.
-- An App you build yourself has no iCloud save sync and does no update check (it does not go online).
+- An App you build yourself does no update check (it does not go online), and has iCloud save sync only when built with `DM_MAC_ICLOUD=1` and a paid account's profile (see "Saves, logs and iCloud").
 - The older-API build was played on macOS 15 by one player in our test group (Mac mini M4, macOS 15.7, using a package built elsewhere); building it from this repository on a Mac running macOS 15 has not been operated by a person.

@@ -1,12 +1,12 @@
 # D2R Mobile
 
-**开源的《暗黑破坏神 II：狱火重生》术士君临 iOS / macOS 兼容层。** 把你自己购买的 Nintendo Switch 版游戏（含「术士君临」资料片）完整带到 iPhone、iPad 和 Mac 上：原版内核原生执行，整套操作为触屏重做，稳定 60 帧，一秒进局。现在也有原生的 macOS 版（第一版）：Apple 芯片的 Mac 上双击启动，键盘、鼠标、手柄都能用。Apple TV 4K（第三代 A15）有社区移植（开发者预览），只在作者的实机上到过职业选择画面，详见下面的设备表。
+**开源的《暗黑破坏神 II：狱火重生》术士君临兼容层，支持 iOS、macOS、安卓与鸿蒙。** 把你自己购买的 Nintendo Switch 版游戏（含「术士君临」资料片）完整带到 iPhone、iPad 和 Mac 上：原版内核原生执行，整套操作为触屏重做，稳定 60 帧，一秒进局。现在也有原生的 macOS 版（第一版）：Apple 芯片的 Mac 上双击启动，键盘、鼠标、手柄都能用。**v2.0 起有了安卓版**（社区移植）：同一份游戏程序在 ARM64 安卓手机上原生执行，图形在 Vulkan 上重新实现；骁龙 8+ 一代的手机上，营地、邪恶洞穴和奶牛关的战斗都是中位 60 帧，详见下面的「安卓版」；同一套引擎上还有鸿蒙版（社区移植，发布页下载未签名壳、自己重签即可，不用自己构建，见「鸿蒙版」）。Apple TV 4K（第三代 A15）有社区移植（开发者预览），只在作者的实机上到过职业选择画面，详见下面的设备表。
 
 这不是一个「勉强能跑」的技术演示，而是一个打磨到可以天天玩、从开荒一路玩到终局的移动版。
 
-平台：iPhone / iPad（iOS 26 起；iOS 18 – 25 用老接口版）· Mac（Apple 芯片，macOS 26 及以上；macOS 15 – 25 用老接口版）· Apple TV 4K（第三代 A15，社区移植，开发者预览）· 游戏版本：Switch 版「术士君临」1.0.34.0（对应 PC 版 3.3.94012）· 中文 / English · 许可证：MIT · **需要自备游戏文件**
+平台：iPhone / iPad（iOS 26 起；iOS 18 – 25 用旧接口版）· Mac（Apple 芯片，macOS 26 及以上；macOS 15 – 25 用旧接口版）· Apple TV 4K（第三代 A15，社区移植，开发者预览）· 安卓手机（ARM64，Android 12 起，Vulkan 1.1；社区移植）· 鸿蒙手机（HarmonyOS NEXT；社区移植，发布页的未签名壳 + 自己重签）· 游戏版本：Switch 版「术士君临」1.0.34.0（对应 PC 版 3.3.94012）· 中文 / English / Español / Русский / 한국어 · 许可证：MIT · **需要自备游戏文件**
 
-English: [README.md](README.md)
+English: [README.md](README.md) · Español: [README.es.md](README.es.md)
 
 <p align="center">
   <img src="https://github.com/jhaizhou-ops/d2r-mobile/releases/download/assets/hero_zh.jpg" width="100%" alt="iPhone 上全面屏铺满的游戏画面：地狱难度的哈洛加斯，红门通往秘境">
@@ -25,8 +25,8 @@ English: [README.md](README.md)
 **是：**
 
 - 游戏自己的 aarch64 程序**直接在设备上执行**，没有模拟 CPU。iPhone 和 Switch 是同一类处理器，程序里只有极少数在苹果内核下不能原样执行的指令被改写，其余逐字节保持原样。所有职业、全部符文之语、恐怖地带、首领、掉落规则、任务流程，都和原版一模一样。
-- 游戏需要的平台服务——系统调用、文件系统、图形接口、音频、输入——由一个为苹果平台写的小型宿主提供；图形接口完全在苹果的 Metal 上重新实现，中间不经过任何模拟层，着色器由游戏原版离线翻译。
-- 一次真正为手机做的移植，而且做到了底：整套触屏操作、全面屏与 iPad 真全屏、手柄支持、省电模式、存档同步、中英双语，以及一整套原版没有的终局玩法与便利功能。
+- 游戏需要的平台服务——系统调用、文件系统、图形接口、音频、输入——由一个为苹果平台写的小型宿主提供；图形接口完全重新实现——苹果上用 Metal，安卓上用 Vulkan——中间不经过任何模拟层，着色器由游戏原版离线翻译。
+- 一次真正为手机做的移植，而且做到了底：整套触屏操作、全面屏与 iPad 真全屏、手柄支持、省电模式、存档同步、中英西俄韩五种语言，以及一整套原版没有的终局玩法与便利功能。
 
 **不是：**
 
@@ -93,7 +93,7 @@ iPhone 与 iPad 共用一个安装包。
 
 ### 手柄
 
-接上手柄、按任意键，界面自动换成原版手柄布局，每个面板底部带按键提示；碰一下屏幕，立刻回到触屏界面。物品栏、储藏箱、技能树、编年史、设置页全程手柄可操作，键位与 Switch 一致。
+接上手柄、按任意键，界面自动换成原版手柄布局，每个面板底部带按键提示；碰一下屏幕，立刻回到触屏界面。物品栏、储藏箱、技能树、编年史、设置页全程手柄可操作，键位与 Switch 一致。接的是 Xbox 手柄时会自动换成 PC / Xbox 版的键位（下确认、右返回），按键提示也换成 Xbox 的图标，不用去设置里开。接的是 PlayStation 手柄（DualSense 或 DualShock 4）时，按键提示自动换成游戏原版的 PS 图标（✕ 确认、○ 返回），由 [@Ti800](https://github.com/Ti800) 贡献（[#119](https://github.com/jhaizhou-ops/d2r-mobile/pull/119)）。
 
 <p align="center">
   <img src="https://github.com/jhaizhou-ops/d2r-mobile/releases/download/assets/pad_game.jpg" width="49%" alt="接手柄时的界面">
@@ -158,9 +158,9 @@ iPhone 与 iPad 共用一个安装包。
   <img src="https://github.com/jhaizhou-ops/d2r-mobile/releases/download/assets/map.jpg" width="33%" alt="全屏地图">
 </p>
 
-### 中文与英文
+### 中文、英文、西班牙语、俄语与韩语
 
-整个游戏可在「选项 → 自定义」里切换为英文，重启后界面与语音都是英文：物品、技能、怪物名沿用原版英文，我们新增的内容——秘境、编年史、设置页、手柄提示——也全部配了英文。
+整个游戏可在「选项 → 自定义」里切换中文、英文、西班牙语、俄语或韩语，重启后界面就是所选语言；第一次打开时跟随设备语言（西班牙的西语用原版 esES 文字，其他地区的西语用拉美 esMX 文字；俄语用原版 ruRU 文字，韩语用原版 koKR 文字）。英文、西语、俄语和韩语下，物品、技能、怪物名沿用原版译名，我们新增的内容——秘境、编年史、设置页、手势提示、地图名牌——也全部配了对应语言（物品注释只有中文与西语）。语音：中文界面配中文语音；俄语、韩语界面在你的游戏文件里带对应配音时（用完整游戏数据出的包都带）配原版俄语、韩语语音，否则配英文；其余配英文语音。韩语由 [@soulsakura](https://github.com/soulsakura) 贡献（[#118](https://github.com/jhaizhou-ops/d2r-mobile/pull/118)）。
 
 <p align="center">
   <img src="https://github.com/jhaizhou-ops/d2r-mobile/releases/download/assets/en_game.jpg" width="58%" alt="英文界面下的游戏画面">
@@ -185,9 +185,35 @@ flowchart LR
 | 宿主 | `dm/host` | 装载改写后的程序，提供它调用的平台服务 |
 | 图形 | `dm/gfx` | 在 Metal 上实现游戏用的图形接口；着色器由游戏原版离线翻译 |
 | iOS App | `dm/ios` | App 外壳、触摸操作与界面 |
+| 安卓 App | `dm/android` | 安卓外壳、触屏覆盖层、Vulkan 呈现 |
+| 鸿蒙 App | `dm/harmony` | 鸿蒙外壳（ArkTS + N-API），与安卓共用宿主和 Vulkan 引擎 |
+| Vulkan 图形层 | `dm/gfx/vulkan` | 在 Vulkan 上实现同一套图形接口（安卓、鸿蒙共用；引擎来自鸿蒙移植） |
 | 验证 | `dm/verify` | 核对改写后的代码与原版行为完全一致，以及每次改动都要过的回归闸门 |
 
 **为什么可信：** 稳定不是靠运气。测试与验证工具是项目的一部分——宿主与图形层的单元测试、对每一处改写指令的等价核对、触摸界面的脚本化走查回归、真机冒烟。从 `make -C dm/host/tests run`、`make -C dm/gfx/tests run` 与 `dm/verify/regress.sh` 开始（都在下面第 2 步准备的 Python 环境里跑；`regress.sh` 另需 `brew install llvm`）。怎么参与见 [CONTRIBUTING.zh-CN.md](CONTRIBUTING.zh-CN.md)。
+
+## 安卓版（v2.0 新增）
+
+安卓手机和 Switch 一样是 ARM64 处理器，所以和苹果上一样，游戏自己的程序直接在手机上执行，没有模拟 CPU。这一版把整套宿主——系统调用、文件系统、音频、输入、存档——原样带到了安卓上，图形层换成 Vulkan：NVN→Vulkan 的回放引擎来自 [@biglawine](https://github.com/biglawine) 的鸿蒙移植，安卓 App、触屏、Vulkan 呈现和一整轮在真机上逐项测量的性能优化由 [@yyan160](https://github.com/yyan160) 完成（[#113](https://github.com/jhaizhou-ops/d2r-mobile/pull/113)）。苹果版和安卓版用的是同一份宿主代码，以后的改动两边一起受益。
+
+合作者的真机实测（产品缺省设置：3D 渲染比例上限 0.85，按掉帧动态调低）：
+
+| 手机 | 读数 |
+|---|---|
+| Redmi K50 Ultra（骁龙 8+ 一代，Adreno 730，Android 15） | 营地、邪恶洞穴战斗、奶牛关战斗：**中位 60 帧**，GPU 每帧约 14–15 ms |
+| OnePlus 13（Adreno 830） | 能玩；营地里有一种光效出现时，偶尔会闪过一瞬的小黑块，正在查 |
+
+最低要求：ARM64，Android 12（API 31）及以上，显卡支持 Vulkan 1.1。
+
+**现在怎么用**：装发布页的 `D2RMobile-android.apk`（不含任何游戏内容），在电脑上用你自己的游戏文件跑 `python3 dm/tools/d2rm_android.py <Update 目录> <输出目录>` 做出导入包（`android` 文件夹：改写后的游戏程序、全部 Vulkan 着色器包、触屏覆盖层与几张数据表），把它和游戏资源（`data` 文件夹）一起拷到手机的 `Download/S2X/D2R Mobile/`，打开 App 会带进度条自己导入。不用 adb，也不用自己编 APK。完整步骤见 [docs/ANDROID.zh-CN.md](docs/ANDROID.zh-CN.md)。触屏控件和 iPhone 版同一套画法（按钮底座、银灰技能剪影、摇杆），面板打开时不再压着虚拟手柄圆钮。和 iOS 版相比，还没做完的是几处触屏细节：空技能格菜单、加点浮层、商店拖动时跟着手指的物品图。
+
+开发进度、每一轮的实测记录与待办在 [docs/ANDROID_COLLABORATION.zh-CN.md](docs/ANDROID_COLLABORATION.zh-CN.md) 和 [docs/android-notes/](docs/android-notes/)。鸿蒙版见下一节。
+
+## 鸿蒙版（v2.0 新增）
+
+鸿蒙 NEXT 应用（`dm/harmony`）由 [@biglawine](https://github.com/biglawine) 完成（[#114](https://github.com/jhaizhou-ops/d2r-mobile/pull/114)），和安卓用同一份宿主和同一套 Vulkan 引擎。作者在 Mate 90 Pro Max（马良 955）上实测：罗格营地按住摇杆 59.7 帧，上屏间隔 p50 16.6 / p99 18.1 ms。
+
+**怎么用**：和 iOS 的壳一个思路。发布页有一个**不含任何游戏内容的未签名安装包**（`D2RMobile-harmony-shell-unsigned.hap`）；鸿蒙 NEXT 只装用你自己的开发者证书签名的应用，所以你用自己的调试证书把它重签、装上，不用自己编应用。再在电脑上用你自己的游戏文件跑 `python3 dm/tools/d2rm_android.py --target ohos <Update 目录> <输出目录>` 做出运行包，和游戏资源一起放进手机上的「D2R Mobile」文件夹，打开应用选它导入。完整步骤见 [docs/HARMONYOS.zh-CN.md](docs/HARMONYOS.zh-CN.md)。作者在 Mate 90 Pro Max 上把「重签 → 安装 → 首次导入 → 进局 → 保存退出」整条走通，连续三次冷启动都正常；需要华为开发者账号（DevEco Studio 能自动生成调试证书与登记设备）。
 
 ## 支持哪些设备
 
@@ -195,13 +221,16 @@ flowchart LR
 
 | 设备 | 能不能玩 | 怎么做 | 把握程度 |
 |---|---|---|---|
-| **iPhone / iPad，A17 Pro 及以后**（iPhone 15 Pro 起、iPhone 16 起、M 系列芯片的 iPad） | 直接玩 | iOS 26 及以上用缺省的壳 / 缺省构建；iOS 18 – 25 用 iOS 18 的壳 / [老接口版](docs/OLDER_SYSTEMS.zh-CN.md) | 主力机型，日常在玩 |
+| **iPhone / iPad，A17 Pro 及以后**（iPhone 15 Pro 起、iPhone 16 起、M 系列芯片的 iPad） | 直接玩 | iOS 26 及以上用默认的壳 / 默认构建；iOS 18 – 25 用 iOS 18 的壳 / [旧接口版](docs/OLDER_SYSTEMS.zh-CN.md) | 主力机型，日常在玩 |
+| **iPhone Duo**（折叠屏） | 直接玩，展开、折叠时画面跟着换尺寸 | 发布页的壳已用 Xcode 27.1 出；自己用 Xcode 构建要用 27.1，内屏才能铺满（见 [docs/DEPENDENCIES.zh-CN.md](docs/DEPENDENCIES.zh-CN.md)） | v2.0 起支持。已在 Mac 上按 iPhone Duo 模拟器给出的内外屏尺寸来回切验过（模拟器本身跑不了游戏的图形层）；拿到真机后会实测，有真机的玩家也欢迎开 Issue 告诉我们 |
 | **iPhone / iPad，A16 及更早**（iPhone 14 全系、iPhone 15 / 15 Plus、iPhone 13 系列等） | 可以玩，多一步 | 按 [docs/LEGACY_DEVICES.zh-CN.md](docs/LEGACY_DEVICES.zh-CN.md) 用自己的游戏文件做一份老机型补充包，做安装包时带上它；系统同上一行分 iOS 26 / iOS 18 – 25 | 已有玩家实测：iPhone 14 Pro Max（A16，6 GB）60 帧；iPhone 13 Pro Max（A15，6 GB）30 帧档 |
-| **4 GB 内存的设备**（如 iPad Air 第 4 代） | 暂不支持（在优化内存，有进展更新） | — | 已有玩家实测：iPad Air 4（A14，4 GB）带上老机型补充包后，启动几秒即因整机内存不足被系统结束 |
+| **4 GB 内存的设备**（如 iPad mini 第 6 代、iPad Air 第 4 代） | 能进游戏，内存很紧（在继续优化内存） | 同 A16 及更早那一行（带老机型补充包） | 已有玩家实测：iPad mini 6（A15，4 GB，iPadOS 27）第一幕实际玩了几分钟，画质自动降低后 50–58 帧，但一直收到系统内存告警、离系统内存上限只剩约 560 MB，怪多特效多的场景可能被系统结束；更早的版本上 iPad Air 4（A14，4 GB）启动几秒即被系统结束 |
 | **A14 芯片、6 GB 及以上内存**（如 iPhone 12 Pro / 12 Pro Max） | 尚无报告 | 同 A16 及更早那一行 | 欢迎试过的人开 Issue 告诉我们结果 |
 | **A13 及更早的芯片**（如 iPhone 11 系列、2020 年的 iPad Pro） | 不支持 | — | 图形芯片不支持 Metal 3（玩家在 iPad Pro A12Z 上实测；苹果依据见表上方）；App 启动时会直接提示，不会闪退 |
-| **Mac，Apple 芯片** | 直接玩（原生 macOS App） | macOS 26 及以上用缺省出法；macOS 15 – 25 用[老接口出法](docs/OLDER_SYSTEMS.zh-CN.md)。键盘、鼠标、手柄都能玩，各自能做什么见 [docs/MAC.zh-CN.md](docs/MAC.zh-CN.md) | 已有玩家在 macOS 15.7.7 上实际玩过老接口版 |
+| **Mac，Apple 芯片** | 直接玩（原生 macOS App） | macOS 26 及以上用默认出法；macOS 15 – 25 用[旧接口出法](docs/OLDER_SYSTEMS.zh-CN.md)。键盘、鼠标、手柄都能玩，各自能做什么见 [docs/MAC.zh-CN.md](docs/MAC.zh-CN.md) | 已有玩家在 macOS 15.7.7 上实际玩过旧接口版 |
 | **Apple TV 4K（第三代 A15）** | 社区移植（[@yinqingyan](https://github.com/yinqingyan)，经作者同意按 MIT 许可贡献），开发者预览 | 照 [dm/tvos/README.md](dm/tvos/README.md) 构建并把游戏文件、老机型补充包拷进 App；只能在实机上跑，模拟器跑不了；存档放在系统可清理的 Caches 目录里 | 已在实机上到达职业选择画面；进游戏、手柄全键位、存档尚未验证，维护者没有实机测试过 |
+| **鸿蒙手机**（HarmonyOS NEXT，API 26） | 能玩（社区移植） | 发布页的未签名壳用自己的调试证书重签 + 用自己的游戏文件做的运行包，见 [docs/HARMONYOS.zh-CN.md](docs/HARMONYOS.zh-CN.md) | 作者实测：Mate 90 Pro Max 上重签、安装、导入、进局、保存退出走通 |
+| **安卓手机**（ARM64，Android 12 起，Vulkan 1.1） | 可以玩（社区移植） | 发布页的 APK + 用自己的游戏文件做的导入包，见 [docs/ANDROID.zh-CN.md](docs/ANDROID.zh-CN.md) | 合作者实测：Redmi K50 Ultra 中位 60 帧；OnePlus 13 能玩，偶有一瞬的小黑块；vivo X200 Ultra 上试玩过 |
 | **Intel 芯片的 Mac** | 不支持 | — | — |
 
 **App 里弹的框是什么意思**
@@ -213,13 +242,23 @@ flowchart LR
 
 ## 开始使用
 
-两条路都要先有**你自己购买的游戏的文件**：Switch 版《暗黑破坏神 II：狱火重生》本体加「术士君临」资料片，更新到 1.0.34.0（主机上显示的版本号；它对应 PC 版的 3.3.94012，本仓库的目录名和工具里用的是后一个号）。本项目是按带这部资料片的版本做的，没有资料片的情况不支持、也没有验过。怎么准备见 [docs/GAME_FILES.zh-CN.md](docs/GAME_FILES.zh-CN.md)。
+不管用哪种设备玩，都要先有**你自己购买的游戏的文件**：Switch 版《暗黑破坏神 II：狱火重生》本体加「术士君临」资料片，更新到 1.0.34.0（主机上显示的版本号；它对应 PC 版的 3.3.94012，本仓库的目录名和工具里用的是后一个号）。本项目是按带这部资料片的版本做的，没有资料片的情况不支持、也没有验过。怎么准备见 [docs/GAME_FILES.zh-CN.md](docs/GAME_FILES.zh-CN.md)。
 
 > 本项目只提供工具与不含任何游戏内容的安装壳。我们不提供、不认可、也不对任何第三方分发游戏资源、游戏主程序或含游戏内容的安装包的行为负责。请只使用你自己合法拥有的游戏文件。
 
 本项目基于 Switch 版 1.0.34.0（对应 PC 版的 3.3.94012）实现并验证，工具默认只认这一版。已有社区用户反馈，参照仓库结构自行适配了其他版本并成功运行。规则表按游戏版本分组存放（`dm/tools/patch_nso.py` 里按主程序的构建标识分组），欢迎把你适配的版本提交回来。
 
-**先对一下你的设备**：上面「支持哪些设备」那张表告诉你该用哪种构建、要不要多做一份老机型补充包。
+**先对一下你的设备**，按下表找到你该走的那一节；上面「支持哪些设备」那张表告诉你苹果设备该用哪种构建、要不要多做一份老机型补充包。
+
+| 你的设备 | 怎么做 | 步骤 |
+|---|---|---|
+| iPhone / iPad，手上有 Apple 芯片的 Mac | 从源码完整构建 | 下面「有 Mac：三步」 |
+| iPhone / iPad，没有 Mac | 下载不含游戏内容的壳，在 Windows / Linux 上把游戏内容做进去 | 下面「没有 Mac：壳 + 做包工具」与 [docs/NO_XCODE.zh-CN.md](docs/NO_XCODE.zh-CN.md) |
+| Mac（Apple 芯片） | 出一个原生 macOS App | 下面「在 Mac 上直接玩」与 [docs/MAC.zh-CN.md](docs/MAC.zh-CN.md) |
+| 安卓手机 | 装发布页的 APK，用电脑做一份导入包拷进手机 | 下面「安卓」与 [docs/ANDROID.zh-CN.md](docs/ANDROID.zh-CN.md) |
+| 鸿蒙手机 | 用自己的调试证书重签发布页的未签名壳，用电脑做一份运行包拷进手机 | 下面「鸿蒙」与 [docs/HARMONYOS.zh-CN.md](docs/HARMONYOS.zh-CN.md) |
+
+iPhone / iPad 的两种做法对比：
 
 | | 有 Mac | 没有 Mac |
 |---|---|---|
@@ -255,7 +294,7 @@ flowchart LR
 
 装到手机上第一次打开，App 会要「游戏资源文件夹」——就是游戏文件里的 18 个资源档案，怎么放见 [docs/GAME_FILES.zh-CN.md](docs/GAME_FILES.zh-CN.md) 的「手机上要放的那个游戏资源文件夹」一节。
 
-`./setup.sh check` 是体检：逐项报告这台电脑、工具、游戏文件、签名配置的状态，缺的每一项都给出去哪拿和下一步命令，不做任何改动。手上是一整个游戏包（`.xci` / `.nsp`）时，`./setup.sh <游戏包> <prod.keys>` 会先把游戏文件取出来放到位再接着准备（要先装 hactool）。每次更新到新的提交之后都要再跑一遍 `./setup.sh`：它会按当前源码重出改写产物与着色器库（已是最新的步骤会跳过）。它还会改写仓库里三个随工具指纹变化的文件（`dm/gfx/tools/dmsh_chain.lock`、`dm/gfx/nvn/dmsh_chain.h`、`dm/gfx/nvn/c1_full.tsv`），这是预期的，不要提交它们。
+`./setup.sh check` 是体检：逐项报告这台电脑、工具、游戏文件、签名配置的状态，缺的每一项都给出去哪拿和下一步命令，不做任何改动。手上是一整个游戏包（`.xci` / `.nsp`）时，`./setup.sh <游戏包> <prod.keys>` 会先把游戏文件取出来放到位再接着准备（要先装 hactool）；本体与更新是分开的两个包时两个都给：`./setup.sh <本体> <更新> <prod.keys>`。每次更新到新的提交之后都要再跑一遍 `./setup.sh`：它会按当前源码重出改写产物与着色器库（已是最新的步骤会跳过）。它还会改写仓库里三个随工具指纹变化的文件（`dm/gfx/tools/dmsh_chain.lock`、`dm/gfx/nvn/dmsh_chain.h`、`dm/gfx/nvn/c1_full.tsv`），这是预期的，不要提交它们。
 
 ### 在 Mac 上直接玩
 
@@ -267,7 +306,39 @@ dm/tools/mac_app.sh                  # macOS 26 及以上：产出 ~/dm-work/out
 DM_MAC_M3=1 dm/tools/mac_app.sh      # macOS 15 – 25：产出 D2R Mobile M3.app
 ```
 
-界面用原版的手柄版界面。键盘：空格确认、Esc 返回、回车、`=` 键开菜单 / 新角色，W A S D 移动，其余手柄键各有对应。鼠标：点怪、NPC、物件会走过去交互，底部的技能格、药水格、按键提示、面板里的按钮和页签、建角时的职业、小地图都能点；点空地会走过去、按住一直走，点怪是攻击，物品的双击和拖放也认鼠标。用键盘时屏上的按键提示直接显示键盘键名。存档在这台 Mac 上（自己构建的 App 没有 iCloud 同步），可以从 iPhone / iPad 手工导入。键位表、建角怎么按、鼠标能做什么、导入步骤和已知不足，见 [docs/MAC.zh-CN.md](docs/MAC.zh-CN.md)。键盘、实体手柄这几项还未经真人操作，你试过的话，请告诉我们结果。
+界面用原版的手柄版界面。键盘：空格确认、Esc 返回、回车、`=` 键开菜单 / 新角色，W A S D 移动，其余手柄键各有对应。鼠标：点怪、NPC、物件会走过去交互，底部的技能格、药水格、按键提示、面板里的按钮和页签、建角时的职业、小地图都能点；点空地会走过去、按住一直走，点怪是攻击，物品的双击和拖放也认鼠标。用键盘时屏上的按键提示直接显示键盘键名。存档在这台 Mac 上（要 iCloud 同步需付费开发者账号、带 `DM_MAC_ICLOUD=1` 构建，见 [docs/MAC.zh-CN.md](docs/MAC.zh-CN.md)），可以从 iPhone / iPad 手工导入。键位表、建角怎么按、鼠标能做什么、导入步骤和已知不足，见 [docs/MAC.zh-CN.md](docs/MAC.zh-CN.md)。键盘、实体手柄这几项还未经真人操作，你试过的话，请告诉我们结果。
+
+### 安卓
+
+不用 Mac、不用 adb、不用自己编 APK，Windows / Linux / Mac 电脑都行（目前在 Mac 上走通）。完整步骤、要装的工具和出错时怎么办见 [docs/ANDROID.zh-CN.md](docs/ANDROID.zh-CN.md)。
+
+1. 准备游戏文件，和苹果版相同（[docs/GAME_FILES.zh-CN.md](docs/GAME_FILES.zh-CN.md)）。
+2. 在电脑上做导入包：
+
+   ```
+   python3 dm/tools/d2rm_android.py <游戏文件的 Update 目录> <输出目录>
+   ```
+
+3. 用 USB 把做出来的 `android` 文件夹和游戏资源 `data` 文件夹拷到手机的 `Download/S2X/D2R Mobile/`。
+4. 从[发布页](https://github.com/jhaizhou-ops/d2r-mobile/releases)下载 `D2RMobile-android.apk` 装上，打开后允许「所有文件访问」，App 自己导入并进游戏。
+
+源码要与 APK 同一个发布版本；换新版本时 APK 和导入包一起换，存档保留。想自己从源码编 APK 的，见 [dm/android/README.zh-CN.md](dm/android/README.zh-CN.md)。
+
+### 鸿蒙
+
+不用自己编应用。要有华为开发者账号和 DevEco Studio（用它带的签名工具与 `hdc`，也能自动生成调试证书、登记手机）。完整步骤、命令和出错时怎么办见 [docs/HARMONYOS.zh-CN.md](docs/HARMONYOS.zh-CN.md)。
+
+1. 准备游戏文件，和苹果版相同（[docs/GAME_FILES.zh-CN.md](docs/GAME_FILES.zh-CN.md)）。
+2. 从[发布页](https://github.com/jhaizhou-ops/d2r-mobile/releases)下载未签名壳 `D2RMobile-harmony-shell-unsigned.hap`，用自己的调试证书和 profile 重签（`hap-sign-tool sign-app`），再 `hdc install -r` 装到手机。
+3. 在电脑上做运行包：
+
+   ```
+   python3 dm/tools/d2rm_android.py --target ohos <游戏文件的 Update 目录> <输出目录>
+   ```
+
+4. 在手机上建「D2R Mobile」文件夹，`data/` 放游戏资源、`dm/` 放上一步做出的运行包，打开应用点「导入」选这个文件夹。
+
+源码要与壳是同一个发布版本；换新版本时用同一套签名重签新壳覆盖安装，存档保留。这几步由作者在 Mate 90 Pro Max 上走通。
 
 ### 没有 Mac：壳 + 做包工具
 
@@ -278,10 +349,11 @@ DM_MAC_M3=1 dm/tools/mac_app.sh      # macOS 15 – 25：产出 D2R Mobile M3.ap
 | 项 | 现状 |
 |---|---|
 | 联机 | 不在范围内，完全离线 |
+| 安卓版 | 几处 iOS 触屏细节（空技能格菜单、加点浮层、商店拖动跟手图）没做完，见上面「安卓版」 |
 | `.nsp` / `.xci` 两种游戏包 | 工具只核对主程序的版本，不区分包的格式；我们自己用 `.xci` 走过全程，有网友反馈 `.nsp` 格式的游戏包也完美兼容 |
 | 用自签工具（Sideloadly、AltStore 等）签名装机 | 没验过，欢迎开 Issue 告诉我们结果 |
 | Linux 上做包 | 没验过（Windows 与 Mac 上验过） |
-| 没升到 iOS 26 / macOS 26 的设备 | 可以玩，用老接口版（最低 iOS 18.0 / macOS 15.0）：[docs/OLDER_SYSTEMS.zh-CN.md](docs/OLDER_SYSTEMS.zh-CN.md)；完整的设备表见上面「支持哪些设备」 |
+| 没升到 iOS 26 / macOS 26 的设备 | 可以玩，用旧接口版（最低 iOS 18.0 / macOS 15.0）：[docs/OLDER_SYSTEMS.zh-CN.md](docs/OLDER_SYSTEMS.zh-CN.md)；完整的设备表见上面「支持哪些设备」 |
 | A16 及更早的机型（iPhone 14 系列、iPhone 15 / 15 Plus 等） | 可以玩，要多做一份老机型贴图包并带着它构建 App：[docs/LEGACY_DEVICES.zh-CN.md](docs/LEGACY_DEVICES.zh-CN.md)。App 提示「这台设备要多做一步」（旧版本显示的是「暂不支持本机型」）就是缺这一步 |
 | 物品注释里的「一句点评」与「旧译名对照」 | 两张内容表不随仓库提供，可自备，见 `dm/ios/tools/annot/README.zh-CN.md` |
 
@@ -291,11 +363,11 @@ DM_MAC_M3=1 dm/tools/mac_app.sh      # macOS 15 – 25：产出 D2R Mobile M3.ap
 - 没验过的那几项，走通或走不通都值得告诉我们。
 - 想改代码：先跑通上面的测试入口，每次改动都要过回归闸门。
 
-**往别的平台走：** 这套做法不限于 iPhone 和 iPad。Apple 芯片的 Mac 已经有了原生版本（见上面「在 Mac 上直接玩」），用的是同一份游戏程序和同一个宿主；Apple TV 也已有社区移植（开发者预览，见设备表）。安卓手机用的是同一类处理器，游戏程序同样可以原生执行，这条路完全走得通：要换的只是宿主和图形层对接的那一侧。作者手边没有安卓手机，非常期待看到有人把它带到安卓上。
+**往别的平台走：** 这套做法不限于 iPhone 和 iPad。Apple 芯片的 Mac 已经有了原生版本（见上面「在 Mac 上直接玩」），用的是同一份游戏程序和同一个宿主；Apple TV 也已有社区移植（开发者预览，见设备表）。安卓也已经走通了：v2.0 起有了社区移植的安卓版（见上面「安卓版」），用的是同一份宿主，只把图形层换成了 Vulkan；鸿蒙版也来了（见上面「鸿蒙版」），和安卓共用同一套 Vulkan 引擎。
 
 **往别的游戏走：** 已经有人拿同一份宿主去试别的 Switch 游戏。宿主里有一些「iOS 上缺省就开」的行为是为这一个游戏写的，换游戏会先撞到它们，动手前先关掉或挪走：
 
-- `dm/host/hle_oe.c`：三维渲染比例在 iOS 上缺省 0.75，`scale3d_tick` 按这个游戏渲染器里的偏移去改写——换一个游戏，那就是个野指针。
+- `dm/host/hle_oe.c`：三维渲染比例在手机上缺省 0.75（安卓 App 设成 0.85），`scale3d_tick` 按这个游戏渲染器里的偏移去改写——换一个游戏，那就是个野指针。
 - `dm/host/hle_fs.c`：首次启动预置共享仓库（`DM_STASH_SEED`）与触屏版缺省设置（`DM_TOUCH_DEFAULTS`），iOS 上缺省开。
 - `dm/host/main.c`：存档落盘节流改的是游戏程序里一个固定地址上的常数；`argv[0]` 写死成 `"D2R"`。
 - `dm/host/hle_time.c`：固定时刻的测试开关认的是游戏程序里的一个固定地址。
@@ -318,15 +390,27 @@ DM_MAC_M3=1 dm/tools/mac_app.sh      # macOS 15 – 25：产出 D2R Mobile M3.ap
 | [docs/NO_XCODE.zh-CN.md](docs/NO_XCODE.zh-CN.md) | 不用 Xcode、不用 Mac 的做法 |
 | [docs/MAC.zh-CN.md](docs/MAC.zh-CN.md) | 在 Mac 上玩：构建 macOS App、键位、已知不足 |
 | [docs/LEGACY_DEVICES.zh-CN.md](docs/LEGACY_DEVICES.zh-CN.md) | 老机型（A16 及更早）：怎么做贴图包、怎么放进手机 |
-| [docs/OLDER_SYSTEMS.zh-CN.md](docs/OLDER_SYSTEMS.zh-CN.md) | 老系统（iOS 18 – 25、macOS 15 – 25）：老接口版怎么出、和老机型贴图包怎么组合 |
+| [docs/OLDER_SYSTEMS.zh-CN.md](docs/OLDER_SYSTEMS.zh-CN.md) | 老系统（iOS 18 – 25、macOS 15 – 25）：旧接口版怎么出、和老机型贴图包怎么组合 |
 | [docs/qa-rift-pet-life.zh-CN.md](docs/qa-rift-pet-life.zh-CN.md) | 大秘境随从生命的回归清单（哪些跑过、哪些还没人跑，欢迎补） |
 | [docs/DERIVED.zh-CN.md](docs/DERIVED.zh-CN.md) | 仓库里与游戏有关的东西：有什么、没有什么、为什么 |
+| [docs/ANDROID.zh-CN.md](docs/ANDROID.zh-CN.md) | 在安卓手机上玩：装 APK、做导入包、换新版本、出错时怎么办 |
+| [docs/HARMONYOS.zh-CN.md](docs/HARMONYOS.zh-CN.md) | 在鸿蒙手机上玩：重签未签名壳、做运行包、导入、出错时怎么办 |
+| [dm/harmony/README.zh-CN.md](dm/harmony/README.zh-CN.md) | 鸿蒙版：源码结构、构建命令、缺省设置与实测记录 |
+| [dm/android/README.zh-CN.md](dm/android/README.zh-CN.md) | 安卓版：源码结构、构建、要放进手机的文件、验收清单 |
+| [dm/gfx/vulkan/INTEGRATION.md](dm/gfx/vulkan/INTEGRATION.md) | Vulkan 图形层怎么接到共用的图形接口上 |
+| [docs/ANDROID_COLLABORATION.zh-CN.md](docs/ANDROID_COLLABORATION.zh-CN.md) | 安卓 / 鸿蒙协作：仓库分工、怎么参与、实测状态与待办；每一轮的开发笔记在 [docs/android-notes/](docs/android-notes/) |
 
 ## 声明
 
 **你必须拥有正版游戏，包括「术士君临」资料片。** 这是一个独立的非商业项目，与暴雪娱乐、任天堂没有关联，也未获其认可或赞助。Diablo 与 Blizzard Entertainment 是暴雪娱乐的商标，Nintendo Switch 是任天堂的商标。请只配合你自己拥有的游戏使用。
 
 ## 致谢
+
+**v2.0 的安卓版来自三位社区作者，特别感谢：**
+
+- **[@yyan160](https://github.com/yyan160)**（Yuechuan Yang）：安卓移植本身（[#113](https://github.com/jhaizhou-ops/d2r-mobile/pull/113)）——安卓 App、JNI 宿主、触屏覆盖层、Vulkan 呈现、在真机上逐项测量的一整轮性能优化（Redmi K50 Ultra 的营地从 7.7 帧做到中位 60 帧），以及让共用宿主在苹果和安卓上都能编译运行的那批改动。审查里提的每个问题都在分支上逐条改好了。
+- **[@biglawine](https://github.com/biglawine)**：鸿蒙移植（[#114](https://github.com/jhaizhou-ops/d2r-mobile/pull/114)）和它的 NVN→Vulkan 回放引擎——安卓版的图形层就是从这里来的；还搭起了安卓 / 鸿蒙两端合作开发用的仓库，并为真机验证生成了着色器包。
+- **[@vickwv](https://github.com/vickwv)**：另一条独立的安卓移植（[#112](https://github.com/jhaizhou-ops/d2r-mobile/pull/112)）。它的思路在安卓版上逐项实测过，其中 3D 画面加亮的做法被采纳。
 
 这个项目建立在下面这些开源工作之上，谢谢各位作者和维护者。
 

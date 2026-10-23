@@ -15,7 +15,7 @@
 #include <fcntl.h>
 #include "nvn_mtl.h"
 #include "nvn_copy_pitch.h"
-// 编译期开关 DM_NVN_M3=1：图形后端走老接口（普通命令队列 / 命令缓冲 / 渲染与计算与拷贝编码器，逐槽绑定缓冲，对参数块引用的资源逐个声明），
+// 编译期开关 DM_NVN_M3=1：图形后端走旧接口（普通命令队列 / 命令缓冲 / 渲染与计算与拷贝编码器，逐槽绑定缓冲，对参数块引用的资源逐个声明），
 // 目标 macOS 15 / iOS 18。缺省 0 = Metal 4（macOS 26 / iOS 26）。两支共用同一份回放逻辑，分叉处都在 #if DM_NVN_M3 里
 // Compile-time switch DM_NVN_M3=1: the graphics backend uses the older API (ordinary command queue / command buffers / render, compute and copy encoders, buffers bound per slot, each resource referenced by an argument block declared individually),
 // target macOS 15 / iOS 18. Default 0 = Metal 4 (macOS 26 / iOS 26). Both branches share the same replay logic, and every divergence is inside #if DM_NVN_M3
@@ -90,14 +90,14 @@ static id<MTLCommandQueue> g_q;
 static id<MTL4CommandQueue> g_q4;
 static dispatch_queue_t g_feedback_q;
 #endif
-// 命令流队列只许一条：游戏的命令缓冲与出图都提交到它（Metal 4 = g_q4，老接口 = g_q；Metal 4 构建里的 g_q 只给 CPU 同步等完的回读 / 截图 / 收尾用）。
+// 命令流队列只许一条：游戏的命令缓冲与出图都提交到它（Metal 4 = g_q4，旧接口 = g_q；Metal 4 构建里的 g_q 只给 CPU 同步等完的回读 / 截图 / 收尾用）。
 // WaitSync 空跑即正确靠这个前提（见 hle_nvn.c g_nops 里 WaitSync 的注释）：建命令流队列一律经这里，第二次建即报红中止
 // Only one command queue is allowed: the game's command buffers and presents are all submitted to it (Metal 4 = g_q4, legacy API = g_q; in Metal 4 builds g_q is only for CPU-synchronous readback / screenshots / teardown).
 // WaitSync being correct as a no-op relies on this (see the WaitSync comment in g_nops of hle_nvn.c): all command queues are created here, and a second creation reports red and aborts
 static void stream_queue_once(void) { static int n; if (++n > 1) MDIE("【红】建了第 %d 条命令流队列：WaitSync 空跑的前提是只有一条（见 hle_nvn.c g_nops 里 WaitSync 的注释），加队列先把 WaitSync 改成真等", n); }
 static _Atomic uint32_t g_present_qos;
 #define ALLOC_MAX 8
-static int g_alloc_n, g_alloc_cur;   // 主提交的在途槽（Metal 4：每槽一个命令分配器；老接口：只用来限制在途提交数） | in-flight slots of the main submission (Metal 4: one command allocator per slot; older API: used only to limit the number of in-flight submissions)
+static int g_alloc_n, g_alloc_cur;   // 主提交的在途槽（Metal 4：每槽一个命令分配器；旧接口：只用来限制在途提交数） | in-flight slots of the main submission (Metal 4: one command allocator per slot; older API: used only to limit the number of in-flight submissions)
 #if !DM_NVN_M3
 static id<MTL4CommandAllocator> g_alloc4[ALLOC_MAX];   // 主提交的命令分配器池：开工时挑一个 GPU 已用完的，没有就新建（到上限才等） | Command allocator pool of the main submission: at start pick one the GPU has finished with, create a new one if there is none (wait only at the cap)
 static id<MTL4CommandAllocator> g_up_alloc4[3];
@@ -107,6 +107,8 @@ static id<MTL4ArgumentTable> g_vt, g_ft, g_ct, g_up_ct;
 static id<MTL4ArgumentTable> g_present_args;
 #endif
 static id<MTLBuffer> g_present_uv[3];
+#define MP_SLOTS 9
+static id<MTLBuffer> g_mp_buf[3];   // 紫闪探针：每个出图槽一份，5 个画面点 + 4 格调色表 | Magenta probe: one per present slot, 5 picture points + 4 color-table cells
 int g_bloom_q = -1;   // 泛光 1/4 起点（非 static：真机同进程交替直接改 0 / 1） | Bloom 1/4 starting point (non-static: real-device same-process alternation sets it to 0 / 1 directly)
 #if !DM_NVN_M3
 static id<MTL4ArgumentTable> g_bloomq_args;
@@ -144,7 +146,7 @@ static _Atomic int g_up_pending;
 static pthread_mutex_t g_res_mu = PTHREAD_MUTEX_INITIALIZER;   // 驻留集专用锁：res_add 会在持 g_mu 的路径里调用（arena_new），不能共用 g_mu | Dedicated lock for the residency set: res_add is called on paths that hold g_mu (arena_new), so it cannot share g_mu
 static NSHashTable *g_res_objects;
 #if DM_NVN_M3
-// 老接口按「缓冲对象 + 偏移」绑定，而回放层手里是显卡地址：登记过的缓冲（内存池的零拷贝缓冲、参数区块、暂存块等，几十个）按地址区间反查。
+// 旧接口按「缓冲对象 + 偏移」绑定，而回放层手里是显卡地址：登记过的缓冲（内存池的零拷贝缓冲、参数区块、暂存块等，几十个）按地址区间反查。
 // 弱引用登记（__unsafe_unretained + 撤驻留时摘掉）；最近命中的那一项先试——同一通道里的绑定几乎都落在同一两个缓冲上
 // The older API binds by "buffer object + offset", while the replay layer holds GPU addresses: registered buffers (zero-copy buffers of memory pools, argument blocks, staging blocks and so on, a few dozen) are looked up by address range.
 // Registered by weak reference (__unsafe_unretained, removed when residency is withdrawn); the most recently hit entry is tried first - bindings within one pass almost always land on the same one or two buffers
@@ -392,6 +394,9 @@ void mtl_init(void) {
         g_bloomq_const[i] = [g_dev newBufferWithLength:sizeof(float) * 8 options:MTLResourceStorageModeShared];
         if (!g_bloomq_const[i]) MDIE("建立泛光 1/4 常量缓冲[%d] 失败", i);
         res_add(g_bloomq_const[i]);
+        g_mp_buf[i] = [g_dev newBufferWithLength:MP_SLOTS * 256 options:MTLResourceStorageModeShared];   // 紫闪探针（见 mp_encode） | Magenta probe (see mp_encode)
+        if (!g_mp_buf[i]) MDIE("建立紫闪探针缓冲[%d] 失败", i);
+        res_add(g_mp_buf[i]);
     }
     g_ev = [g_dev newSharedEvent];
     g_keep = [NSMutableArray array];
@@ -630,9 +635,9 @@ static void ser_gate(void) {
 // Metal 4 conservative barriers (first version): a consumer barrier at the start of an encoder (all prior work → this encoder) and a producer barrier at the end (this encoder and earlier → later encoders).
 // Only the one at the start is not enough: t_rt_range 'pass 1 → pass 2 → copy' read back black, and after adding the end barrier it is 19/19. Old-queue encoders (upload / diagnostics / present) do not go through these barriers.
 #if DM_NVN_M3
-static inline void m4_end(id e) { [e endEncoding]; }   // 老接口没有显式屏障：依赖关系由 useResource 声明 + 系统自动跟踪 | the older API has no explicit barriers: dependencies come from useResource declarations plus the system's automatic tracking
+static inline void m4_end(id e) { [e endEncoding]; }   // 旧接口没有显式屏障：依赖关系由 useResource 声明 + 系统自动跟踪 | the older API has no explicit barriers: dependencies come from useResource declarations plus the system's automatic tracking
 static inline void m3_rbuf(id<MTLRenderCommandEncoder> e, int vertex, NSUInteger i, uint64_t gpu) {
-    NSUInteger off; id<MTLBuffer> b = m3_buf(gpu, &off); if (gpu && !b) { { static int n_; if (!n_++) MLOG("【红】" "老接口绑定：显卡地址 %#llx 不在任何登记过的缓冲里（槽 %lu）", (unsigned long long)gpu, (unsigned long)i); } return; }
+    NSUInteger off; id<MTLBuffer> b = m3_buf(gpu, &off); if (gpu && !b) { { static int n_; if (!n_++) MLOG("【红】" "旧接口绑定：显卡地址 %#llx 不在任何登记过的缓冲里（槽 %lu）", (unsigned long long)gpu, (unsigned long)i); } return; }
     if (vertex) [e setVertexBuffer:b offset:off atIndex:i]; else [e setFragmentBuffer:b offset:off atIndex:i];
 }
 #else
@@ -669,7 +674,7 @@ static inline void enc_r_args(RENC e, MTLRenderStages s, uint64_t gpu, NSUIntege
 static inline void enc_r_draw(RENC e, MTLPrimitiveType p, NSUInteger v, NSUInteger n) { [e drawPrimitives:p vertexStart:v vertexCount:n]; }
 static inline void enc_r_draw_instanced(RENC e, MTLPrimitiveType p, NSUInteger v, NSUInteger n, NSUInteger i, NSUInteger b) { [e drawPrimitives:p vertexStart:v vertexCount:n instanceCount:i baseInstance:b]; }
 #if DM_NVN_M3
-static inline void enc_r_draw_indexed(RENC e, MTLPrimitiveType p, NSUInteger n, MTLIndexType t, uint64_t gpu, NSUInteger len, NSUInteger i, NSInteger bv, NSUInteger bi) { (void)len; if (!n) return; NSUInteger off; id<MTLBuffer> b = m3_buf(gpu, &off); if (!b) { { static int n_; if (!n_++) MLOG("【红】" "老接口绘制：索引缓冲地址 %#llx 不在任何登记过的缓冲里", (unsigned long long)gpu); } return; } [e drawIndexedPrimitives:p indexCount:n indexType:t indexBuffer:b indexBufferOffset:off instanceCount:i baseVertex:bv baseInstance:bi]; }
+static inline void enc_r_draw_indexed(RENC e, MTLPrimitiveType p, NSUInteger n, MTLIndexType t, uint64_t gpu, NSUInteger len, NSUInteger i, NSInteger bv, NSUInteger bi) { (void)len; if (!n) return; NSUInteger off; id<MTLBuffer> b = m3_buf(gpu, &off); if (!b) { { static int n_; if (!n_++) MLOG("【红】" "旧接口绘制：索引缓冲地址 %#llx 不在任何登记过的缓冲里", (unsigned long long)gpu); } return; } [e drawIndexedPrimitives:p indexCount:n indexType:t indexBuffer:b indexBufferOffset:off instanceCount:i baseVertex:bv baseInstance:bi]; }
 #else
 static inline void enc_r_draw_indexed(RENC e, MTLPrimitiveType p, NSUInteger n, MTLIndexType t, uint64_t gpu, NSUInteger len, NSUInteger i, NSInteger bv, NSUInteger bi) { [e drawIndexedPrimitives:p indexCount:n indexType:t indexBuffer:gpu indexBufferLength:len instanceCount:i baseVertex:bv baseInstance:bi]; }
 #endif
@@ -682,7 +687,7 @@ static inline id<MTLComputeCommandEncoder> enc_c_begin_concurrent(id<MTLCommandB
 static inline void enc_c_end(id e) { m4_end(e); }
 static inline void enc_c_pso(id e, id<MTLComputePipelineState> p) { [e setComputePipelineState:p]; }
 #if DM_NVN_M3
-static inline void enc_c_args(id e, uint64_t gpu, NSUInteger i) { NSUInteger off; id<MTLBuffer> b = m3_buf(gpu, &off); if (gpu && !b) { { static int n_; if (!n_++) MLOG("【红】" "老接口计算绑定：显卡地址 %#llx 不在任何登记过的缓冲里（槽 %lu）", (unsigned long long)gpu, (unsigned long)i); } return; } [(id<MTLComputeCommandEncoder>)e setBuffer:b offset:off atIndex:i]; }
+static inline void enc_c_args(id e, uint64_t gpu, NSUInteger i) { NSUInteger off; id<MTLBuffer> b = m3_buf(gpu, &off); if (gpu && !b) { { static int n_; if (!n_++) MLOG("【红】" "旧接口计算绑定：显卡地址 %#llx 不在任何登记过的缓冲里（槽 %lu）", (unsigned long long)gpu, (unsigned long)i); } return; } [(id<MTLComputeCommandEncoder>)e setBuffer:b offset:off atIndex:i]; }
 #else
 static inline void enc_c_args(id e, uint64_t gpu, NSUInteger i) { (void)e; [g_ct setAddress:gpu atIndex:i]; }
 #endif
@@ -1129,7 +1134,7 @@ static void up_flush(void) {
         m4_end(g_up_ce); g_up_ce = nil;
     }
 #if DM_NVN_M3
-    // 老接口：拷贝与计算是两种编码器——先一个拷贝编码器做「暂存块 → 贴图」，再一个计算编码器做无 BC 的 GPU 解压
+    // 旧接口：拷贝与计算是两种编码器——先一个拷贝编码器做「暂存块 → 贴图」，再一个计算编码器做无 BC 的 GPU 解压
     // Older API: copy and compute are two kinds of encoder - first a copy encoder does "staging block -> texture", then a compute encoder does the GPU decompression for devices without BC
     BENC b = g_nup_blits ? [g_up_cb blitCommandEncoder] : nil;
     for (int i = 0; b && i < g_nup_blits; i++) {
@@ -1673,10 +1678,10 @@ static pg_pass *pg_new(int kind, int nslot) {
     g_pg_used += nslot;
     return p;
 }
-// 开渲染通道前记通道信息（附件、尺寸、读入方式）；老接口在描述符上挂阶段边界采样，Metal 4 在开编码器后 / 收编码器前写时间戳（pg_render_begin / pg_render_finish）。
+// 开渲染通道前记通道信息（附件、尺寸、读入方式）；旧接口在描述符上挂阶段边界采样，Metal 4 在开编码器后 / 收编码器前写时间戳（pg_render_begin / pg_render_finish）。
 // 改到 Metal 4时描述符没了采样附件，这里整段被短路、提交时的回读调用也删了，两种接口都没再出过数，这次补齐
-// Record pass info before opening a render pass (attachments, size, load action); the legacy API attaches stage boundary sampling to the descriptor, while Metal 4 writes timestamps after opening / before ending the encoder (pg_render_begin / pg_render_finish).
-// When moving to Metal 4 the descriptor lost its sample attachments, this whole block was short-circuited and the readback call at submission was deleted, so neither API produced numbers again; this restores it
+// Record the pass info (attachments, size, load actions) before opening a render pass; the older API attaches stage-boundary sampling to the descriptor, while Metal 4 writes timestamps after opening / before ending the encoder (pg_render_begin / pg_render_finish).
+// When we moved to Metal 4 the descriptor lost its sampling attachment, this whole block was short-circuited and the readback at submit time was removed too, so neither API produced numbers any more; this restores both
 static void pg_render(RPD *pd, NSUInteger nc) {
     pg_pass *p = pg_new(0, PG_RSLOTS); if (!p) return;
 #if DM_NVN_M3
@@ -1734,7 +1739,7 @@ static void pg_compute_end(id e) {   // 收 pg_compute 开的计算编码器之�
 #endif
 }
 static void pg_end_render(void) { if (g_pg_open >= 0) { g_pg_pass[g_pg_open].draws += (int)g_stat_draw; g_pg_open = -1; } }
-static void pg_commit(id fb) {   // 把本次提交的通道表交给完成回调解析；fb = FB_ON(o, g_cb)（老接口是命令缓冲的完成回调，Metal 4 是提交选项的反馈回调） | Hands this submission's pass table to the completion callback for parsing; fb = FB_ON(o, g_cb) (on the legacy API the command buffer completion handler, on Metal 4 the commit options feedback handler)
+static void pg_commit(id fb) {   // 把本次提交的通道表交给完成回调解析；fb = FB_ON(o, g_cb)（旧接口是命令缓冲的完成回调，Metal 4 是提交选项的反馈回调） | Hands this submission's pass table to the completion callback for parsing; fb = FB_ON(o, g_cb) (on the legacy API the command buffer completion handler, on Metal 4 the commit options feedback handler)
     if (!g_pg || !g_pg_np) return;
     int n = g_pg_np; pg_pass *ps = malloc(n * sizeof *ps); memcpy(ps, g_pg_pass, n * sizeof *ps);
     __typeof__(g_pg_buf[0]) buf = g_pg_buf[g_pg_b]; uint32_t used = g_pg_used;
@@ -2579,7 +2584,9 @@ static NvArena *arena_new(void) {
 }
 void arena_begin(void) { if (!g_arenas) { g_arenas = [NSMutableArray array]; g_sub_arenas = [NSMutableArray array]; } g_cur_arena = nil; }
 void arena_commit(uint64_t fence) { for (NvArena *a in g_sub_arenas) { a->fence = fence; [g_arenas addObject:a]; } [g_sub_arenas removeAllObjects]; g_cur_arena = nil; }
-static size_t arena_alloc(size_t n, id<MTLBuffer> *buf) {
+// 输出参数写成 __strong：ARC 下不加修饰的 id * 是 __autoreleasing，每次调用（每次绘制两次）都把 arena 缓冲放进自动释放池
+// The out-parameter is __strong: an unqualified id * is __autoreleasing under ARC, which put the arena buffer in the autorelease pool at every call (twice per draw)
+static size_t arena_alloc(size_t n, __strong id<MTLBuffer> *buf) {
     n = (n + 255) & ~(size_t)255;
     if (!g_cur_arena || g_cur_arena->used + n > g_cur_arena->buf.length) {
         pthread_mutex_lock(&g_mu); g_cur_arena = arena_new(); pthread_mutex_unlock(&g_mu);
@@ -3029,7 +3036,7 @@ static uint64_t ui_mat_patch(const p_bind_buf *u, void *mb, uint64_t mo) {
     return lg;
 }
 #if DM_NVN_M3
-// 老接口的资源声明去重：同一渲染编码器内对同一资源重复 useResource 是幂等的，而每次新编参数块都会把它引用的资源全声明一遍——
+// 旧接口的资源声明去重：同一渲染编码器内对同一资源重复 useResource 是幂等的，而每次新编参数块都会把它引用的资源全声明一遍——
 // 营地实测每次绘制声明 9.7 次、其中 9.2 次是本编码器里已经声明过的，每次约 227 条指令。这里记下本通道（g_pass.serial，与渲染编码器一一对应：
 // 序号只在开渲染编码器前递增）已按哪些用法声明过哪些资源，已覆盖的跳过。表满（一个通道里超过表长个不同资源）时不记、照常声明。
 // 表项不持有资源：声明过的资源被编码器持有到提交完成，同一通道内它的地址不会被别的资源复用。只在提交线程上用
@@ -3057,10 +3064,10 @@ static int encode_args(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, in
         return 1;
     }
 #if DM_NVN_M3
-    // 老接口：着色器经参数块间接访问的每个资源都要在本编码器上声明用途，系统才知道它和别的编码器（上传拷贝、别的通道）之间的先后依赖；
+    // 旧接口：着色器经参数块间接访问的每个资源都要在本编码器上声明用途，系统才知道它和别的编码器（上传拷贝、别的通道）之间的先后依赖；
     // 不声明的话只读贴图会和写它的拷贝乱序（迁 Metal 4 前实测过）。同一编码器内重复声明是幂等的
-    // Older API: every resource a shader accesses indirectly through an argument block must have its usage declared on this encoder, so that the system knows its ordering dependency against other encoders (upload copies, other passes);
-    // without the declaration a read-only texture gets out of order with the copy that writes it (measured before the move to Metal 4). Repeated declarations within one encoder are idempotent
+    // Older API: every resource the shaders reach indirectly through an argument buffer must have its usage declared on this encoder, so the system knows its ordering against other encoders (upload copies, other passes);
+    // without the declaration a read-only texture can be reordered against the copy that writes it (measured before the move to Metal 4). Declaring it again on the same encoder is idempotent
     #define USE(r, u) do { id<MTLResource> r_ = (id<MTLResource>)(r); if (r_) { if (nvn_stage == 5) [(id<MTLComputeCommandEncoder>)en useResource:r_ usage:(u)]; else if (!m3_use_seen((__bridge void *)r_, (uint32_t)(u))) [(id<MTLRenderCommandEncoder>)en useResource:r_ usage:(u) stages:MTLRenderStageVertex | MTLRenderStageFragment]; } \
         if (__builtin_expect(g_res_check_on, 0)) res_check((r), sh->key, reg); } while (0)
     #define USE_SAMP(r, u) do { (void)(u); if (__builtin_expect(g_res_check_on, 0)) res_check((r), sh->key, reg); } while (0)   // 采样器不是资源，不用声明 | samplers are not resources and need no declaration
@@ -4915,6 +4922,69 @@ static void warm_claim(void) {
         }
     }
 }
+// ---------- 紫闪探针 ----------
+// A16 视频：重负载下 3D 画面整块变品红 (255,0,254)、界面照常画在上面，0.35 秒一阵。缺省开（DM_MAGENTA_PROBE_OFF=1 关），只在内测包里看日志：
+// 每次出图在上屏命令缓冲末尾把游戏最终画面的 5 个点（中心与四个四分之一点）和调色表 4 格拷进共享缓冲，命令缓冲完成时在回调里判，不等 GPU、不占帧。
+// 画面 5 点里 ≥3 点是品红（R≥200、G≤60、B≥200）记【红】并带上调色表读数、加亮系数、显示节拍停回调段数；调色表格子是非数 / 无穷 / 品红单独记【红】；每 3600 次出图记一行汇总（射程）。
+// 调色表 = 色调映射查的 32³ 表（见下面 3D 画面加亮），由派发 552f45c348a61b86 那里记下。只走 Metal 4 出图路径（iOS / Mac 正式包）
+// ---------- Magenta probe ----------
+// A user video on an A16 device: under heavy load the whole 3D picture turns magenta (255,0,254) while the UI still draws on top, in bursts of about 0.35 s. On by default (DM_MAGENTA_PROBE_OFF=1 turns it off); read the logs from test builds:
+// for each present, at the end of the present command buffer, copy 5 points of the game's final picture (the center and the four quarter points) and 4 cells of the color table into a shared buffer, and judge them in the completion callback — no GPU wait, no frame cost.
+// If ≥3 of the 5 picture points are magenta (R≥200, G≤60, B≥200), log a red line with the color-table readings, the brightening factor and the number of display-link callback stalls; a color-table cell that is NaN / infinite / magenta gets its own red line; log a summary every 3600 presents (coverage).
+// Color table = the 32³ table looked up by tone mapping (see the 3D brightening section below), recorded at dispatch 552f45c348a61b86. Only on the Metal 4 present path (iOS / Mac release builds)
+static os_unfair_lock g_mp_lk = OS_UNFAIR_LOCK_INIT; static id<MTLTexture> g_mp_lut;
+static MTLPixelFormat g_mp_fmt[3]; static int g_mp_haslut[3];
+static _Atomic uint64_t g_mp_n, g_mp_mag, g_mp_lutbad;
+static uint64_t g_stall_t0, g_stall_n;   // 定义在显示节拍那段 | Defined in the display-link section
+float dm_bright_k(void);   // 定义在下面 3D 画面加亮（弱定义，宿主 dm_bright.c 给强定义） | Defined below in the 3D brightening section (weak definition; the host dm_bright.c provides the strong one)
+static int mp_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_MAGENTA_PROBE_OFF"); v = !(e && *e && strcmp(e, "0")); } return v; }
+static int mp_fmt_ok(MTLPixelFormat f) { return f == MTLPixelFormatRGBA8Unorm || f == MTLPixelFormatRGBA8Unorm_sRGB || f == MTLPixelFormatBGRA8Unorm || f == MTLPixelFormatBGRA8Unorm_sRGB || f == MTLPixelFormatRGB10A2Unorm || f == MTLPixelFormatRGBA16Float; }
+static void mp_encode(CBUF cb, id<MTLTexture> src, int i) {
+#if !DM_NVN_M3
+    uint64_t t_start = bp_now();   // 成本测量：CPU 耗时起点 | Cost measurement: CPU time start
+    g_mp_fmt[i] = 0; g_mp_haslut[i] = 0;
+    if (!mp_on() || !g_mp_buf[i] || !src || src.textureType != MTLTextureType2D || !mp_fmt_ok(src.pixelFormat)) return;
+    os_unfair_lock_lock(&g_mp_lk); id<MTLTexture> lut = g_mp_lut; os_unfair_lock_unlock(&g_mp_lk);
+    if (lut && (lut.pixelFormat != MTLPixelFormatRGBA16Float || lut.width < 2 || lut.height < 2 || lut.depth < 2)) lut = nil;
+    NSUInteger w = src.width, h = src.height, bpp = src.pixelFormat == MTLPixelFormatRGBA16Float ? 8 : 4;
+    const NSUInteger px[5][2] = {{w / 2, h / 2}, {w / 4, h / 4}, {w * 3 / 4, h / 4}, {w / 4, h * 3 / 4}, {w * 3 / 4, h * 3 / 4}};
+    CENC e = [cb computeCommandEncoder];
+    [e barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageAll visibilityOptions:MTL4VisibilityOptionDevice];
+    for (int k = 0; k < 5; k++) enc_b_copy_texture_buffer(e, src, 0, 0, MTLOriginMake(px[k][0], px[k][1], 0), MTLSizeMake(1, 1, 1), g_mp_buf[i], k * 256, bpp, bpp);
+    if (lut) { NSUInteger lw = lut.width - 1, lh = lut.height - 1, ld = lut.depth - 1; const NSUInteger q[4][3] = {{0, 0, 0}, {lw / 2, lh / 2, ld / 2}, {lw, lh, ld}, {lw / 2, lh / 4, ld * 3 / 4}};
+        for (int k = 0; k < 4; k++) enc_b_copy_texture_buffer(e, lut, 0, 0, MTLOriginMake(q[k][0], q[k][1], q[k][2]), MTLSizeMake(1, 1, 1), g_mp_buf[i], (5 + k) * 256, 8, 8);
+        g_mp_haslut[i] = 1; }
+    m4_end(e);
+    g_mp_fmt[i] = src.pixelFormat;
+    // 成本测量：每次调用记 CPU 耗时（ns），每 600 次汇总
+    // Cost measurement: record CPU time (ns) per call, summarize every 600 calls
+    static uint64_t cost_sum, cost_n, cost_max; uint64_t cost_ns = bp_now() - t_start;
+    cost_sum += cost_ns; cost_n++; if (cost_ns > cost_max) cost_max = cost_ns;
+    if (cost_n % 600 == 0) { MLOG("紫闪探针 CPU 成本：前 %llu 次，平均 %.3f μs / 峰值 %.3f μs", (unsigned long long)cost_n, cost_sum / (double)cost_n / 1000, cost_max / 1000.0); }
+#else
+    (void)cb; (void)src; (void)i;
+#endif
+}
+static void mp_px(MTLPixelFormat f, const uint8_t *p, int *r, int *g, int *b) {
+    if (f == MTLPixelFormatBGRA8Unorm || f == MTLPixelFormatBGRA8Unorm_sRGB) { *r = p[2]; *g = p[1]; *b = p[0]; }
+    else if (f == MTLPixelFormatRGB10A2Unorm) { uint32_t v; memcpy(&v, p, 4); *r = (v & 1023) >> 2; *g = ((v >> 10) & 1023) >> 2; *b = ((v >> 20) & 1023) >> 2; }
+    else if (f == MTLPixelFormatRGBA16Float) { __fp16 hv[4]; memcpy(hv, p, 8); float c[3] = {hv[0], hv[1], hv[2]}; int *o[3] = {r, g, b};
+        for (int k = 0; k < 3; k++) { float x = c[k] != c[k] ? 0 : c[k] < 0 ? 0 : c[k] > 1 ? 1 : c[k]; *o[k] = (int)(x * 255 + 0.5f); } }
+    else { *r = p[0]; *g = p[1]; *b = p[2]; }
+}
+static void mp_check(int i, uint64_t ticket) {
+    MTLPixelFormat f = g_mp_fmt[i]; if (!f) return;
+    const uint8_t *m = g_mp_buf[i].contents; char pt[96] = "", lt[160] = "无"; int o = 0, mag = 0, lutbad = 0;
+    for (int k = 0; k < 5; k++) { int r, g, b; mp_px(f, m + k * 256, &r, &g, &b); mag += r >= 200 && g <= 60 && b >= 200; o += snprintf(pt + o, sizeof pt - o, " %02x%02x%02x", r, g, b); }
+    if (g_mp_haslut[i]) { o = 0; for (int k = 0; k < 4; k++) { __fp16 hv[4]; memcpy(hv, m + (5 + k) * 256, 8); float c[3] = {hv[0], hv[1], hv[2]};
+        int bad = 0; for (int j = 0; j < 3; j++) bad |= c[j] != c[j] || isinf(c[j]); bad |= c[0] > 0.8f && c[1] < 0.2f && c[2] > 0.8f; lutbad |= bad;
+        o += snprintf(lt + o, sizeof lt - o, "%s(%.3f,%.3f,%.3f)", k ? " " : "", c[0], c[1], c[2]); } }
+    uint64_t n = atomic_fetch_add(&g_mp_n, 1) + 1, nm = mag >= 3 ? atomic_fetch_add(&g_mp_mag, 1) + 1 : atomic_load(&g_mp_mag), nl = lutbad ? atomic_fetch_add(&g_mp_lutbad, 1) + 1 : atomic_load(&g_mp_lutbad);
+    if (mag >= 3 && (nm <= 30 || nm % 50 == 0)) MLOG("【红】紫闪探针：出图 %llu 画面品红（5 点%s，%d 点品红）；调色表 4 格 %s；加亮 k=%.2f；显示节拍停回调累计 %llu 段，此刻%s停顿中；累计品红 %llu 次",
+        (unsigned long long)ticket, pt, mag, lt, dm_bright_k(), (unsigned long long)g_stall_n, g_stall_t0 ? "在" : "不在", (unsigned long long)nm);
+    if (lutbad && (nl <= 30 || nl % 50 == 0)) MLOG("【红】紫闪探针：出图 %llu 调色表格子异常（非数 / 无穷 / 品红）%s；画面 5 点%s；累计 %llu 次", (unsigned long long)ticket, lt, pt, (unsigned long long)nl);
+    if (n % 3600 == 0 || n == 600) MLOG("紫闪探针 至出图 %llu：取样 %llu 次，画面品红 %llu 次，调色表异常 %llu 次（本次 5 点%s，调色表 %s）", (unsigned long long)ticket, (unsigned long long)n, (unsigned long long)nm, (unsigned long long)nl, pt, lt);
+}
 // ---------- 3D 画面加亮 ----------
 // 色调映射（片元 a1b1aab66933fa8f）= 把合成后的 HDR ×0.008 做 PQ 编码、再查 32³ 调色表（每帧由计算着色器 552f45c348a61b86 按区域重算，只被色调映射读）。
 // HDR 先乘曝光 k 等价于把表换成 L'(u) = L(PQ(k · PQ⁻¹(u)))：游戏算完表的那次派发之后，拷一份再按此原地重写（32³ 一次小派发）；表每帧重算，不会越乘越亮。
@@ -4944,10 +5014,11 @@ static void bright_lut(NvShader *cs) {
     static id<MTL4ArgumentTable> at;
 #endif
     if (failed || strncmp(cs->key, "552f45c348a61b86", 16)) return;
-    float k = dm_bright_k(); if (!(k > 1.005f)) return;   // k ≈ 1（局外 / 正午）：表保持原版 | k ~= 1 (out of game / noon): the table stays as in the original game
-    if (k > 4.0f) k = 4.0f;
     int tid = 0; for (int i = 0; i < cs->rf.nb && !tid; i++) if (cs->rf.b[i].kind == NVN_RB_IMG && cs->rf.b[i].reg < 32) tid = (int)(S.img[5][cs->rf.b[i].reg] & 0xfffff);
     pthread_mutex_lock(&g_rmu); id<MTLTexture> lut = tid ? tex_by_id(tid) : nil; pthread_mutex_unlock(&g_rmu);
+    if (lut && lut.textureType == MTLTextureType3D) { os_unfair_lock_lock(&g_mp_lk); g_mp_lut = lut; os_unfair_lock_unlock(&g_mp_lk); }   // 紫闪探针在出图时取这张表的几格 | The magenta probe samples a few cells of this table at present time
+    float k = dm_bright_k(); if (!(k > 1.005f)) return;   // k ≈ 1（局外 / 正午）：表保持原版 | k ~= 1 (out of game / noon): the table stays as in the original game
+    if (k > 4.0f) k = 4.0f;
     if (!lut || lut.textureType != MTLTextureType3D || !(lut.usage & MTLTextureUsageShaderWrite)) { static int n; if (!n++) MLOG("【红】3D 画面加亮：调色表认不出（贴图号 %d），不加亮", tid); return; }
     if (!ps) { NSError *e = nil; id<MTLLibrary> lib = [g_dev newLibraryWithSource:@(k_lut_msl) options:nil error:&e]; id<MTLFunction> f = lib ? [lib newFunctionWithName:@"lutk"] : nil;
         ps = f ? [g_dev newComputePipelineStateWithFunction:f error:&e] : nil;
@@ -6001,6 +6072,33 @@ static int present_encode_m4(CBUF cb, id<MTLTexture> src0, id<MTLTexture> dst, c
     m4_end(en);
     return 1;
 }
+// 测试 DM_TEST_PRESENT_RGB=<N>（只测试用，查「冷启动整屏品红一两帧」）：进程前 N 次上屏，每次等这一帧画完、交给系统之前，回读 drawable 上 5 个点
+// （中心与四个四分之一点）的颜色；颜色组合变了才记一行，任一点是品红（R≥200、G≤60、B≥200）就记「品红」行，第 N 次记汇总。
+// 射程：只看我们交出去的那张 drawable；系统合成层之后加上的颜色看不到。每次上屏都同步等 GPU，开着会掉帧
+// Test DM_TEST_PRESENT_RGB=<N> (test only, for "one or two full-screen magenta frames at cold start"): for the process's first N presents, wait for each frame to finish and, before handing it to the system, read back the colors of 5 points on the drawable
+// (the center and the four quarter points); log a line only when the color combination changes, log a "magenta" line if any point is magenta (R≥200, G≤60, B≥200), and log a summary at the Nth present.
+// Coverage: only the drawable we hand over; colors added after the system compositor are not visible. Each present waits for the GPU synchronously, so enabling it drops frames
+static long present_rgb_n(void) { static long n = -1; if (n < 0) { const char *e = getenv("DM_TEST_PRESENT_RGB"); n = e ? atol(e) : 0; if (n) MLOG("DM_TEST_PRESENT_RGB：前 %ld 次上屏回读 drawable 取色", n); } return n; }
+static void present_rgb(id<MTLTexture> dt, uint64_t ticket) {
+    static long k, magenta; static uint32_t last[5]; static uint64_t t0;
+    if (k >= present_rgb_n()) return;
+    pthread_mutex_lock(&g_pq_mu); while (g_pq_done < ticket) pthread_cond_wait(&g_pq_cv, &g_pq_mu); pthread_mutex_unlock(&g_pq_mu);
+    NSUInteger w = dt.width, h = dt.height; const NSUInteger px[5][2] = {{w / 2, h / 2}, {w / 4, h / 4}, {w * 3 / 4, h / 4}, {w / 4, h * 3 / 4}, {w * 3 / 4, h * 3 / 4}};
+    id<MTLBuffer> buf = [g_dev newBufferWithLength:5 * 256 options:MTLResourceStorageModeShared]; id<MTLCommandBuffer> c2 = q_cb(); id<MTLBlitCommandEncoder> b = [c2 blitCommandEncoder];
+    for (int i = 0; i < 5; i++) [b copyFromTexture:dt sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(px[i][0], px[i][1], 0) sourceSize:MTLSizeMake(1, 1, 1) toBuffer:buf destinationOffset:i * 256 destinationBytesPerRow:4 destinationBytesPerImage:4];
+    [b endEncoding]; [c2 commit]; [c2 waitUntilCompleted];
+    uint64_t now = now_ns(); if (!t0) t0 = now; k++;
+    uint32_t c[5]; int mag = 0, chg = 0; char txt[160]; int o = 0;
+    for (int i = 0; i < 5; i++) { const uint8_t *q = (const uint8_t *)buf.contents + i * 256;   // BGRA8
+        int r = q[2], g = q[1], bl = q[0]; c[i] = (uint32_t)(r << 16 | g << 8 | bl); chg |= c[i] != last[i]; mag |= r >= 200 && g <= 60 && bl >= 200;
+        o += snprintf(txt + o, sizeof txt - o, " %02x%02x%02x", r, g, bl); }
+    if (dt.pixelFormat != MTLPixelFormatBGRA8Unorm && k == 1) MLOG("DM_TEST_PRESENT_RGB：drawable 格式 %lu 不是 BGRA8，取色按 BGRA 读可能不准", (unsigned long)dt.pixelFormat);
+    if (mag) magenta++;
+    if (mag) MLOG("上屏取色 第 %ld 次（%.3f s）品红：%s", k, (now - t0) / 1e9, txt);
+    else if (chg || k == 1) MLOG("上屏取色 第 %ld 次（%.3f s）变为：%s", k, (now - t0) / 1e9, txt);
+    memcpy(last, c, sizeof c);
+    if (k == present_rgb_n()) MLOG("上屏取色 汇总：前 %ld 次上屏，品红 %ld 次（drawable %lux%lu）", k, magenta, (unsigned long)w, (unsigned long)h);
+}
 static double g_link_it_tin;   // 节拍回调正在上屏的那一帧的入队时刻（只在节拍线程读写） | Enqueue time of the frame the display-link callback is presenting (read and written only on the display-link thread)
 static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t ticket, const int crop[4], id<CAMetalDrawable> supplied, double target_ts) {
     if (g_present_stall_ns) { struct timespec ts = {0, (long)g_present_stall_ns}; nanosleep(&ts, NULL); }
@@ -6062,6 +6160,7 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
 #if TARGET_OS_OSX
     if (!layer.displaySyncEnabled) layer.displaySyncEnabled = YES;   // 窗口模式按显示器垂直同步，防撕裂 | Windowed mode follows the display's vsync to prevent tearing
 #endif
+    if (present_rgb_n() && layer.framebufferOnly) layer.framebufferOnly = NO;   // 测试取色要回读 drawable | Sampling colors for the test requires reading back the drawable
     present_pipeline(layer.pixelFormat);   // 和原路径一样，首帧编管线在取drawable之前 | Same as the original path: the first frame compiles the pipeline before taking the drawable
     if (g_grab_cb) grab_present(src, crop, layer.drawableSize);   // 整窗截图要的游戏画面（不加锁先看一眼，真取在函数里加锁） | Game picture needed by the whole-window screenshot (peek without the lock first; the real take locks inside the function)
     uint64_t dt0 = now_ns();
@@ -6075,7 +6174,7 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
         pthread_mutex_unlock(&g_pq_mu);
     }
 #if DM_NVN_M3
-    CBUF cb = [g_q commandBuffer];   // 老接口：交画面记在命令缓冲上（presentDrawable），这一帧的绘制做完才上屏 | older API: presentation is recorded on the command buffer (presentDrawable), so the frame reaches the screen only after its drawing is done
+    CBUF cb = [g_q commandBuffer];   // 旧接口：交画面记在命令缓冲上（presentDrawable），这一帧的绘制做完才上屏 | older API: presentation is recorded on the command buffer (presentDrawable), so the frame reaches the screen only after its drawing is done
     if (!present_encode_m4(cb, src, dr.texture, crop, alloc_i)) return 0;
 #else
     [g_present_alloc4[alloc_i] reset];
@@ -6083,6 +6182,7 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     CBUF cb = g_present_cb[alloc_i];
     [cb beginCommandBufferWithAllocator:g_present_alloc4[alloc_i]];
     if (!present_encode_m4(cb, src, dr.texture, crop, alloc_i)) { [cb endCommandBuffer]; [g_q4 signalDrawable:dr]; return 0; }
+    mp_encode(cb, src, alloc_i);
     [cb endCommandBuffer];
 #endif
 #if !DM_NVN_M3
@@ -6090,6 +6190,9 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
 #endif
     [FB_ON(o, cb) FB_SEL:^(FB_ARG f) {
         if (f.error) MLOG("【红】上屏命令缓冲错误：%s", f.error.description.UTF8String);
+#if !DM_NVN_M3
+        else mp_check(alloc_i, ticket);
+#endif
         pthread_mutex_lock(&g_pq_mu); if (ticket > g_pq_done) g_pq_done = ticket; g_pq_inflight--; pthread_cond_broadcast(&g_pq_cv); pthread_mutex_unlock(&g_pq_mu);
     }];
 #if !DM_NVN_M3
@@ -6115,6 +6218,7 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
         }
     }
 #if !DM_NVN_M3
+    if (present_rgb_n()) present_rgb(dr.texture, ticket);
     [g_q4 signalDrawable:dr];
 #endif
     g_present_alloc_fence[alloc_i] = ticket;

@@ -1,10 +1,7 @@
 // 导入解析（已实现接宿主、其余接记名桩）与宿主门分派。
 // Import resolution (implemented ones go to the host, the rest go to named stubs) and host gate dispatch.
 #include "dm.h"
-#if !defined(__OHOS__)
-#include <mach-o/getsect.h>   // getsectiondata / _mh_execute_header：苹果从 Mach-O 节里取登记表
-#include <mach-o/ldsyms.h>
-#endif
+#include "dm_sect.h"
 #include <dlfcn.h>
 #include <time.h>
 
@@ -28,28 +25,9 @@ uint64_t unimpl_c(unsigned idx, uint64_t *regs) {
 // Per module, one cache of symbol number → resolved address
 static uint64_t g_cache[MAX_MOD][8192];
 
-// 登记表（HLE 宏写进 DM_HLE_SECTION，见 hle.h）：苹果从 Mach-O 的 __DATA,swhle 节取；
-// 鸿蒙从自定义 ELF 段取，靠链接器 __start_/__stop_ 符号定位——与 loader.c 取强制接管表是同一个手法。
-// The registry table (written by the HLE macro into DM_HLE_SECTION, see hle.h): Apple reads the
-// __DATA,swhle Mach-O section; HarmonyOS reads a custom ELF section located through the linker
-// __start_/__stop_ symbols -- the same trick loader.c uses for the forced-takeover table.
-#if defined(__OHOS__)
-extern const hle_ent __start_dmswhle[] __attribute__((weak));
-extern const hle_ent __stop_dmswhle[] __attribute__((weak));
-#endif
-
 uint64_t resolve_import(module_t *m, const char *name, int weak) {
     static const hle_ent *sec; static unsigned long secsz;
-    if (!sec) {
-#if defined(__OHOS__)
-        if (__start_dmswhle && __stop_dmswhle) {      // 弱符号：段不存在时两个符号都是 0
-            sec = __start_dmswhle;
-            secsz = (unsigned long)((const char *)__stop_dmswhle - (const char *)__start_dmswhle);
-        }
-#else
-        sec = (const hle_ent *)getsectiondata(&_mh_execute_header, "__DATA", "swhle", &secsz);
-#endif
-    }
+    if (!sec) DM_SECT_GET(swhle, const hle_ent, sec, secsz);
     for (unsigned i = 0; i < secsz / sizeof(hle_ent); i++)
         if (!strcmp(sec[i].name, name)) {
             if (g_flag.imports) { Dl_info di; dladdr(sec[i].fn, &di); LOG("import %s -> %s", name, di.dli_sname); }
@@ -108,14 +86,14 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr);   // hle_svc
 uint64_t gate_dispatch(uint64_t ret_addr, uint64_t *regs) {
     for (unsigned i = gate_h(ret_addr);; i = (i + 1) & ((1u << GATE_BITS) - 1)) {
         const gate_t *g = &g_gate[i];
-        if (g->ret == ret_addr) { LOG("gate_dispatch：命中 kind=%d arg=%d ret=%#llx", g->kind, g->arg, (unsigned long long)ret_addr); } switch (g->kind) {
+        if (g->ret == ret_addr) switch (g->kind) {
             case G_CNTPCT: case G_CNTVCT: {
                 uint64_t t = guest_ns() * 12 / 625;    // 19.2 MHz 系统计数器；原指令 mrs xN, cntpct_el0，arg = N | 19.2 MHz system counter; original instruction mrs xN, cntpct_el0, arg = N
                 regs[g->arg] = t;
                 return t;
             }
             case G_OBS: if (g_obs_fn[g->arg]) g_obs_fn[g->arg](regs); return 0;   // 只读寄存器；dm_gate 回写的 x0–x8 即原值 | Registers are read-only; the x0–x8 that dm_gate writes back are the original values
-            default: { uint64_t r = svc_dispatch(g->arg, regs, g->orig); LOG("gate_dispatch：svc_dispatch 返回 %#llx", (unsigned long long)r); return r; }
+            default: return svc_dispatch(g->arg, regs, g->orig);
         }
         if (!g->ret) die("unknown gate at %#llx", ret_addr);
     }

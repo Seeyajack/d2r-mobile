@@ -173,6 +173,22 @@ static _Atomic uint64_t g_exact_xy = UINT64_MAX;   // 最近一次命中落在�
 static _Atomic int g_sn_new;   // 新一次按下（dm_ui_item_query 置）：上一次的吸附 / 停靠作废。只按「请求点没变」续用会跨触摸残留——同一落点再按，光标还在停靠点，长按判成空格去整理背包 | A new press (set by dm_ui_item_query): the previous snap / parking is invalidated. Reusing it only on 'the request point has not changed' would leave residue across touches -- pressing the same landing point again, the cursor is still at the parking point, and the long-press is classified as an empty cell and sorts the inventory
 static int sn_on; static _Atomic uint64_t g_snap;   // 就近吸附中；g_snap = 吸附记录（请求点 x | y<<16 | 落点 x<<32 | y<<48），长按据此分「贴着物品边」与「落在空格中间」 | Nearest snap in effect; g_snap = snap record (request point x | y<<16 | landing point x<<32 | y<<48); long-press uses it to tell 'next to an item's edge' from 'in the middle of an empty cell'
 static _Atomic int g_free_pub;
+// 真鼠标悬停复用原版焦点重算；不能套触屏的「胖手指」吸附，否则空格旁也会冒出邻格说明。
+// Real mouse hover reuses the game's focus refresh, bypassing touch's fat-finger snap so empty cells do not show a neighbor's tooltip.
+int dm_ui_mouse_hover_now(float nx, float ny) {
+    module_t *m = main_module();
+    uint64_t waiting = atomic_load(&g_a_wait);
+    if (!m || dm_hud_held() || dm_cursor_pending() || (waiting && now_ns() - waiting < 300000000ull) || !free_cursor_page(m)) return 0;
+    int w = *(int32_t *)(m->base + 0x211da38), h = *(int32_t *)(m->base + 0x211da3c);
+    if (w <= 0 || h <= 0) return 0;
+    int x, y;
+    if (!(nx >= 0 && nx <= 1 && ny >= 0 && ny <= 1)) { x = w * 2 / 100; y = h / 2; }
+    else { x = (int)(nx * w); y = (int)(ny * h); if (x >= w) x = w - 1; if (y >= h) y = h - 1; }
+    { int dm_vault_ui_blocks(int, int); if ((dm_ui_panel_state() & DM_PS_VAULT) && dm_vault_ui_blocks(x, y)) return 0; }
+    int ok = dm_ui_hover_now(x, y);
+    if (getenv("DM_TEST_HOVER_LOG")) { dm_cursor_item_info ci = {0}; int found = dm_cursor_item(&ci); LOG("鼠标悬停刷新：(%d,%d) → %d 物品 %s id %u", x, y, ok, found ? ci.code : "-", ci.id); }
+    return ok;
+}
 int dm_ui_free_cursor(void) { return atomic_load(&g_free_pub); }   // 当前页有没有自由光标（物品栏 / 技能树 / 属性页这类） | Whether the current page has a free cursor (pages such as inventory / skill tree / attributes)
 void dm_cursor_apply(uint64_t *buttons, int32_t *lx, int32_t *ly) {
     cursor_apply(buttons, lx, ly);
@@ -1804,6 +1820,7 @@ static void mv_offset(int own, uint64_t w, int f, int32_t delta, int relayout) {
         mv_prune();   // 游戏重建界面（如切语言）后旧控件对象没了、新对象另起一条：先把不在界面树上的条目忘掉（不写，内存可能已释放），否则条目越积越多、96 条满了新控件写不进（英文版 ×8 红） | After the game rebuilds the UI (e.g. a language switch) the old widget objects are gone and the new objects start new entries: first forget entries not on the UI tree (no write, the memory may already be freed), otherwise entries keep piling up and once the 96 entries are full new widgets cannot be written (English version: ×8 red)
         if (g_nmv >= 96) { static int lg; if (lg++ < 8) LOG("【红】位置守卫：%s 条目满了（96 条都还挂在界面树上），「%s」不写", mv_name[own], (const char *)*(uint64_t *)(w + 8)); return; }
         if (!mv_count(own)) { static int lg[MV_N]; if (lg[own]++ < 40) LOG("位置守卫：%s 开始挪（%s）", mv_name[own], (const char *)*(uint64_t *)(w + 8)); }   // 每次「开挪」留一条证据（绑定框只挪 0.2 秒，自检碰不上） | Leave one line of evidence at every "start moving" (the binding box is only moved for 0.2 s, which the self-check never catches)
+        i = g_nmv;   // prune 后新条目的下标可能已变；后续必须更新实际插入的条目 | Pruning can move the insertion slot; update the entry actually inserted | Pruning can move the insertion slot; update the entry actually inserted
         g_mv[g_nmv] = (mvent){ { 0, 0 }, own, f, relayout, *v, *v }; dm_wref_set(&g_mv[g_nmv++].r, w); }
     mvent *e = &g_mv[i]; if (g_mv_base_on) e->orig = g_mv_base; else if (*v != e->val) e->orig = *v;   // 游戏重建 / 重排过：现值当原值（调用方给了原位就用给的） | The game has rebuilt / re-laid out the UI: take the current value as the original value (if the caller supplied an original position, use that)
     if (!delta) { if (*v == e->val && *v != e->orig) { *v = e->orig; if (e->relayout) ((void (*)(uint64_t))*(uint64_t *)(*(uint64_t *)w + 0x10))(w); } g_mv[i] = g_mv[--g_nmv]; return; }
@@ -1917,6 +1934,18 @@ static void ui_map_center(module_t *m, uint64_t root, int mini) {
     { static int lg; if (lg++ < 8) LOG("全屏地图中心：纵向卷动量 %d → %d 格", *sc, want); } *sc = want; ours = want;
 }
 static void ui_map_pump(module_t *m) {
+#if defined(__OHOS__)
+    // 鸿蒙的 UI 线程可能在选角面板加载时先请求收起地图；此时原版 AutoMap 尚未创建，回调会解引用空对象。
+    // 局外不调用地图回调，也不把旧请求带进下一局；游戏内的切换仍走原路径。
+    // The HarmonyOS UI thread can request a map reset while character select is loading, before the guest AutoMap exists.
+    // Discard out-of-game requests instead of calling the map callback or carrying them into the next game.
+    if (!dm_uiscreen_ingame()) {
+        int pending = atomic_exchange(&g_map_req, -1);
+        atomic_store(&g_map_full_now, 0);
+        if (pending >= 0) { static int n; if (n++ < 4) LOG("鸿蒙：局外地图切换请求已忽略（地图尚未就绪）"); }
+        return;
+    }
+#endif
     int cfg = *(volatile int32_t *)(m->base + 0x2d479f4), mini = *(volatile int32_t *)(m->base + 0x2d5c748);
     // 触屏界面的小地图（右上角地名、点它切全屏、任务终点标记）都建立在微缩档上；原版选项页「透视地图尺寸」是三档循环（全屏 → 微缩地图放左 → 微缩地图放右），
     // 玩家把它转到「全屏」（0）之后小地图整块没了，点那一块也切不回来（线上：进选项页按了一下右箭头，「小地图消失了」）。
@@ -2070,6 +2099,10 @@ static void ui_note_dock_pump(uint64_t root) {
     if (panel != g_nd_on) { g_nd_on = panel; static int lg; if (lg++ < 40) LOG("提示框停靠：%s，目标 y %d（布局原值 %d，矩形高 %d）", panel ? "面板态" : "无面板", *t, g_nd_orig, h); }
 }
 static void ui_lift_pump(uint64_t root, uint64_t fr) {
+    // 普通轮询等控件树稳定，避免下一轮布局继承已上提的坐标；加载消息（fr=0）仍当场更新。两条路都避开模式切换事务
+    // Polling waits for the widget tree to settle so the next layout cannot inherit lifted coordinates; loading messages (fr=0) still update immediately. Both paths avoid mode-switch transactions
+    // Polling waits for the widget tree to settle so the next layout cannot inherit lifted coordinates; loading messages (fr=0) still update immediately. Both paths avoid mode-switch transactions
+    int dm_padmode_busy(void); if (dm_ui_unstable() && (fr || dm_padmode_busy())) return;
     if (fr < g_lift_next) return; g_lift_next = fr + 6;
     int x, y, w, h; dm_ui_rect(&x, &y, &w, &h); int lift = h > 0 && dm_uiscreen_ingame() ? (int)((long)y * 2160 / h) : 0;
     g_mv_want[MV_LIFT] = lift != 0; if (!lift) { mv_restore(root, MV_LIFT); return; }   // 不上提（不在局内 / 不是真全屏）：全部写回原值 | No lift (not in-game / not true fullscreen): write everything back to the original values
@@ -2433,6 +2466,7 @@ int dm_ui_panel_resident(const char *name) {
 // Returns the stack reading: number of open non-resident panels; -1 when only the NPC dialog menu / speech box is open. The log text "[hud] 面板栈 ..." is kept as is (regression scripts match on it)
 enum { HUD_STACK_MAX = 64 };
 static struct { char name[64]; int open; } g_hud_stack[HUD_STACK_MAX];
+__attribute__((weak)) void dm_platform_menu_ready(void) {}   // 空的弱定义（不是弱声明）：苹果链接器要求弱引用链接时有定义；Vulkan 后端 / 鸿蒙平台层给强定义 | empty weak definitions (not declarations): Apple's linker needs a weak reference to resolve; the Vulkan backend / HarmonyOS platform give the strong ones
 static void hud_stack_update(const char *act, const char *arg) {
     // 读取画面撤下：清掉此刻在游戏面板树里已经看不见的记录（防只开不关的漏配），屏上还在的照记——
     // 通关页是读取画面撤下前 0.5 秒开的（OpenExclusivePanel EndScreenPanelExpansion → UnloadPanel LoadScreenPanel），原先整栈清零把它也清了：
@@ -2476,7 +2510,7 @@ static void hud_stack_update(const char *act, const char *arg) {
         // no panel left on screen, yet the front end stays in panel mode (no stick, no skill buttons, every tap is "outside the panel"). Across 809 logs only 4 panels ever reached a count of 2 or more
         // (main menu links, character select page, naming candidate bar, hire list), and none of them was a real two-layer stack needing two closes. The dm_tc_navigation path was already an idempotent bitmap, so the two paths now agree
         if(open && g_hud_stack[slot].open>0) { fprintf(stderr,"[hud] 面板栈 %s %s：已经开着，不重复计\n",act,arg); return; }
-        g_hud_stack[slot].open=open?1:0;
+        g_hud_stack[slot].open=open?1:0; if(open && !strcmp(arg,"MainMenuButtonRibbon")) dm_platform_menu_ready();   // 主菜单出来：平台结束启动加速 | main menu shown: the platform ends its start-up boost
         fprintf(stderr,"[hud] 面板栈 %s %s → %d\n",act,arg,g_hud_stack[slot].open);
     }
 }

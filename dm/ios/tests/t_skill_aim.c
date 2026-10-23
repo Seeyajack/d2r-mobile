@@ -11,6 +11,10 @@ int main(void) {
     dm_tc_state s; dm_tc_init(&s,667,375);
     CHECK(s.rx==0 && s.ry==0 && s.aim_slot==DM_TC_NONE && !s.navigation_mode && !s.map_cancel_active);
     begin(&s,0,DM_TC_MAIN); CHECK(s.buttons==DM_BTN_A && s.rx==0 && s.ry==0);
+    /* 主钮长按连射时手指的小抖动（10 点死区内）不改方向，仍按住攻击（公开 issue #92） | Small finger jitter (within the 10-point dead zone) while holding the main button to attack keeps the direction and keeps attacking (public issue #92) */
+    drag(&s,0,DM_TC_MAIN,6,4); CHECK(s.buttons==DM_BTN_A && s.rx==0 && s.ry==0);
+    drag(&s,0,DM_TC_MAIN,-8,-5); CHECK(s.buttons==DM_BTN_A && s.rx==0 && s.ry==0);
+    drag(&s,0,DM_TC_MAIN,12,0); CHECK(s.rx>0 && s.ry==0);
     drag(&s,0,DM_TC_MAIN,60,0); CHECK(s.rx==32767 && s.ry==0 && s.aim_slot==0);
     drag(&s,0,DM_TC_MAIN,0,60); CHECK(s.rx==0 && s.ry==-32767);
     drag(&s,0,DM_TC_MAIN,30,-30); CHECK(s.rx==16384 && s.ry==16384);
@@ -82,7 +86,7 @@ int main(void) {
     {   /* 技能组切换：点一下进第二套。ZL 只在用技能时带（手指按着主钮 / 技能钮、技能脉冲在发），且先于技能键 0.17 秒；十字 / 腰带等不带；导航态不按；取消/改尺寸不丢模式 | Skill set switch: one tap enters the second set. ZL is held only while a skill is in use (a finger is on the main button / an on-screen skill button and the skill pulse is being sent), and leads the skill button key by 0.17 seconds; D-pad / belt etc. do not carry it; not pressed in navigation state; cancel/resize does not lose the mode */
         dm_tc_state t; dm_tc_init(&t,667,375); dm_tc_target w=t.layout.swap;
         CHECK(dm_tc_hit(&t.layout,w.x,w.y)==DM_TC_SWAP && t.skill_set==0);
-        dm_tc_begin(&t,0,w.x,w.y); CHECK(t.skill_set==1 && t.buttons==0); dm_tc_end(&t,0); CHECK(t.buttons==0);
+        dm_tc_begin(&t,0,w.x,w.y); CHECK(t.skill_set==0 && t.buttons==0); dm_tc_end(&t,0); CHECK(t.skill_set==1 && t.buttons==0);
         dm_tc_target k=t.layout.target[DM_TC_SKILL3], mn=t.layout.target[DM_TC_MAIN], mu=t.layout.target[DM_TC_MENU];
         dm_tc_tick(&t,10.0); dm_tc_begin_at(&t,1,k.x,k.y,10.0); CHECK(t.buttons==DM_BTN_ZL);            /* 刚按下技能钮：ZL 先下 | On-screen skill button just pressed: ZL goes down first */
         dm_tc_tick(&t,10.3); CHECK(t.buttons==(DM_BTN_ZL|DM_BTN_Y));                                     /* ZL 领先够了：技能键下，按住期间一直按着 | ZL has led long enough: the skill button key goes down and stays down for as long as the hold lasts */

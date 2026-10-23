@@ -3,44 +3,29 @@
 .iosdd_mac/
 .iosdd_*/
 .DS_Store
-
-# ===== 游戏文件与派生内容：绝不入库（见移植计划第 3.4 节红线）=====
-data/switch/
-data/assets-src/
-*.nsp
-*.xci
-prod.keys
-*.tik
-*.cert
-
-# ===== 本地配置（含签名信息，不要公开）=====
-dm/ios/local.env
-dm/ohos/local.env
-local.env
-# DevEco 的工程配置：devecocli signature generate 会往里写签名配置
-# （加密后的密码 + 本机绝对路径）。仓库是公开的，所以不入库。
-# 换机器时：cp 回来一个不含 signingConfigs 的版本，再跑
-#   devecocli signature generate
-dm/ohos/app/build-profile.json5
-
-# ===== 构建产物 =====
-build/
-out/
+# 安卓构建产物与本机配置 | Android build outputs and local configuration
+dm/android/local.properties
+dm/android/.gradle/
+dm/android/build/
+dm/android/app/build/
+dm/android/.kotlin/
+dm/android/app/.cxx/
+dm/android/.cxx/
+# 本地交付、游戏派生文件与签名材料不入库 | Keep local deliverables, game-derived files, and signing material out of Git.
+*.apk
+*.aab
 *.hap
-*.o
+*.xgs
+*.d2s
+*.d2i
+*.keystore
+*.jks
+*.p12
+*.pfx
+/private/
+/artifacts/
+dm/android/local.env
 
-# ===== 鸿蒙 / DevEco Studio =====
-oh_modules/
-.hvigor/
-.clangd
-.clang-format
-.clang-tidy
-*.har
 
-# ===== 编辑器 / 系统杂项 =====
-.vscode/
-.idea/
-Thumbs.db
-
-# 构建备份目录（排障时手工留的，不入库）
+# ===== 我们的独有：排障构建备份目录 =====
 dm/ohos/app/entry/build.bak-*/
