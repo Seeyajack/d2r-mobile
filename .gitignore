@@ -32,3 +32,7 @@ dm/ohos/app/entry/build.bak-*/
 # ===== 游戏数据与派生内容：绝不入库（移植计划 3.4 红线；上游 dm/games 也是空的）=====
 # profile / shader_map / 各种 tsv 都由游戏文件现场生成，随构建临时产物走
 /dm/games/
+
+# ===== DevEco 签名配置与构建输出（含签名信息/本机路径，且可再生）=====
+dm/ohos/app/build-profile.json5
+dm/ohos/app/out/
