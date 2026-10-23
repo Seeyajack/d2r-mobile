@@ -1044,6 +1044,29 @@ static void klog_mu_init(void) {
 #define DM_LOG_FILE_BUDGET (6144u * 1024u)
 #define DM_LOG_HILOG_LINES 20000u
 static int g_klog_mode;
+// ═══ np221：**运行时开关文件**（免重构建做 A/B）═══
+static void klog(const char *fmt, ...);   // 前向声明（下面马上要用，定义在本函数之后）
+// 为什么加：np215–np220 五轮里每轮只能验一个假设（改代码→构建→装机→跑≈8 分钟），
+//   而这一轮有三个可疑变量（键解析替身 / NVN getter / 手柄输入链）同时在场。
+// 做法：读 `/data/local/tmp/dm_switch.txt` 第一行整数，按位解释；文件不存在则全 0（=当前行为）。
+//   依据：真机日志里 `[fs] open 失败 ...（/data/local/tmp/romfs/...）errno=2` —— errno 是
+//   2(ENOENT) 不是 13(EACCES)，说明应用**能进这个目录**，读一个文件应当可行。
+//   若读不到，`[开关]` 那行会显示 0，也就是没生效（那时再退回改代码构建）。
+//   位0 = 键解析替身（1=恢复旧替身"返全零对象"，0=放行原实现）
+//   位1 = NVN getter 退化（1=所有 *Get* 真实现停用、落回通用桩返 0，即 np214 之前的行为）
+int dm_probe_sw(int bit) {
+    static int flags = -1;
+    if (flags < 0) {
+        int v = 0;
+        FILE *f = fopen("/data/local/tmp/dm_switch.txt", "r");
+        if (f) { if (fscanf(f, "%d", &v) != 1) v = 0; fclose(f); }
+        flags = v;
+        klog("[开关] /data/local/tmp/dm_switch.txt → %d（位0 键解析替身=%d，位1 getter退化=%d）%s\n",
+             v, (v >> 0) & 1, (v >> 1) & 1, f ? "" : "（文件不存在，全 0）");
+    }
+    return (flags >> bit) & 1;
+}
+
 static void klog(const char *fmt, ...) {
     if (!g_k_log) return;
     static unsigned long n_lines;
@@ -1104,6 +1127,14 @@ static void klog(const char *fmt, ...) {
 // 永不被调度（仪器铁律 np26–29/np136）⇒ 借 ArkTS UI 线程 setInterval → NAPI 进来打。
 // 用法：ArkTS 每 2 秒调一次；只在探针运行期（g_k_log 开着）打，运行期外静默。
 int g_tick_tid;   // 帧线程 tid（首个 tick 记；快照里打 ←帧 标记）
+
+// np219：持锁表 dump（定义在互斥量表之后）。动机：np218 上机实测**三个游戏线程全部
+// 阻塞在 futex、进程 CPU 只有 0.4 秒**⇒ 硬死锁。最可疑的机制是「持锁线程已死/被 longjmp
+// 跳过」——sdk 有 7 个构造函数崩了被 setjmp 兜走，若崩时正持着某个 HLE 互斥量，
+// 那把锁永远没人放。快照里把**每个被持有的锁 + 持有者 tid + 该 tid 是否还活着**打出来，
+// 一眼定谳。
+static void mtx_dump_held(void);
+static void hle_cur_dump(void);
 
 void dm_probe_thread_probe(void) {
     if (!g_k_log) return;
@@ -1170,6 +1201,8 @@ void dm_probe_thread_probe(void) {
              state, cpu, wc, sc);
     }
     closedir(d);
+    mtx_dump_held();
+    hle_cur_dump();
 }
 
 // ── NVN 最小空设备 + 按名字记账桩（2026-10-17 深夜，Task #9）──
@@ -2026,6 +2059,41 @@ static pthread_mutex_t *mtx_get(void *m) {
     return &g_mtx_impl[0];      // 表满：退化（不该发生）
 }
 
+// np219：把"当前被持有的锁"连同**持有者是否还活着**一起打出来。
+// 判读：owner 线程已不存在（/proc/self/task/<tid> 打不开）⇒ 锁永久泄漏 = 死锁源。
+static void mtx_dump_held(void) {
+    int shown = 0, dead = 0;
+    for (int i = 0; i < DM_MUTEX_MAX && shown < 40; i++) {
+        long ow = g_mtx_owner[i];
+        if (!ow) continue;
+        char p[128];
+        snprintf(p, sizeof p, "/proc/self/task/%ld/stat", ow);
+        FILE *f = fopen(p, "r");
+        int alive = (f != NULL);
+        if (f) fclose(f);
+        if (!alive) dead++;
+        klog("[持锁] idx=%d mutex=%p owner=%ld %s\n", i, g_mtx_key[i], ow,
+             alive ? "（线程仍在）" : "★线程已不存在=永久泄漏");
+        shown++;
+    }
+    if (!shown) klog("[持锁] 无任何被持有的互斥量\n");
+    else klog("[持锁] 合计 %d 把被持有，其中 %d 把的持有者已死\n", shown, dead);
+}
+
+// np219：某线程名下还挂着几把锁（构造器崩了被 setjmp 兜走时调用——若 >0，
+// 这些锁就永久泄漏，后面的线程全卡在上面）。返回把数并打印明细。
+static int mtx_report_owned(long tid, const char *tag) {
+    int n = 0;
+    if (tid <= 0) return 0;
+    for (int i = 0; i < DM_MUTEX_MAX; i++) {
+        if (g_mtx_owner[i] != tid) continue;
+        if (n < 8) klog("[持锁泄漏?] %s tid=%ld 仍持有 idx=%d mutex=%p\n", tag, tid, i, g_mtx_key[i]);
+        n++;
+    }
+    if (n) klog("[持锁泄漏?] %s tid=%ld 崩溃时共持有 %d 把锁（这些锁将永久无人释放）\n", tag, tid, n);
+    return n;
+}
+
 // np160：取互斥量在表中的下标（owner 登记用）。benign race： worst case 返回 -1 不登记。
 static int mtx_idx(void *m) {
     for (int i = 0; i < DM_MUTEX_MAX; i++) if (g_mtx_key[i] == m) return i;
@@ -2133,6 +2201,41 @@ static int sa_lookup(uint64_t self, int create) {
     return -1;
 }
 
+// np220：**每线程"最后进入的 HLE 函数"**。动机：np218/219 实测进程 CPU 仅 0.4 秒、
+//   三个游戏线程全阻塞在 futex、且 HLE 互斥量表是空的 ⇒ 阻塞发生在别处。要判"谁卡在哪个
+//   等待原语上"，就得知道每个线程最后一次进的是哪个导入函数（WaitEvent / ReceiveMessageQueue /
+//   LockMutex / …）。plt_stub 每次调用记一条（TLS 缓存槽号，单次 store + 一次 vDSO 取时），
+//   线程快照里连同"距今多少毫秒"一起打出来：**时间戳很旧 = 不是卡在这个 HLE 里**。
+#define HLE_CUR_MAX 32
+static struct { long tid; const char *nm; uint64_t ms; } g_hle_cur[HLE_CUR_MAX];
+static __thread int g_hle_slot = -1;
+static uint64_t hle_now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
+}
+static int hle_slot_claim(void) {
+    long me = (long)gettid();
+    for (int i = 0; i < HLE_CUR_MAX; i++) if (g_hle_cur[i].tid == me) return i;
+    for (int i = 0; i < HLE_CUR_MAX; i++) if (!g_hle_cur[i].tid) { g_hle_cur[i].tid = me; return i; }
+    return -1;
+}
+static void hle_cur_dump(void) {
+    uint64_t now = hle_now_ms();
+    int shown = 0;
+    for (int i = 0; i < HLE_CUR_MAX; i++) {
+        if (!g_hle_cur[i].tid) continue;
+        const char *n = g_hle_cur[i].nm ? g_hle_cur[i].nm : "(无)";
+        // 只留 mangled 名的尾部（可读部分），避免一行太长
+        const char *p = n;
+        if (n[0] == '_' && n[1] == 'Z') { const char *q = strrchr(n, '_'); if (q && q[1]) p = q + 1; }
+        klog("[最近HLE] tid=%ld %s（距今 %llu ms）\n", g_hle_cur[i].tid, p,
+             (unsigned long long)(now > g_hle_cur[i].ms ? now - g_hle_cur[i].ms : 0));
+        shown++;
+    }
+    if (!shown) klog("[最近HLE] 无记录\n");
+}
+
 static uint64_t plt_stub(void) {
     uint64_t x16v, a0, a1, a2, a3;
     __asm__ volatile("mov %0, x16" : "=r"(x16v));
@@ -2152,6 +2255,9 @@ static uint64_t plt_stub(void) {
            !strcmp(nm, "_ZN2nn2os11SleepThreadENS_8TimeSpanE"))))
         ktrace_plt(nidx, a0, a1);   // np125：先记账（无日志开销），分析在离线做
     if (nm) {
+        // np220：登记"本线程最后进入的 HLE 函数"（线程快照判读阻塞点用）
+        if (g_hle_slot < 0) g_hle_slot = hle_slot_claim();
+        if (g_hle_slot >= 0) { g_hle_cur[g_hle_slot].nm = nm; g_hle_cur[g_hle_slot].ms = hle_now_ms(); }
         // ⭐ np175：定位"建-信号无界循环"的调用点。真机轨迹（过滤空转后）显示主线程末段
         //   只剩 `InitializeLightEvent → SignalLightEvent`，事件对象逐次落在**栈上新地址**
         //   （0x5fe21fbb88 → … → 0x5fe21fd6a0），注册表一路涨到 16384+ ⇒ 某个条件永远不满足。
@@ -5844,6 +5950,7 @@ static void k_run_ctors(const char *tag, module_t *m) {
                 faulted++;
                 audit("[构造审计] %s #%zu 崩了（pc %#llx sig %d）—— 跳过继续\n", tag, i,
                       (unsigned long long)g_gate_fault_pc, g_gate_fault_sig);
+                mtx_report_owned((long)gettid(), tag);
             }
             continue;
         }
@@ -6914,7 +7021,8 @@ static void exp_k(const char *files_dir, char *out, size_t cap, size_t *used) {
         //   （游戏跑到帧循环，注册表很可能已建）。
         // 做法：默认**不替换**（让原实现跑）；设 NP_PARSE_REPL=1 可退回旧替身（真机 GUI
         //   拿不到 env ⇒ 实际改代码里的 g_parse_repl 初值）。保留一个入口观察钩子打键名。
-        if (g_parse_repl)
+        //   np221：再叠一层运行时开关（/data/local/tmp/dm_switch.txt 位0），免重构建 A/B。
+        if (g_parse_repl || dm_probe_sw(0))
             k_install_replace_hook(img, 0x9fa4c8, (void *)hook_rep_parse, "键解析·替身 0x9fa4c8（返全零对象）");
         else
             k_install_hook(img, 0x9fa4c8, (void *)hook_parse_watch, "键解析·观察 0x9fa4c8（原实现放行）");

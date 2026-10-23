@@ -317,8 +317,15 @@ static const dm_nvn_ent2 g_lut[] = {
     { "nvnWindowBuilderGetPresentInterval", (void *)nvn_wb_get_interval },
 };
 
+// np221：运行时开关（实现在 dm_probe.c；读 /data/local/tmp/dm_switch.txt）。
+//   位1 = 1 ⇒ 所有 *Get* 真实现停用，落回探针的通用桩（返 0）= np214 之前的行为。
+//   用途：np218/219 上机实测游戏停在 nvnProgramInitialize 之后，而 np215 恰好补了 25 个 getter
+//   ⇒ 需要一次上机内分辨"是 getter 改坏了还是别的"。开关文件让 A/B 不必重构建。
+extern int dm_probe_sw(int bit);
+
 void *dm_nvn_vk_real(const char *name) {
     if (!name) return NULL;
+    if (dm_probe_sw(1) && strstr(name, "Get")) return NULL;
     for (size_t i = 0; i < sizeof g_lut / sizeof g_lut[0]; i++)
         if (!strcmp(g_lut[i].name, name)) return g_lut[i].fn;
     return NULL;
