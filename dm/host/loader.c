@@ -199,11 +199,14 @@ static void *force_lookup(const char *name) {
     return NULL;
 }
 static void force_check(void) {
-    int bad = 0;
+    // np234（换游戏）：swforce 段是**按游戏**生成的（D2R 的清单里有 nn::oe/nn::fs 等它自己的导入）。
+    // 换一款游戏时，清单里属于原游戏的条目自然没有引用——那是预期的，不该因此中止。
+    // 真正要抓的错误（产物与宿主不配套）由别处校验：swhle 的符号表匹配失败会逐条报红。
+    // 所以这里只记警告，不 die。
+    int miss = 0;
     for (unsigned i = 0; i < g_nforce; i++)
-        if (!g_force_hits[i]) { LOG("强制接管条目无任何引用：%s", g_force[i].name); bad = 1; }
-    if (bad) die("强制接管清单有误");
-    LOG("force: %u 条全部命中", g_nforce);
+        if (!g_force_hits[i]) { LOG("【黄】强制接管条目无任何引用（换游戏时预期如此）：%s", g_force[i].name); miss++; }
+    LOG("force: %u 条，命中 %u 条，未引用 %u 条（未引用不致命）", g_nforce, g_nforce - miss, miss);
 }
 
 // 读改写器表头（段边界、槽号）；表头以外有任何行即旧版产物（装载期改代码），拒绝
@@ -280,6 +283,16 @@ static void relocate(module_t *m) {
             const Elf64_Sym *s = &m->symtab[si];
             uint64_t v = (uint64_t)force_lookup(m->strtab + s->st_name);
             if (!v) v = s->st_shndx ? (uint64_t)m->base + s->st_value : resolve_sym(m, m->strtab + s->st_name, (s->st_info >> 4) == 2);
+            // np241：按槽位打印符号名（**独立开关 DM_RELOCS**，不跟 DM_IMPORTS 走）。
+            // 客体代码里的导入桩是 adrp+ldr[槽]+br，崩溃回溯给出桩地址时，
+            // (桩表基址, 槽内偏移) 就能在这里反查是谁。
+            // ⚠ 六个模块合计 9 万条重定位，跟着 DM_IMPORTS 全会把 hilog 冲爆——
+            //   所以单独一个开关，只在"要核对某个槽解析到哪"时开。
+            static int relocs_log = -1;
+            if (relocs_log < 0) relocs_log = getenv("DM_RELOCS") != NULL;
+            if (relocs_log)
+                LOG("reloc %s slot=%#lx type=%u %s -> %#lx", m->name, r->r_offset, type,
+                    m->strtab + s->st_name, (unsigned long)v);
             if (type == R_AARCH64_JUMP_SLOT) { *where = v; cnt[2]++; }
             else { *where = v + r->r_addend; cnt[1]++; }       // ABS64 / GLOB_DAT
         }

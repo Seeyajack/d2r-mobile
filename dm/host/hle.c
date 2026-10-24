@@ -26,6 +26,10 @@ uint64_t unimpl_c(unsigned idx, uint64_t *regs) {
 static uint64_t g_cache[MAX_MOD][8192];
 
 uint64_t resolve_import(module_t *m, const char *name, int weak) {
+    // np240：带序号打印每条导入解析。序号即客体桩表下标（stub = 表基址 + 序号*8），
+    // 崩溃回溯里给出桩地址时，用序号直接定位是哪个导入。
+    static unsigned g_resolve_n = 0;
+    if (g_flag.imports) LOG("resolve #%u %s%s", g_resolve_n++, name, weak ? " (weak)" : "");
     static const hle_ent *sec; static unsigned long secsz;
     if (!sec) DM_SECT_GET(swhle, const hle_ent, sec, secsz);
     for (unsigned i = 0; i < secsz / sizeof(hle_ent); i++)
@@ -41,6 +45,7 @@ uint64_t resolve_import(module_t *m, const char *name, int weak) {
     void *hlecount_wrap(const char *, const char *, void *);
     for (unsigned k = 0; k < g_nstub; k++)
         if (!strcmp(g_stub_name[k], name)) return (uint64_t)hlecount_wrap("STUB", name, (void *)&unimpl_stubs[k]);
+    if (g_flag.imports) LOG("import %s -> （未实现桩，调用返回 0）", name);   // np240：换游戏排障要看每条落桩的导入
     if (g_nstub >= MAX_STUB) die("stub overflow");
     unsigned k = g_nstub++;
     g_stub_name[k] = name;

@@ -2,7 +2,10 @@
 // （原 nn::os/mem/lmem/C++ ABI 的 136 条 HLE 已删：SDK 自带 nn::os，装载时这些条目一条都没被解析用上。）
 // Host common miscellany: guest object side table, monotonic clock, C library imports that none of the modules define.
 // (The former 136 HLE entries for nn::os/mem/lmem/C++ ABI have been deleted: the SDK brings its own nn::os, and at load time not one of these entries was resolved and used.)
+#include <errno.h>
+#include <locale.h>
 #include <pthread.h>
+#include <string.h>
 #include "hle.h"
 #include <mach/mach_time.h>
 #include <stdatomic.h>
@@ -118,6 +121,27 @@ uint64_t dm_entropy64(void) {
     uint64_t n = atomic_fetch_add(&g_detrng_n, 1) + 1; if (n == 1 || n % 1000 == 0) LOG("DM_DETCLOCK：确定熵第 %llu 次", (unsigned long long)n);
     return z;
 }
+// setlocale 一族（np240）：Horizon 的 LC_ALL 是掩码 0x7fffffff，宿主 libc（musl）的 LC_ALL 是 6，
+// 不换算宿主 libc 会以"类别非法"为由返回 NULL。所以进来的掩码先换算再接宿主。
+// ⚠ 注意：BotW 的 newlocale 是**客体 sdk 自己实现**的（shndx != 0），不会走到这里——
+//   这几条只对"把 newlocale 当导入"的游戏生效。留着是为了换游戏时不至于落空。
+//   真遇到 locale 相关崩溃，先用 dm/gfx/tools/import_slots.py --stub 确认那个桩到底是谁，
+//   不要凭"看起来像 locale 检查"去改客体代码（np241 踩过：把 __cxa_guard_acquire 当检查改掉，
+//   等于宣布所有惰性单例已构造，崩点只会往后挪）。
+HLE("setlocale", char *, h_setlocale, int category, const char *locale) {
+    if ((unsigned)category == 0x7fffffff) category = LC_ALL;   // Horizon 的 LC_ALL 掩码 → 宿主 libc 的 LC_ALL
+    char *r = setlocale(category, locale);
+    if (!r) LOG("【黄】setlocale(%#x, %s) 失败：%s", category, locale ? locale : "(null)", strerror(errno));
+    return r;
+}
+// newlocale / uselocale / freelocale：同一族，一并接上（掩码同样换算）
+HLE("newlocale", void *, h_newlocale, int mask, const char *name, void *base) {
+    if ((unsigned)mask == 0x7fffffff) mask = LC_ALL_MASK;
+    return newlocale(mask, name, base);
+}
+HLE("uselocale", void *, h_uselocale, void *l) { return uselocale(l); }
+HLE("freelocale", void, h_freelocale, void *l) { freelocale(l); }
+
 HLE("getentropy", int, g_getentropy, void *p, size_t n) {
     if (!detclock_cfg()) { arc4random_buf(p, n); return 0; }
     for (size_t i = 0; i < n; i += 8) { uint64_t v = dm_entropy64(); memcpy((uint8_t *)p + i, &v, n - i < 8 ? n - i : 8); }
