@@ -37,6 +37,7 @@ static uint8_t *g_stack; static size_t g_stack_cap;
 void dm_guest_address_space_init(void);
 uint8_t *dm_guest_stack_region(size_t *cap) { if (cap) *cap = g_stack_cap; return g_stack; }
 void dm_guest_set_main_stack(void *lo, size_t size) { g_main_stack_lo = lo; g_main_stack_size = size; }
+void *dm_guest_main_stack(size_t *size) { if (size) *size = g_main_stack_size; return g_main_stack_lo; }
 
 
 static void mem_init(void) {
@@ -301,4 +302,36 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         if (!g_seen[num & 0xff]) { g_seen[num & 0xff] = 1; LOG("SVC %#x x0=%#llx x1=%#llx x2=%#llx (占位返回成功)", num, regs[0], regs[1], regs[2]); }
         regs[0] = 0; return 0;
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// np250：宿主接管 nn::os::detail::AddressSpaceAllocator —— 建线程时的"别名栈"分配。
+//
+// 为什么接管：客体的这个分配器一直返回 NULL，导致 CreateAliasStackUnsafe 直接 AbortImpl
+// （真机 sdk+0x88168）。我们把主线程搬进客体栈区、并如实回答 QueryMemory 之后它**仍然**失败
+// ⇒ 那本账的范围来源不明，继续猜的成本高于自己实现：
+// 它本质只是"地址空间记账"，而分配出来的地址最终要经 MapAliasStack → svcMapMemory 落到
+// **客体 stack 区**（我们的 MapMemory 也只接受 stack 区）。所以这里直接从 g_stack 做
+// 16 KB 对齐的 bump 分配，绕开主线程栈所在的尾部 8 MB。
+static uint8_t *g_asa_bump;
+HLE_FORCE("_ZN2nn2os6detail21AddressSpaceAllocator13AllocateSpaceEmm",
+          "宿主接管地址空间分配（从客体 stack 区 bump，绕开主线程栈）",
+          void *, h_asa_alloc, void *self, size_t size, size_t align) {
+    (void)self;
+    if (!g_stack || !g_stack_cap) return NULL;
+    if (align < 0x1000) align = 0x1000;
+    size_t sz = (size + 0x3FFF) & ~(size_t)0x3FFF;             // 按 16 KB 页向上取整
+    uint8_t *lo = g_asa_bump ? g_asa_bump : g_stack;           // 首次从栈区起点开始
+    uint8_t *p  = (uint8_t *)(((uintptr_t)lo + align - 1) & ~(uintptr_t)(align - 1));
+    size_t msz = 0; (void)dm_guest_main_stack(&msz);
+    uint8_t *limit = g_stack + g_stack_cap - (msz ? msz : 0x800000);   // 不碰主线程栈
+    if (p + sz > limit) { LOG("【红】AllocateSpace(%#zx) 超出栈区：%p+%#zx > %p", size, (void *)p, sz, (void *)limit); return NULL; }
+    g_asa_bump = p + sz;
+    if (g_flag.imports) LOG("AllocateSpace(size=%#zx align=%#zx) -> %p", size, align, (void *)p);
+    return p;
+}
+// 守卫区检查：空间是我们自己 bump 出来的，恒通过（返回 bit0=1）
+HLE_FORCE("_ZN2nn2os6detail21AddressSpaceAllocator15CheckGuardSpaceEmmm",
+          "宿主接管：守卫区检查恒通过", int, h_asa_guard, void *self, size_t a, size_t b) {
+    (void)self; (void)a; (void)b; return 1;
 }
