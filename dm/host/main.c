@@ -1,6 +1,8 @@
 // 引导：装模块后，照 SDK 里 nn::init::Start（sdk+0x2b0470）的真实顺序初始化 SDK 运行时，再进 nnMain。
 // Bootstrap: after loading the modules, initialize the SDK runtime in the real order of nn::init::Start (sdk+0x2b0470) in the SDK, then enter nnMain.
 #include "dm.h"
+#include <errno.h>
+#include <sys/mman.h>
 #include "front.h"
 #include <stdatomic.h>
 #ifdef __APPLE__
@@ -188,6 +190,43 @@ void dm_host_preload_start(int argc, char **argv) {
 }
 #include <TargetConditionals.h>
 int dm_app_bootstrap(int *argc, char ***argv);   // app_mac.m：包成 .app 双击起时备好环境与参数；命令行起原样 | app_mac.m: when packaged as an .app and started by double-click, prepare the environment and arguments; command-line starts are unchanged
+// np249：让客体主线程跑在**客体 stack 区**里（而不是宿主栈）。
+// 原因：nn::os 把"主线程的栈"记进地址空间账（nnosInitialize → ThreadManager 构造函数拿
+// QueryMemory 的结果），并用 GetCurrentStackInfo 断言 sp 必须落在这个范围内。
+// 主线程若跑在宿主栈上，这两条永远无法同时满足 —— 两条路真机都踩过：
+//   ① 诚实回答宿主地址 ⇒ 地址空间账落在客体之外，建第一个线程时
+//      AddressSpaceAllocator::AllocateSpace 返回 NULL 崩（sdk+0x88168）；
+//   ② 撒谎改答客体栈区 ⇒ GetCurrentStackInfo 当场断言失败崩（sdk+0x8a638）。
+// 所以正解是让 sp 真的在客体栈区里。
+static void *guest_run_thread(void *a) {
+    (void)a;
+    void crash_thread_init(void); crash_thread_init();   // 信号备用栈是每线程的
+    front_run(guest_main);
+    return NULL;
+}
+static int run_guest_on_guest_stack(void) {
+    dm_guest_address_space_init();                        // 先把地址空间（含 stack 区）建好
+    size_t cap = 0; uint8_t *stk = dm_guest_stack_region(&cap);
+    size_t use = 8u << 20;
+    if (!stk || cap < 2 * use) { LOG("【黄】客体栈区不足（%p +%zu），主线程仍用宿主栈", (void *)stk, cap); return 0; }
+    uint8_t *lo = stk + cap - use;                        // 放在栈区尾部，低端留给别名栈分配
+    if (mprotect(lo, use, PROT_READ | PROT_WRITE)) { LOG("【黄】主线程栈 mprotect 失败 errno=%d，退回宿主栈", errno); return 0; }
+    dm_guest_set_main_stack(lo, use);                     // 必须在起线程**之前**登记，否则首次 QueryMemory 会答错
+    pthread_attr_t at; pthread_attr_init(&at);
+    if (!pthread_attr_setstack(&at, lo, use)) {
+        pthread_t t;
+        int rc = pthread_create(&t, &at, guest_run_thread, NULL);
+        pthread_attr_destroy(&at);
+        if (!rc) {
+            LOG("客体主线程跑在客体 stack 区 %p+%#zx（宿主栈不再承载客体代码）", (void *)lo, use);
+            pthread_join(t, NULL);
+            return 1;
+        }
+        LOG("【黄】起客体主线程失败 rc=%d，退回宿主栈", rc);
+    } else { pthread_attr_destroy(&at); LOG("【黄】pthread_attr_setstack 失败，退回宿主栈"); }
+    return 0;
+}
+
 int main(int argc, char **argv) {
 #if TARGET_OS_OSX   // iOS 包也编这个文件（入口由外壳调），那边没有 app_mac.m | The iOS package compiles this file too (the entry is called by the shell); there is no app_mac.m on that side
     if (dm_app_bootstrap(&argc, &argv)) { void dm_cloud_boot(void); dm_cloud_boot(); }   // App 形态：挂存档之前先做一次 iCloud 同步（同 iOS 壳的启动次序）；取不到容器 / 测试存档时它自己记一行就返回 | App form: do one iCloud sync before mounting the save (same startup order as the iOS shell); when the container cannot be obtained / with a test save it logs one line and returns
@@ -200,6 +239,6 @@ int main(int argc, char **argv) {
         void crash_thread_init(void); crash_thread_init();   // 信号备用栈是每线程的：装载在别的线程上装过，本线程补上 | The signal alternate stack is per thread: loading installed it on another thread, so add it for this thread
         LOG("宿主装载已在后台提前完成（dm_host_preload_start）");
     } else host_preload(argc, argv);
-    front_run(guest_main);
+    if (!run_guest_on_guest_stack()) front_run(guest_main);
     return 0;
 }

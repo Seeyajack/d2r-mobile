@@ -20,15 +20,7 @@
 #endif
 
 #define MAX_MOD 8
-// 日志出口：鸿蒙构建定义 DM_LOG_TO_HILOG，统一走 hilog（实现在 dm/ohos/dm_log.h）；
-// 苹果构建不定义，保持原来的 stderr 行为——**上游三个平台的行为零变化**。
-// Log sink: the HarmonyOS build defines DM_LOG_TO_HILOG and goes through hilog (see dm/ohos/dm_log.h);
-// Apple builds do not define it and keep the original stderr path, so upstream behaviour is unchanged.
-#ifdef DM_LOG_TO_HILOG
-#include "dm_log.h"
-#else
 #define LOG(...) do { fprintf(stderr, "[dm] " __VA_ARGS__); fputc('\n', stderr); } while (0)
-#endif
 #define die(...) do { LOG("FATAL " __VA_ARGS__); abort(); } while (0)
 
 typedef struct { uint32_t st_name; uint8_t st_info, st_other; uint16_t st_shndx; uint64_t st_value, st_size; } Elf64_Sym;
@@ -55,12 +47,6 @@ typedef struct {
     unsigned nsym;
     uint32_t *symh; unsigned symh_mask;   // 已定义符号的名字哈希表（开放寻址，存符号下标；同名只留下标最小者 = 线性扫描的首个命中） | Name hash table of defined symbols (open addressing, stores symbol indices; for a duplicated name only the smallest index is kept = the first hit of a linear scan)
     uint64_t init, init_array, init_arraysz;   // init = DT_INIT（模块 _init：登记 DSO 并跑本模块 init_array） | init = DT_INIT (the module's _init: registers the DSO and runs this module's init_array)
-#if defined(__OHOS__)
-    // 鸿蒙：装载拷贝的**精确范围**（来自 fixups 生成头 DM_IMG_<名>_*）。
-    // 为什么要有：lld 会给每个嵌入段尾垫一个对齐页（.S 内容 0x1634000 → .so 段 0x1638000），
-    // 按 ELF 段大小拷贝会把 w 段数据错位 16K —— 拷贝范围必须以 fixups 为准，不信任 ELF 段大小。
-    uint64_t x0_end, img_end;
-#endif
 } module_t;
 
 extern module_t g_mod[MAX_MOD];
@@ -75,6 +61,9 @@ void run_module_inits(void);
 void *module_sym(module_t *m, const char *name);
 void *guest_sym(const char *name);
 module_t *module_of(const void *p);
+void dm_guest_address_space_init(void);          // hle_svc.c：提前建客体地址空间（np249）
+uint8_t *dm_guest_stack_region(size_t *cap);   // hle_svc.c：客体 stack 区（np249）
+void dm_guest_set_main_stack(void *lo, size_t size);
 // 门分派：改写后的 svc / 计时器读经公共入口进来，ret_addr = 该门块返回点，regs 指向保存的 x0..x30
 // Gate dispatch: rewritten svc / timer reads come in through the common entry, ret_addr = the return point of that gate block, regs points to the saved x0..x30
 uint64_t gate_dispatch(uint64_t ret_addr, uint64_t *regs);

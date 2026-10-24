@@ -26,8 +26,18 @@ static uint8_t *g_heap; static size_t g_heap_cur, g_heap_cap; static int g_heap_
 // 地址段整个落在客体堆当前已开放（可读写）的范围内：这种读不用陷内核核对，直接 memcpy（diag.c tk_rd 等每拍读客体内存的地方用）
 // The address range lies entirely within the currently opened (readable and writable) part of the guest heap: such reads need no kernel trap to check, memcpy directly (used where guest memory is read every tick, such as diag.c tk_rd)
 int dm_guest_heap_readable(uint64_t a, size_t n) { uint64_t b = (uint64_t)(uintptr_t)g_heap; size_t cur = g_heap_cur; return g_heap && a >= b && n <= cur && a - b <= cur - n; }
+// np249：客体主线程的**真实**栈范围（由 main.c 用 pthread_attr_setstack 放进 g_stack 之后登记）。
+// 为什么要有它：nn::os 把"主线程的栈"记进地址空间账，并用 GetCurrentStackInfo 断言 sp 落在这个范围内。
+// 只要 sp 真在这个区间，两条就同时满足，不用对客体撒谎。
+static uint8_t *g_main_stack_lo; static size_t g_main_stack_size;
 static uint8_t *g_alias; static size_t g_alias_cap;
 static uint8_t *g_stack; static size_t g_stack_cap;
+// np249：让 main.c 能在起客体主线程**之前**就把地址空间（含 stack 区）建好 —— 否则
+// 拿到的是 NULL（g_stack 原本要等 nnosInitialize 里的 mem_init 才建立，真机实测报"栈区不足 0 +0"）。
+void dm_guest_address_space_init(void);
+uint8_t *dm_guest_stack_region(size_t *cap) { if (cap) *cap = g_stack_cap; return g_stack; }
+void dm_guest_set_main_stack(void *lo, size_t size) { g_main_stack_lo = lo; g_main_stack_size = size; }
+
 
 static void mem_init(void) {
     if (g_as) return;
@@ -47,6 +57,7 @@ static void mem_init(void) {
     g_heap  = g_as + 0x40000000; g_heap_cap  = g_reserve - 0x40000000;
     LOG("guest AS %p +%zu MiB（降档后实际预留 %zu MiB）  heap %p alias %p stack %p", g_as, g_reserve >> 20, g_reserve >> 20, g_heap, g_alias, g_stack);
 }
+void dm_guest_address_space_init(void) { mem_init(); }
 
 // 应用内存池 = Switch（4 GB 机型）给应用的 3285 MB。游戏启动（main+0x1b66160）把 QueryMemoryInfo 报的总量整块设成堆、失败就减 2 MB 重试，
 // 整块交给自己的 StandardAllocator（main+0x32137a0）——所以堆大小 = 池 − 映像占用，宿主报多少它就只有多少。
@@ -127,7 +138,8 @@ static void map_add(uint64_t b, uint64_t n, uint64_t src, uint32_t st) {
 }
 static void map_del(int i) { pthread_mutex_lock(&g_map_lock); g_map[i] = g_map[--g_nmap]; pthread_mutex_unlock(&g_map_lock); }
 
-int svc_thread(int num, uint64_t *regs);   // hle_thread.c：线程与同步类 | hle_thread.c: thread and synchronization kind
+int svc_thread(int num, uint64_t *regs);
+
 
 uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
     { void hlecount_svc(int); hlecount_svc(num); }   // DM_HLECOUNT：svc 按号计数 | DM_HLECOUNT: svc counts by number
@@ -177,7 +189,11 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         uint8_t *a = (uint8_t *)addr;
         uint64_t base, size, state, perm;
         int k;
-        if (a >= g_heap && a < g_heap + g_heap_cur) { base=(uint64_t)g_heap; size=g_heap_cur; state=5/*Heap*/; perm=3; }
+        if (g_main_stack_lo && a >= g_main_stack_lo && a < g_main_stack_lo + g_main_stack_size) {
+            // 主线程真跑在这段客体栈上（main.c 用 pthread_attr_setstack 放的）⇒ 如实回答，
+            // 既不破坏地址空间账，也满足 GetCurrentStackInfo 的断言。
+            base=(uint64_t)g_main_stack_lo; size=g_main_stack_size; state=0xB/*Stack*/; perm=3; }
+        else if (a >= g_heap && a < g_heap + g_heap_cur) { base=(uint64_t)g_heap; size=g_heap_cur; state=5/*Heap*/; perm=3; }
         else if ((k = map_find(addr, 1))) { base=g_map[k-1].base; size=g_map[k-1].size; state=g_map[k-1].state; perm=3; }
         else if (a >= g_as && a < g_as + g_reserve) {   // 空闲：到相邻映射/堆边界为止 | free: up to the adjacent mapping/heap boundary
             uint64_t lo = (uint64_t)g_as, hi = (uint64_t)g_as + g_reserve;
@@ -190,29 +206,29 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
             }
             base=lo; size=hi-lo; state=0; perm=0; }
         else {
-            // 地址落在「当前宿主线程的栈」里：回报整段栈（状态 0xB = 栈）。SDK 初始化主线程记录时拿当时的 sp 查这里，把回报的区间当主线程栈；
-            // 之后 nn::os::GetCurrentStackInfo 会断言 sp 仍在那个区间里，不在就中止。原先对客体地址空间之外的地址一律回报「它所在的 4 KiB 页」，
-            // 主线程栈于是被记成一页——初始化时的 sp 与后来的 sp 是否同页，取决于宿主栈顶的绝对位置，而它随环境变量 / 启动参数总长移动（换个环境偶发启动即中止）。
-            // 暗黑这一版不调 GetCurrentStackInfo（main / subsdk0 没有导入它，SDK 内部也没有调用点；宿主垫 12 档环境变量长度都起得到主菜单），所以没踩到；回报「一页」本身是错的，照改。
-            // The address lies in "the current host thread's stack": report the whole stack (state 0xB = stack). When the SDK initializes the main thread record it queries here with the sp at that moment and takes the reported range as the main thread stack;
-            // later nn::os::GetCurrentStackInfo asserts that sp is still inside that range and aborts if not. Previously every address outside the guest address space was reported as "the 4 KiB page containing it",
-            // so the main thread stack was recorded as one page. Whether the sp at init and a later sp share a page depends on the absolute position of the host stack top, which moves with the total length of environment variables / launch arguments (a different environment occasionally aborts at startup).
-            // This Diablo build does not call GetCurrentStackInfo (main / subsdk0 do not import it and the SDK has no internal call site; the host reaches the main menu with 12 different environment padding lengths), so it was never hit; reporting "one page" is wrong in itself, so fix it anyway.
-            uint64_t top = (uint64_t)pthread_get_stackaddr_np(pthread_self()), ssz = pthread_get_stacksize_np(pthread_self());
-            if (addr < top && addr >= top - ssz) { base = top - ssz; size = ssz; state = 0xB/*Stack*/; perm = 3; }
-            else {
-                // np243：只把**确实装着代码**的地址报成 Code —— 已装载模块的映像范围（模块是单独 mmap 的，
-                // 不在 g_map 里，所以要走这里认）。
-                // 其余一律报 Unmapped。原先"未知地址一律报 Code 一页"是错的：SDK 建线程时会拿
-                // QueryMemory 从某个地址往下逐页找内存边界，若到处都报 Code 就永远找不到边界，
-                // 一路扫几十 GB 之后 panic（BotW 真机：svc 0x6 被刷屏、x2 每次减 0x1000，
-                // 最后 nn::os::detail::ThreadManager::CreateThread 里 Break reason=0）。
-                int inmod = 0;
-                for (int i = 0; i < g_nmod; i++)
-                    if (addr >= (uint64_t)g_mod[i].base && addr < (uint64_t)g_mod[i].base + g_mod[i].size) { inmod = 1; break; }
-                base = addr & ~0xFFFull; size = 0x1000;
-                if (inmod) { state = 3/*Code*/; perm = 5; } else { state = 0/*Unmapped*/; perm = 0; }
-            } }
+            // 地址在客体地址空间之外：只把**确实装着代码**的地址报成 Code（已装载模块的映像范围），
+            // 其余一律 Unmapped。原先"未知地址一律报 Code 一页"是错的 —— SDK 建线程时会拿
+            // QueryMemory 逐页找内存边界，到处是 Code 就永远找不到边界，一路扫几十 GB 后 panic
+            // （真机：svc 0x6 刷屏、x2 每次 -0x1000，最后 ThreadManager::CreateThread 里 Break）。
+            //
+            // np249：这里**不再**对"宿主栈地址"或"越界地址"做任何替身回答。理由（两条都真机踩过）：
+            //   ① 主线程现在真跑在客体 stack 区（main.c 的 run_guest_on_guest_stack），
+            //      sp 查询由上面的主栈分支如实回答，不需要替身；
+            //   ② 越界地址必须如实报 Unmapped/perm=0 —— 曾经把它答成 stack(perm=3)，
+            //      连**地址 0** 也被这样答，nnosInitialize 便以为 0 是合法结构体、去 ldp 它
+            //      ⇒ sdk+0x8c6b4 崩。
+            int inmod = 0;
+            for (int i = 0; i < g_nmod; i++)
+                if (addr >= (uint64_t)g_mod[i].base && addr < (uint64_t)g_mod[i].base + g_mod[i].size) { inmod = 1; break; }
+            base = addr & ~0xFFFull; size = 0x1000;
+            if (inmod) { state = 3/*Code*/; perm = 5; } else { state = 0/*Unmapped*/; perm = 0; }
+        }
+        // np247：首次 QueryMemory 打一次 x29 回溯 —— 建线程时有一轮"逐页扫内存"，
+        // 靠它才能确定是谁在扫（svc 的 lr 来自改写器尾调用蹦床，不可用）。
+        if (g_flag.imports) {
+            static int once;
+            if (!once++) { LOG("QueryMemory 首次调用 addr=%#llx → 回溯：", (unsigned long long)addr); dm_backtrace(regs[29]); }
+        }
         if (mi) { uint64_t *m=(uint64_t*)mi; m[0]=base; m[1]=size; ((uint32_t*)mi)[4]=state; ((uint32_t*)mi)[5]=0; ((uint32_t*)mi)[6]=perm; ((uint32_t*)mi)[7]=0; ((uint32_t*)mi)[8]=0; }
         regs[0] = 0; regs[1] = 0; return 0;
     }
@@ -271,6 +287,13 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         case I_IsApplication: v = 1; break;
         case I_UserExcAddr: v = 0; break;
         default: v = 0; break;
+        }
+        // np247：把客体实际问的 InfoType 和我们的回答打出来。
+        // 用途：AddressSpaceAllocator::AllocateSpace 返回 NULL（建线程时崩）最常见的原因是
+        // 「它要的区段 id 我们没实现，回 0 ⇒ 分配器范围为空」。
+        if (g_flag.imports) {
+            static unsigned char seen[256];
+            if (!seen[id & 0xff]) { seen[id & 0xff] = 1; LOG("GetInfo id=%llu -> %#llx", (unsigned long long)id, (unsigned long long)v); }
         }
         regs[0] = 0; regs[1] = v; return 0;
     }
