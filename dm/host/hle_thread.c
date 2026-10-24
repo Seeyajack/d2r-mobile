@@ -485,7 +485,14 @@ void svc_thread_dump(void) {
 
 int svc_thread(int num, uint64_t *regs) {
     { thr_t *me = pthread_getspecific(g_keythr); if (me) { me->last_svc = num; me->last_lr = regs[30]; me->nsvc++; } }
-    if (g_flag.thr && num != 0x0B) { thr_t *me = pthread_getspecific(g_keythr); LOG("[%#x] svc %#x x0=%#llx x1=%#llx x2=%#llx x3=%#llx", me ? me->handle : 0, num, regs[0], regs[1], regs[2], regs[3]); }
+    // np243：带上返回地址 —— 一轮"逐页扫内存"的 svc 只有靠 lr 才能定位是客体的哪个函数在扫
+    // np243：lr 直接翻成「模块+偏移」，省得再猜基址
+    if (g_flag.thr && num != 0x0B) {
+        thr_t *me = pthread_getspecific(g_keythr);
+        module_t *mm = module_of((void *)regs[30]);
+        LOG("[%#x] svc %#x x0=%#llx x1=%#llx x2=%#llx x3=%#llx lr=%s+%#llx", me ? me->handle : 0, num,
+            regs[0], regs[1], regs[2], regs[3], mm ? mm->name : "?", mm ? regs[30] - (uint64_t)mm->base : regs[30]);
+    }
     switch (num) {
     case 0x08: {  // CreateThread(→w1 句柄; x1 入口, x2 参数, x3 栈顶, w4 优先级, w5 核) | CreateThread(→w1 handle; x1 entry, x2 argument, x3 stack top, w4 priority, w5 core)
         thr_t *t = calloc(1, sizeof *t);

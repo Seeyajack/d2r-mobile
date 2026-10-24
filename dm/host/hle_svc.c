@@ -200,7 +200,19 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
             // This Diablo build does not call GetCurrentStackInfo (main / subsdk0 do not import it and the SDK has no internal call site; the host reaches the main menu with 12 different environment padding lengths), so it was never hit; reporting "one page" is wrong in itself, so fix it anyway.
             uint64_t top = (uint64_t)pthread_get_stackaddr_np(pthread_self()), ssz = pthread_get_stacksize_np(pthread_self());
             if (addr < top && addr >= top - ssz) { base = top - ssz; size = ssz; state = 0xB/*Stack*/; perm = 3; }
-            else { base=addr & ~0xFFFull; size=0x1000; state=3/*Code*/; perm=5; } }
+            else {
+                // np243：只把**确实装着代码**的地址报成 Code —— 已装载模块的映像范围（模块是单独 mmap 的，
+                // 不在 g_map 里，所以要走这里认）。
+                // 其余一律报 Unmapped。原先"未知地址一律报 Code 一页"是错的：SDK 建线程时会拿
+                // QueryMemory 从某个地址往下逐页找内存边界，若到处都报 Code 就永远找不到边界，
+                // 一路扫几十 GB 之后 panic（BotW 真机：svc 0x6 被刷屏、x2 每次减 0x1000，
+                // 最后 nn::os::detail::ThreadManager::CreateThread 里 Break reason=0）。
+                int inmod = 0;
+                for (int i = 0; i < g_nmod; i++)
+                    if (addr >= (uint64_t)g_mod[i].base && addr < (uint64_t)g_mod[i].base + g_mod[i].size) { inmod = 1; break; }
+                base = addr & ~0xFFFull; size = 0x1000;
+                if (inmod) { state = 3/*Code*/; perm = 5; } else { state = 0/*Unmapped*/; perm = 0; }
+            } }
         if (mi) { uint64_t *m=(uint64_t*)mi; m[0]=base; m[1]=size; ((uint32_t*)mi)[4]=state; ((uint32_t*)mi)[5]=0; ((uint32_t*)mi)[6]=perm; ((uint32_t*)mi)[7]=0; ((uint32_t*)mi)[8]=0; }
         regs[0] = 0; regs[1] = 0; return 0;
     }
@@ -218,8 +230,20 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         module_t *mm = module_of((void *)regs[30]);
         static int nb;
         LOG("Break#%d reason=%#llx Result=%#x svc 位于 %s+%#llx", ++nb, regs[0], res, mm ? mm->name : "?", orig_addr);
+        // np242：panic 的载荷里带消息（nn::os::Break 的第 2/3 参），打出来才知道是哪个断言
+        if (regs[1] && regs[2]) {
+            char msg[257]; size_t n = regs[2] < 256 ? (size_t)regs[2] : 256;
+            memcpy(msg, (void *)regs[1], n); msg[n] = 0;
+            for (size_t k = 0; k < n; k++) if ((unsigned char)msg[k] < 0x20 || (unsigned char)msg[k] > 0x7e) msg[k] = '.';
+            LOG("Break 消息：%s", msg);
+        }
         dm_backtrace(regs[29]);
         if (regs[0] & 0x80000000ull) return 0;   // 仅通知，可继续 | notification only, can continue
+        // ⚠ 退出前必须把日志冲出去：LOG 走 stderr → 管道 → 泵线程 → hilog，
+        //   而 _exit() 不会等泵线程，最后几行（正好是 panic 原因）会被掐掉。
+        //   np242 真机踩过：只看到 exit code 42，看不到 Break 那行。
+        fflush(stderr);
+        usleep(150 * 1000);
         _exit(42);
     }
     case 0x1E: regs[0] = 0; regs[1] = guest_ns() * 12 / 625; return 0;   // GetSystemTick

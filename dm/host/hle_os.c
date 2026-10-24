@@ -121,13 +121,11 @@ uint64_t dm_entropy64(void) {
     uint64_t n = atomic_fetch_add(&g_detrng_n, 1) + 1; if (n == 1 || n % 1000 == 0) LOG("DM_DETCLOCK：确定熵第 %llu 次", (unsigned long long)n);
     return z;
 }
-// setlocale 一族（np240）：Horizon 的 LC_ALL 是掩码 0x7fffffff，宿主 libc（musl）的 LC_ALL 是 6，
-// 不换算宿主 libc 会以"类别非法"为由返回 NULL。所以进来的掩码先换算再接宿主。
-// ⚠ 注意：BotW 的 newlocale 是**客体 sdk 自己实现**的（shndx != 0），不会走到这里——
-//   这几条只对"把 newlocale 当导入"的游戏生效。留着是为了换游戏时不至于落空。
-//   真遇到 locale 相关崩溃，先用 dm/gfx/tools/import_slots.py --stub 确认那个桩到底是谁，
-//   不要凭"看起来像 locale 检查"去改客体代码（np241 踩过：把 __cxa_guard_acquire 当检查改掉，
-//   等于宣布所有惰性单例已构造，崩点只会往后挪）。
+// setlocale：客体静态构造器会调 setlocale(LC_ALL, "C") 探容量（BotW sdk 的 init_array 里就有）。
+// 没实现时它落在"未实现导入桩"上，桩返回 -1，客体把 -1 当 locale 指针存下来，
+// 后面 memset 那个"指针"就 SIGSEGV（np240 真机实测：memset(-1, 0, 0x40)）。
+// 另外 Horizon 的 LC_ALL 是掩码 0x7fffffff，宿主 libc（musl）的 LC_ALL 是 6——
+// 不换算的话宿主 libc 会以"类别非法"为由返回 NULL，照样崩。所以两边都要处理。
 HLE("setlocale", char *, h_setlocale, int category, const char *locale) {
     if ((unsigned)category == 0x7fffffff) category = LC_ALL;   // Horizon 的 LC_ALL 掩码 → 宿主 libc 的 LC_ALL
     char *r = setlocale(category, locale);
@@ -141,6 +139,76 @@ HLE("newlocale", void *, h_newlocale, int mask, const char *name, void *base) {
 }
 HLE("uselocale", void *, h_uselocale, void *l) { return uselocale(l); }
 HLE("freelocale", void, h_freelocale, void *l) { freelocale(l); }
+
+// ── C++ 静态构造守卫（np242）──
+// 客体 sdk 自带一份 __cxa_guard_acquire（sdk+0x2ee860），它内部先调 **导入** nn::os::LockMutex
+// 和 WaitConditionVariable。真机实测：守卫字节明明是 0（文件里也是 0），它却返回 0
+// ⇒ 调用方把静态对象当成"已构造"，指针字段还是 NULL ⇒ 崩在 ldr x0,[x0]
+// （BotW：locale::__global() 返回 0，sdk+0x29e0e4）。
+// 宿主这份只看守卫字节，不依赖客体的锁；用 HLE_FORCE 压过模块内定义（force 表先于 st_shndx 查）。
+static pthread_mutex_t g_guard_mu = PTHREAD_MUTEX_INITIALIZER;
+HLE_FORCE("__cxa_guard_acquire", "宿主实现 C++ 静态构造守卫（客体版本依赖 nn::os 锁，会误报已构造）",
+          int, h_guard_acquire, uint64_t *g) {
+    if (!g) return 1;
+    pthread_mutex_lock(&g_guard_mu);
+    unsigned char b = *(volatile unsigned char *)g;
+    pthread_mutex_unlock(&g_guard_mu);
+    if (g_flag.imports) LOG("guard_acquire %p 字节=%u -> %d", (void *)g, b, b == 0);
+    // DM_GUARD_FORCE=1（排障）：恒返回 1，用来区分"守卫被误判已构造"与"根本没走守卫"
+    if (getenv("DM_GUARD_FORCE")) return 1;
+    return b == 0;          // 1 = 该我构造；0 = 已经构造过
+}
+HLE_FORCE("__cxa_guard_release", "宿主实现 C++ 静态构造守卫：置已构造",
+          void, h_guard_release, uint64_t *g) {
+    if (!g) return;
+    if (g_flag.imports) LOG("guard_release %p", (void *)g);
+    pthread_mutex_lock(&g_guard_mu);
+    *(volatile unsigned char *)g = 1;
+    pthread_mutex_unlock(&g_guard_mu);
+}
+HLE_FORCE("__cxa_guard_abort", "宿主实现 C++ 静态构造守卫：放弃",
+          void, h_guard_abort, uint64_t *g) { (void)g; }
+
+// ── locale::__global()（np242）──
+// libc++ 的 std::locale 全局对象工厂。客体那份（sdk+0x29e018）走惰性构造：
+// 守卫字节 → 构造 → 把 __imp_ 指针写进静态区。真机上它返回了 0，调用方紧接着
+// `ldr x0,[x0]`（取 __imp_）就 SIGSEGV（sdk+0x29e0e4）。
+// 宿主这份直接给一个**始终存在**的静态 locale：只保证指针非空、__imp_ 非空。
+// 客体在这条路径上只做"把 __imp_ 拷进新对象"，不 deref __imp_ 的内容，所以够用；
+// 真要 use_facet 时再按需补（届时的报错会指出是哪个 facet）。
+static uint64_t g_locale_imp[8];                                   // 假 locale::__imp（先全零）
+static uint64_t g_locale_obj[2] = { (uint64_t)g_locale_imp, 0 };    // 假 std::locale（唯一成员 __imp_）
+// ⚠ np242 真机结论：**不要覆盖 locale::__global()**。
+// 之前它返回 0，是因为 malloc 恒失败（分配器 hook 没装）——客体构造 locale 时 operator new
+// 失败、指针没写进去，守卫却被释放了。分配器修好后客体自己的实现就能用。
+// 用假对象顶上去反而更糟：客体后续对 __imp_ 做 facet 查询会抛 bad_cast →
+// std::terminate → nn::os::Break(reason=0) → exit(42)（本轮实测）。
+// 这段代码留着当记录，真要启用时改成 HLE_FORCE 并把 __imp_ 做成完整 facet 表。
+#if 0
+static uint64_t g_locale_imp[8];
+static uint64_t g_locale_obj[2] = { (uint64_t)g_locale_imp, 0 };
+HLE_FORCE("_ZNSt3__16locale8__globalEv", "宿主实现 std::locale 全局对象",
+          void *, h_locale_global) {
+    return g_locale_obj;
+}
+#endif
+
+// ── 分配器（np242）──
+// 客体的 malloc（BotW 在 main+0x9b27a0）第一步先看一个**分配器 hook** [main+0x22d7230]：
+//     ldr x9,[0x22d7230]; cbz x9 → 直接返回 NULL
+// 这个 hook 本该由 rtld / libc 初始化时装好（真实系统里 rtld 跑 inits 之前就做了），
+// 宿主只调了 DT_INIT，没做那一步 ⇒ **所有 malloc 恒返回 NULL** ⇒ 客体 sdk 的
+// operator new 走失败分支，最终返回 0xffffffff 被当指针用 ⇒
+// memset(0xffffffff, 0, 0x80) 崩（sdk+0x32790c，np242 真机实测）。
+// 宿主这份直接接宿主 libc：全进程一个分配器，跨模块 free 也安全。
+// ⚠ 已知偏差：客体用 SetHeapSize 预留的那 3110 MB 就成了摆设，游戏改用宿主堆。
+//   真要吃满客体堆，正路是复刻 rtld 的 libc 初始化（装那个 hook），后续再做。
+HLE_FORCE("malloc", "宿主提供分配器（客体的 malloc 依赖未安装的 hook，恒返回 NULL）",
+          void *, h_malloc, size_t n) { return malloc(n); }
+HLE_FORCE("calloc", "宿主提供分配器", void *, h_calloc, size_t a, size_t b) { return calloc(a, b); }
+HLE_FORCE("realloc", "宿主提供分配器", void *, h_realloc, void *p, size_t n) { return realloc(p, n); }
+HLE_FORCE("free", "宿主提供分配器", void, h_free, void *p) { free(p); }
+HLE_FORCE("aligned_alloc", "宿主提供分配器", void *, h_aligned_alloc, size_t a, size_t n) { return aligned_alloc(a, n); }
 
 HLE("getentropy", int, g_getentropy, void *p, size_t n) {
     if (!detclock_cfg()) { arc4random_buf(p, n); return 0; }

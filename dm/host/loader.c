@@ -290,6 +290,12 @@ static void relocate(module_t *m) {
             //   所以单独一个开关，只在"要核对某个槽解析到哪"时开。
             static int relocs_log = -1;
             if (relocs_log < 0) relocs_log = getenv("DM_RELOCS") != NULL;
+            // 两个关键符号始终打（量小，排障必备）：C++ 静态构造守卫与 std::locale 全局对象
+            if (!relocs_log) {
+                const char *sn = m->strtab + s->st_name;
+                if (!strcmp(sn, "__cxa_guard_acquire") || !strcmp(sn, "_ZNSt3__16locale8__globalEv"))
+                    LOG("KEYRELOC %s slot=%#lx %s -> %#lx", m->name, r->r_offset, sn, (unsigned long)v);
+            }
             if (relocs_log)
                 LOG("reloc %s slot=%#lx type=%u %s -> %#lx", m->name, r->r_offset, type,
                     m->strtab + s->st_name, (unsigned long)v);
@@ -461,8 +467,14 @@ void load_modules(const char *dir, const char **names, int n) {
 // Plays the role of rtld's InitModules (rtld+0x830): call each module's DT_INIT in forward order of the load list.
 // The timing is decided by nn::init::Start: after nninitStartup and _init_libc2, before nnMain (the 4th argument callback of Start).
 void run_module_inits(void) {
+    // DM_GUARDDBG=1：跑各模块构造器前，读一下 sdk 的 locale 守卫字节（sdk+0x78f1e8）。
+    // 用途：确认"守卫字节在进函数时已非 0"是装载写脏还是别的构造器写脏（np242 排障）。
+    static int guarddbg = -1;
+    if (guarddbg < 0) guarddbg = getenv("DM_GUARDDBG") != NULL;
     for (int i = 0; i < g_nmod; i++) {
         module_t *m = &g_mod[i];
+        if (guarddbg && m->size > 0x78f1e8)
+            LOG("GUARDDBG %s+0x78f1e8 = %u", m->name, (unsigned)*(volatile uint8_t *)(m->base + 0x78f1e8));
         if (!m->init) continue;
         LOG("%s: DT_INIT +%#llx（init_array %llu 项）", m->name, m->init, m->init_arraysz / 8);
         ((void (*)(void))(m->base + m->init))();

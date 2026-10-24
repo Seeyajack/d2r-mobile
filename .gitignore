@@ -36,3 +36,6 @@ dm/ohos/app/entry/build.bak-*/
 # ===== DevEco 签名配置与构建输出（含签名信息/本机路径，且可再生）=====
 dm/ohos/app/build-profile.json5
 dm/ohos/app/out/
+
+# 通用库生成物（dist/make_dist.py 的产物）
+dist/out/

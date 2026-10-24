@@ -4,6 +4,7 @@
 // Crash state: prints the faulting address, pc, lr (converted to module-relative offsets) and the registers; dispatches page fault hooks.
 // Only signal handling itself lives here: diagnostic features (probes / UI messages / sampling) are in diag.c, and this file does not depend on them (the graphics unit tests link only this file).
 #include "dm.h"
+#include <string.h>
 #include "dm_uctx.h"
 #include <signal.h>
 #include <dlfcn.h>
@@ -138,6 +139,28 @@ static void on_crash(int sig, siginfo_t *si, void *uc_) {
         for (int i = 0; i < g_nfault_hook; i++) if (g_fault_hook[i](si->si_addr, is_write, uc)) return;
     }
     fprintf(stderr, "[dm] CRASH sig=%d", sig);
+    // DM_GUARDDBG=1：崩溃现场再读一次 sdk 的 locale 守卫（np242 排障：
+    // 装载后是 0、DT_INIT 期间被谁写成非 0，就能定案）
+    if (getenv("DM_GUARDDBG")) {
+        for (int i = 0; i < g_nmod; i++) {
+            module_t *m = &g_mod[i];
+            if (m->size > 0x78f1e8)
+                fprintf(stderr, " [guard %s+0x78f1e8=%u +0x78f1e0=%#llx]",
+                        m->name, (unsigned)*(volatile uint8_t *)(m->base + 0x78f1e8),
+                        (unsigned long long)*(volatile uint64_t *)(m->base + 0x78f1e0));
+            // 运行时字节：把 locale::__global 附近 64 字节打出来，和 patched.bin 比对
+            // （静态反汇编与实测对不上时，这是唯一能定案的手段）
+            if (m->size > 0x29e100 && !strcmp(m->name, "sdk")) {
+                const uint8_t *p = m->base + 0x29e000;
+                fprintf(stderr, "\n[dm] 运行时 %s+0x29e000:", m->name);
+                for (int k = 0; k < 0xc0; k++) {
+                    if (!(k % 16)) fprintf(stderr, "\n[dm]   %#06x:", 0x29e000 + k);
+                    fprintf(stderr, " %02x", p[k]);
+                }
+                fprintf(stderr, "\n");
+            }
+        }
+    }
     off("addr", (uint64_t)si->si_addr); off("pc", UC_PC(uc)); off("lr", UC_LR(uc));
     fprintf(stderr, " sp=%#llx\n", UC_SP(uc));
     for (int i = 0; i < 29; i++) fprintf(stderr, "x%d=%#llx%s", i, UC_X(uc, i), i % 6 == 5 ? "\n" : " ");
