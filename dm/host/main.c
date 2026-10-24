@@ -230,7 +230,10 @@ static void *guest_run_thread(void *a) {
 static int run_guest_on_guest_stack(void) {
     dm_guest_address_space_init();                        // 先把地址空间（含 stack 区）建好
     size_t cap = 0; uint8_t *stk = dm_guest_stack_region(&cap);
-    size_t use = 8u << 20;
+    // np254：8 MB 不够 —— 真机崩时 sp=0x5f3e3323e0 已落到栈底（0x5f3e33c000）**之下 40 KB**，
+    // 栈溢出后帧里的返回地址/函数指针全是垃圾，于是 blr 到宿主地址、addr=0x4。
+    // 栈区共 256 MB，给 32 MB 很宽裕（低端仍留 224 MB 给别名栈）。
+    size_t use = 32u << 20;
     if (!stk || cap < 2 * use) { LOG("【黄】客体栈区不足（%p +%zu），主线程仍用宿主栈", (void *)stk, cap); return 0; }
     uint8_t *lo = stk + cap - use;                        // 放在栈区尾部，低端留给别名栈分配
     if (mprotect(lo, use, PROT_READ | PROT_WRITE)) { LOG("【黄】主线程栈 mprotect 失败 errno=%d，退回宿主栈", errno); return 0; }

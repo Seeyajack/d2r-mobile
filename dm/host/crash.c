@@ -139,6 +139,21 @@ static void on_crash(int sig, siginfo_t *si, void *uc_) {
         for (int i = 0; i < g_nfault_hook; i++) if (g_fault_hook[i](si->si_addr, is_write, uc)) return;
     }
     fprintf(stderr, "[dm] CRASH sig=%d", sig);
+    // np254 临时探针（BotW 专属）：崩点 main+0x9fcfd8 的 blr x8 取自
+    //   x8 = *(main+0x227ff90) → *(main+0x22d7c30)
+    // 文件里这两处一个是 RELATIVE 槽、一个是全 0，运行时到底是什么值只能现场读。
+    // 定位完就删。
+    if (getenv("DM_DUMP_GLUE")) {
+        for (int i = 0; i < g_nmod; i++) {
+            module_t *m = &g_mod[i];
+            if (strcmp(m->name, "main") || m->size <= 0x22d7c40) continue;
+            uint64_t a = *(volatile uint64_t *)(m->base + 0x227ff90);
+            uint64_t b = *(volatile uint64_t *)(m->base + 0x22d7c30);
+            fprintf(stderr, " [glue main+0x227ff90=%#llx → main+0x22d7c30 内容=%#llx]",
+                    (unsigned long long)a, (unsigned long long)b);
+            break;
+        }
+    }
     // DM_GUARDDBG=1：崩溃现场再读一次 sdk 的 locale 守卫（np242 排障：
     // 装载后是 0、DT_INIT 期间被谁写成非 0，就能定案）
     if (getenv("DM_GUARDDBG")) {
