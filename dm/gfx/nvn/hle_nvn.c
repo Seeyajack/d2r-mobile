@@ -49,14 +49,14 @@
 // ---------- 槽表、跳板、未实现桩 ----------
 // ---------- Slot table, thunks, unimplemented stubs ----------
 typedef struct { _Atomic uint64_t cnt; void *fn; } nvn_slot_t;
-__attribute__((visibility("hidden"))) nvn_slot_t nvn_slot[NVN_NFUNC];   // ELF/PIC：隐藏可见性，nvn_thunks.S 里的 adrp/add 才能直接相对寻址（np237） 跳板按 i*16 访问，布局不可改 | The thunk accesses it by i*16; the layout must not change
+__attribute__((visibility("hidden"))) nvn_slot_t nvn_slot[NVN_NFUNC];   // np233：隐藏可见性 ⇒ 汇编里的 adrp/add 可直接相对寻址（PIC 共享库要求符号非抢占）
 _Static_assert(sizeof(nvn_slot_t) == 16, "跳板按 16 字节步长寻址");
 extern void *nvn_thunk[NVN_NFUNC];
 extern const char *nvn_names[NVN_NFUNC];
 extern void nvn_unimpl_entry(void);
 extern void nvn_prof_entry(void);
-__attribute__((visibility("hidden"))) void *nvn_real[NVN_NFUNC];               // 同上（np237） DM_NVN_PROF：计时包装调用的真实现 | DM_NVN_PROF: the real implementation called by the timing wrapper
-__attribute__((visibility("hidden"))) _Atomic uint64_t nvn_prof_ticks[NVN_NFUNC]; // 同上（np237） DM_NVN_PROF：各函数累计耗时（cntvct 计数） | DM_NVN_PROF: cumulative time of each function (cntvct counts)
+__attribute__((visibility("hidden"))) void *nvn_real[NVN_NFUNC];               // 同上（隐藏可见性）
+__attribute__((visibility("hidden"))) _Atomic uint64_t nvn_prof_ticks[NVN_NFUNC]; // 同上（隐藏可见性）
 static uint8_t g_unimpl_seen[NVN_NFUNC];
 
 uint64_t nvn_unimpl_c(nvn_slot_t *slot, uint64_t x0, uint64_t x1, uint64_t x2) {
@@ -544,7 +544,13 @@ NVN(nvnQueueFinish, void, NVNqueue *q) { (void)q; x_drain(); mtl_finish(); }
 
 // ---------- 命令缓冲：录进游戏的命令内存，提交时执行 CPU 可见副作用 ----------
 // ---------- Command buffer: record into the game's command memory, perform CPU-visible side effects at submit ----------
-#define CB(c) ((cmd_t *)(c))
+// np255：游戏在某些路径上会传**空的命令缓冲区**。真机现场：main+0x9fcfd4 `mov x2,xzr` 之后
+// blr 到 nvnCommandBufferAddControlMemory / AddCommandMemory，x0 = [x19+0x150] = 0；
+// 随后 cmd_new_segment(CB(NULL)) 读 NULL+0x4 崩（pc = 宿主 cmd_new_segment+0x24）。
+// 这里统一兜住：c 为空就给一个静态替身 —— 命令照录但丢弃（此时游戏本来也没有可用的命令缓冲区）。
+// 与上游"命令内存池空了就补宿主段"同一类兜底思路：这是我们要接住的状态，不是游戏的错误。
+static cmd_t g_null_cb;
+#define CB(c) ((c) ? (cmd_t *)(c) : &g_null_cb)
 #define OP_RESERVE 24                             // 段尾永远留够一条 JUMP / END | Always keep enough room at the segment end for one JUMP / END
 
 NVN(nvnCommandBufferInitialize, NVNboolean, NVNcommandBuffer *c, NVNdevice *d) {
@@ -1599,3 +1605,61 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     if (f >= 8 && slow_on()) slow_emit(f - 8);
     prev_out = now_ns();
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// np256：NVN v2 的 NVNbuffer 家族 —— 宿主原来**一个都没实现**（表里有名字、全是 unimpl）。
+// D2R 用的是内存池 + nvnMemoryPoolGetBufferAddress，BotW 用的是 buffer builder，所以上游没做。
+//
+// 语义（NVN v2）：buffer 自己不持有内存，它只是"内存池里的一段窗口"：
+//   nvnBufferBuilderSetStorage(builder, pool, offset, size) → nvnBufferInitialize(buffer, builder)
+//   nvnBufferGetAddress(buffer, off) = pool->mem + builderOffset + off
+// 与既有约定一致：NVNbufferAddress 就是宿主内存指针（nvnMemoryPoolGetBufferAddress 也这么答）。
+//
+// 为什么用**宿主侧边表**而不是写进游戏给的 NVNbuffer：那是游戏分配的不透明结构，
+// 我们不知道它多大，写进去会越界。边表按对象指针查即可。
+typedef struct { void *dev, *pool; ptrdiff_t off; size_t size; } buf_builder_t;
+#define BUF_MAX 512
+static struct { const void *obj; void *mem; ptrdiff_t off; size_t size; } g_buf[BUF_MAX];
+static int g_nbuf, g_buf_warned;
+static uint8_t g_buf_scratch[2u << 20];          // 兜底：游戏传空对象时给它一块能用的内存
+
+static int buf_find(const void *obj) {
+    for (int i = 0; i < g_nbuf; i++) if (g_buf[i].obj == obj) return i;
+    return -1;
+}
+NVN_NOPROTO(nvnBufferBuilderSetDefaults, void, void *b) { memset(b, 0, sizeof(buf_builder_t)); }
+NVN_NOPROTO(nvnBufferBuilderSetDevice, void, void *b, void *d) { ((buf_builder_t *)b)->dev = d; }
+NVN_NOPROTO(nvnBufferBuilderSetStorage, void, void *b, const void *pool, ptrdiff_t off, size_t n) {
+    buf_builder_t *bb = (buf_builder_t *)b; bb->pool = (void *)pool; bb->off = off; bb->size = n;
+}
+NVN_NOPROTO(nvnBufferInitialize, int, void *b, const void *bd) {
+    const buf_builder_t *bb = (const buf_builder_t *)bd;
+    void *mem = bb->pool ? (void *)((const pool_t *)bb->pool)->mem : NULL;
+    int i = buf_find(b);
+    if (i < 0 && g_nbuf < BUF_MAX) { i = g_nbuf++; g_buf[i].obj = b; }
+    if (i >= 0) { g_buf[i].mem = mem; g_buf[i].off = bb->off; g_buf[i].size = bb->size; }
+    return 1;                                    // NVN_TRUE
+}
+NVN_NOPROTO(nvnBufferFinalize, void, void *b) { int i = buf_find(b); if (i >= 0) g_buf[i].obj = NULL; }
+NVN_NOPROTO(nvnBufferGetAddress, uint64_t, const void *b, ptrdiff_t off) {
+    int i = buf_find(b);
+    uint8_t *m = (i >= 0) ? (uint8_t *)g_buf[i].mem : NULL;
+    ptrdiff_t base = (i >= 0) ? g_buf[i].off : 0;
+    if (!m) {                                    // 空缓冲区/没走 builder：给暂存区，别把 0 当地址
+        if (!g_buf_warned) { g_buf_warned = 1; LOG("【黄】nvnBufferGetAddress 拿到空缓冲区（b=%p）⇒ 暂存区兜底", b); }
+        m = g_buf_scratch;
+    }
+    return (uint64_t)(uintptr_t)(m + base + off);
+}
+NVN_NOPROTO(nvnBufferGetSize, size_t, const void *b) { int i = buf_find(b); return i >= 0 ? g_buf[i].size : 0; }
+NVN_NOPROTO(nvnBufferGetMemoryPool, void *, const void *b) { (void)b; return NULL; }
+NVN_NOPROTO(nvnBufferGetMemoryOffset, ptrdiff_t, const void *b) { int i = buf_find(b); return i >= 0 ? g_buf[i].off : 0; }
+NVN_NOPROTO(nvnBufferMap, void *, void *b) { (void)b; return NULL; }
+NVN_NOPROTO(nvnBufferFlushMappedRange, void, const void *b, ptrdiff_t o, size_t n) { (void)b; (void)o; (void)n; }
+NVN_NOPROTO(nvnBufferInvalidateMappedRange, void, const void *b, ptrdiff_t o, size_t n) { (void)b; (void)o; (void)n; }
+NVN_NOPROTO(nvnBufferGetDebugID, int, const void *b) { (void)b; return 0; }
+NVN_NOPROTO(nvnBufferSetDebugLabel, void, void *b, const char *l) { (void)b; (void)l; }
+NVN_NOPROTO(nvnBufferBuilderGetDevice, void *, const void *b) { return ((const buf_builder_t *)b)->dev; }
+NVN_NOPROTO(nvnBufferBuilderGetMemoryPool, void *, const void *b) { return ((const buf_builder_t *)b)->pool; }
+NVN_NOPROTO(nvnBufferBuilderGetMemoryOffset, ptrdiff_t, const void *b) { return ((const buf_builder_t *)b)->off; }
+NVN_NOPROTO(nvnBufferBuilderGetSize, size_t, const void *b) { return ((const buf_builder_t *)b)->size; }
