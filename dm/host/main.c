@@ -1,6 +1,7 @@
 // 引导：装模块后，照 SDK 里 nn::init::Start（sdk+0x2b0470）的真实顺序初始化 SDK 运行时，再进 nnMain。
 // Bootstrap: after loading the modules, initialize the SDK runtime in the real order of nn::init::Start (sdk+0x2b0470) in the SDK, then enter nnMain.
 #include "dm.h"
+#include <string.h>
 #include <errno.h>
 #include <sys/mman.h>
 #include "front.h"
@@ -56,6 +57,27 @@ static void game_seed_maybe(void) {
     LOG("DM_GAME_SEED：main+0x20a0074 ← %#x", *p);
 }
 
+// np251：替游戏补一个"锁单例对象"（BotW 专属的临时措施）。
+// 现场：F_wait（main+0x9feb38）一进来就 ldr x21,[main+0x227df98]（重定位槽 → main+0x22d9198）
+//       → ldr x0,[x21] → 那 8 字节是 0 → 接着 ldr x1,[x0,#0x20]; br x1（调 lock）⇒ addr=0x20 SIGSEGV。
+// 判定：main+0x22d9198 在 .bss 里、全二进制没有直接写入点 ⇒ **游戏没创建这个锁对象**
+//       （它本该在更早的初始化里建，我们跳过/没走到那一步）。
+// 做法：宿主造一个形状相同的对象（+0x20 放一个 void(int) 函数指针，1=lock / 0=unlock），
+//       只在这 8 字节仍是 0 时装上；游戏以后自己建了就会被覆盖，不冲突。
+// ⚠ 这是**游戏专属**的救急补丁（硬编码偏移），换游戏要重新判定，不能进通用库。
+static pthread_mutex_t g_botw_lock = PTHREAD_MUTEX_INITIALIZER;
+static void botw_lock_fn(int v) { if (v) pthread_mutex_lock(&g_botw_lock); else pthread_mutex_unlock(&g_botw_lock); }
+static struct { uint64_t pad[4]; void (*fn)(int); } g_botw_lock_obj = { {0, 0, 0, 0}, botw_lock_fn };
+static void install_botw_fakelock(void) {
+    module_t *m = NULL;
+    for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) { m = &g_mod[i]; break; }
+    if (!m || m->size <= 0x22d9198) return;
+    uint64_t *slot = (uint64_t *)(m->base + 0x22d9198);
+    if (*slot) { LOG("锁单例 main+0x22d9198 已有对象 %p，不接管", (void *)(uintptr_t)*slot); return; }
+    *slot = (uint64_t)(uintptr_t)&g_botw_lock_obj;
+    LOG("【黄】锁单例 main+0x22d9198 为 0 ⇒ 装上宿主锁对象 %p（游戏没创建它）", (void *)&g_botw_lock_obj);
+}
+
 static void guest_main(void) {
     guest_thread_init();
     { void inflate_bench_maybe(void); inflate_bench_maybe(); }   // DM_INFLATE_BENCH 测试模式（诊断用，跑完退出） | DM_INFLATE_BENCH test mode (for diagnostics, exits when done)
@@ -66,6 +88,7 @@ static void guest_main(void) {
     // Copy Start step by step: _init_libc1 = __nnmusl_init_locks (initializes the stdio etc. locks as recursive locks; skipping it self-deadlocks on nested locking in putc) + __init_ssp.
     // The three callbacks passed in by rtld: A only sets an rtld flag (skipped), B = each module's DT_INIT (before nnMain), C = destructors (not done)
     ((fn0)req("_init_libc0"))();
+    install_botw_fakelock();   // np251：补游戏没建的锁单例（见函数注释）
     LOG(">>> nnosInitialize"); ((fn2)req("nnosInitialize"))(hmain, 0);
     ((fn0)req("_init_libc1"))();
     LOG(">>> nninitInitializeSdkModule"); ((fn0)req("nninitInitializeSdkModule"))();
