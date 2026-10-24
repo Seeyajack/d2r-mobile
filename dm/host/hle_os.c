@@ -215,3 +215,31 @@ HLE("getentropy", int, g_getentropy, void *p, size_t n) {
     for (size_t i = 0; i < n; i += 8) { uint64_t v = dm_entropy64(); memcpy((uint8_t *)p + i, &v, n - i < 8 ? n - i : 8); }
     return 0;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// np252：nn::sm（服务管理器）初始化 —— 宿主没有 sm 服务，空转。
+//
+// 现场：工人线程跑起来后，线程里 nn::sm::Initialize 的 IPC 那一步（sdk+0x342164，
+// sf::hipc::InitializeHipcServiceResolution）返回错误 ⇒ 走 error 分支 ⇒ AbortImpl。
+// 我们不需要 sm：各服务（fs / hid / audio / account / time …）都是**按 API 名字**在宿主
+// 直接接管的（HLE_FORCE），根本不走 sm 的 IPC。所以把 Initialize 变成"成功空转"。
+//
+// ⚠ 如果后面出现 nn::sm::GetServiceHandle 被调用（说明有服务没被 HLE，要去找 sm 要端点），
+//   那时再单独处理 —— 不要在这里顺手把 GetServiceHandle 也答成功，会把问题推远。
+HLE_FORCE("_ZN2nn2sm10InitializeEv", "服务管理器初始化：宿主无 sm 服务，成功空转（各服务按 API 名接管）",
+          Result, h_sm_init, void) { return 0; }
+HLE_FORCE("_ZN2nn2sm20InitializeForManagerEv", "同上（manager 变体）", Result, h_sm_initmgr, void) { return 0; }
+HLE_FORCE("_ZN2nn2sm8FinalizeEv", "服务管理器退出：空转", void, h_sm_fin, void) {}
+// np252 续：向 sm 要服务端点 —— 发假句柄，并把**服务名**记下来。
+// 这一步能同时办两件事：① 解开 sm::GetServiceHandle 的空指针崩（hid debug pad 初始化在要端点）；
+// ② 把"到底哪些服务没被宿主按 API 名接管"直接打印出来（比一个个试错快得多）。
+HLE_FORCE("_ZN2nn2sm16GetServiceHandleEPNS_3svc6HandleEPKcm",
+          "向 sm 要服务端点：宿主无 sm，给假句柄并记录服务名",
+          Result, h_sm_geth, uint32_t *out, const char *name, size_t len) {
+    static uint32_t next = 0x5000;
+    uint32_t h = next++;
+    if (out) *out = h;
+    LOG("【黄】sm::GetServiceHandle(\"%.*s\") -> 假句柄 %#x（宿主需按需 HLE 这个服务）",
+        (int)(len > 63 ? 63 : (int)len), name ? name : "?", h);
+    return 0;
+}

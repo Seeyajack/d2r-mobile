@@ -422,6 +422,12 @@ static void fill(NpadState *s, uint32_t id, uint32_t style) {
 }
 
 HLE_FORCE("_ZN2nn3hid14InitializeNpadEv", "连 hid 服务；宿主从 dm_input 取输入", void, h_hid_InitNpad, void) {}
+// np253：debug pad 入口，BotW 会调（D2R 不调，所以上游的 hle_hid.c 漏了它）。
+// 不接管就会走客体自己的 hid 初始化：InitializeDebugPad → SharedMemoryAccessor::Activate
+// → CMIF IPC `_nn_sf_sync_CreateAppletResource` → 宿主没有 IPC 应答层 ⇒ panic
+// （真机 bt: sdk+0x23e920 / 0x229688 / 0x220a94）。debug pad 只用于开发调试，空转即可。
+HLE_FORCE("_ZN2nn3hid18InitializeDebugPadEv", "debug pad：开发调试用，宿主空转（不走 hid IPC）", void, h_hid_InitDpad, void) {}
+HLE_FORCE("_ZN2nn3hid16FinalizeDebugPadEv", "同上", void, h_hid_FinDpad, void) {}
 HLE_FORCE("_ZN2nn3hid21InitializeTouchScreenEv", "连 hid 服务；触屏输入由前端另接", void, h_hid_InitTouch, void) {}
 HLE_FORCE("_ZN2nn3hid22SetSupportedNpadIdTypeEPKjm", "支持的手柄号；宿主固定", void, h_hid_SetIds, const uint32_t *ids, uint64_t n) { (void)ids; (void)n; }
 // BitFlagSet<32> 按值传在 w 寄存器
