@@ -7,7 +7,7 @@
   就得到一张**按需求排序**的 M4 工作单——不用再凭感觉写（写完又可能没人用）。
 
 用法：
-  python dm/tools/nvn_coverage.py --game F:/switch-work/botw/rewritten/main.patched.bin [--md out.md]
+  python tools/ohos/nvn_coverage.py --game F:/switch-work/botw/rewritten/main.patched.bin [--md out.md]
 """
 import argparse
 import os

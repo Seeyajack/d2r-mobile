@@ -347,7 +347,7 @@ def emit_header(path):
     # 只算 RGB：与设备侧 tex_psnr_rgb 同一口径（alpha 在真贴图里多是遮罩，混进来会掩盖颜色误差）。
     # RGB only, matching the device-side tex_psnr_rgb -- mixing alpha in would mask colour error.
     p = psnr(ref_all, back_all, chans=(0, 1, 2))
-    hdr = f'''// 生成文件，**不要手改**：python dm/tools/astc_ref.py --emit-header
+    hdr = f'''// 生成文件，**不要手改**：python tools/ohos/astc_ref.py --emit-header
 // Generated file -- do not edit by hand; see the command above.
 //
 // 3.4-E（C3 设备接线）的期望表：左边是"游戏给的 BC3 字节"（线性块序），右边是同一条链在参考实现

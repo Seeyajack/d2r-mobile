@@ -100,8 +100,9 @@
 # ── L1/L2：鸿蒙外壳（ArkTS + N-API）──
 + dm/harmony/**
 
-# ── L1：改写器与离线工具 ──
+# ── L1：改写器（上游） + 我们自己的分析脚本 ──
 + dm/tools/**
++ tools/ohos/**
 
 # ── 构建必需的第三方与垫片 ──
 + dm/third_party/libdeflate/**

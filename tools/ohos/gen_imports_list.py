@@ -57,7 +57,7 @@ cat = collections.Counter(domain(n) for _, n, _ in rows)
 L = []
 L.append('# 旷野之息 main 模块的外部依赖清单（%d 项，PLT 重定位表全量）' % len(rows))
 L.append('')
-L.append('> 生成：`dm/tools/gen_imports_list.py`（读模块自己的动态段 DT_JMPREL/DT_SYMTAB/DT_STRTAB）。')
+L.append('> 生成：`tools/ohos/gen_imports_list.py`（读模块自己的动态段 DT_JMPREL/DT_SYMTAB/DT_STRTAB）。')
 L.append('> 这些槽在数据段，等着宿主填：**先打记录型存根（跑起来看要什么），再按崩点逐个实现**。')
 L.append('')
 L.append('## 重定位总览')
